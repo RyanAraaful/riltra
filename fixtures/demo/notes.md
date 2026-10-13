@@ -2,5 +2,5 @@
 
 # Demo note (self-authored)
 
-Decision: keep M0 dependency-free so the license audit is trivial.
+Decision: keep the workspace dependency-free so the license audit stays trivial.
 Status: active. Evidence: this file + Cargo.toml with zero dependencies.

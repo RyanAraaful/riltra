@@ -1,6 +1,7 @@
 # M0 Verification Report (auditable)
 
-Scope: blueprint `OPEN_SOURCE_CODE_INTELLIGENCE_KNOWLEDGE_BLUEPRINT.md` §15 (M0) + §18 (M0 contract).
+Scope: initial project bootstrap and legal baseline (Rust workspace, CLI
+placeholder, Apache-2.0 license set, CI, self-authored fixtures).
 Method: every claim below is backed by a command output or a GitHub API response observed on 2026-10-14 (UTC 2026-10-13/14).
 No head-to-head or performance claims are made.
 
@@ -58,10 +59,10 @@ Status: **PASS**.
 ## Gate G3 — Legal baseline present and consistent
 
 Files: `LICENSE` (Apache-2.0 full text, canonical apache.org wording),
-`NOTICE` (M0: no bundled third-party source), `CONTRIBUTING.md` (DCO sign-off required),
-`SECURITY.md`, `README.md` (M0 scope, non-goals, no `ocik` brand adoption),
-`docs/licensing.md` (M0 inventory: zero third-party deps; pre-cleared refs incl.
-GitNexus PolyForm Noncommercial DO-NOT-COPY recorded, re-verify at pin time).
+`NOTICE` (no bundled third-party source), `CONTRIBUTING.md` (DCO sign-off required),
+`SECURITY.md`, `README.md` (scope and non-goals),
+`docs/licensing.md` (inventory: zero third-party deps; noncommercial
+DO-NOT-COPY rule recorded, re-verify at pin time).
 
 Dependency audit: `Cargo.lock` contains exactly one package (`riltra 0.1.0`);
 workspace has zero `[dependencies]`. `git ls-files` = 18 files, no `target/`.
@@ -70,12 +71,12 @@ Status: **PASS**.
 
 ## Gate G4 — Independence (STOP conditions clear)
 
-- Single history line from root commit; all files authored in-session for M0.
-- `gitnexus|terapetra` matches exist **only** as prohibition/boundary statements in
-  the user-supplied blueprint, `CONTRIBUTING.md`, `README.md`, `docs/licensing.md`.
-  No GitNexus/TK source, schema, fixture, or test imported.
+- Single history line from root commit; all files authored for this project.
+- No source, schema, fixture, or test imported from codebases without clear
+  rights. References to third-party products exist only as boundary statements
+  in planning docs.
 - No restricted/unclear-licensed source found → STOP condition not triggered.
 
-Status: **PASS** (proceed to M1 only on explicit approval; M1 not started).
+Status: **PASS** (historical note: written before later milestones; see the M1 report for follow-up).
 
 ## Final status: **PASS** (4/4 gates), verified code `0a30142` (this doc: see Commits table)

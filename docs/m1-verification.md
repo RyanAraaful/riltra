@@ -1,15 +1,15 @@
 # M1 Verification Report (auditable)
 
-Scope: blueprint `OPEN_SOURCE_CODE_INTELLIGENCE_KNOWLEDGE_BLUEPRINT.md` §15 (M1) +
-backlog #2/#3. Follow-up hardening of M1 at code commit `1dcedba`
+Scope: native CLI plus repository registry milestone (register/list commands,
+Git/worktree fingerprint, path security, ignore policy, deterministic JSON).
+Follow-up hardening at code commit `1dcedba`
 (this doc committed separately; doc-only commits never change gates).
 Method: TDD red→green locally (Rust 1.99.0, Windows); every claim backed by a
-test name or command output below. No M2 code. No push without approval, so the
-CI gate below is PENDING, not claimed.
+test name or command output below. No parser/graph/knowledge/MCP code.
 
-## Blueprint acceptance → evidence
+## Milestone acceptance → evidence
 
-| # | Blueprint M1 requirement | Evidence | Status |
+| # | Milestone requirement | Evidence | Status |
 |---|---|---|---|
 | A1 | `init`, `repo list` register + machine-readable JSON | `tests/cli.rs:init_and_list_round_trip` (round-trip, idempotent re-add, sorted `{"repos":[...]}`) | PASS (local) |
 | A2 | `repo status`: Git fingerprint (HEAD/branch/dirty/untracked/worktree) | `git::fingerprints_clean_repo_with_branch`, `detects_dirty_and_untracked`, `detects_linked_worktree`, `tests/cli.rs:status_git_repo_reports_head_and_branch` | PASS (local) |

@@ -27,8 +27,9 @@ dependencies beyond itself:
 
 - **Repository registry** — register local project roots (`init`) and list
   them as deterministic JSON (`repo list`).
-- **Git fingerprint** — per repository: HEAD commit, branch, dirty/untracked
-  state, worktree detection, and ignore-file summary (`repo status`).
+- **Git fingerprint** (requires a Git executable) — per repository: HEAD commit,
+  branch, dirty/untracked state, worktree detection, and ignore-file summary
+  (`repo status`).
 - **Health checks** — path confinement, record integrity, and git readability
   checks with explicit pass/fail (`doctor`).
 - **Machine-readable output** — stable JSON with fixed key order, meaningful
@@ -37,20 +38,23 @@ dependencies beyond itself:
 
 ## Quick start
 
-Prerequisites: a stable Rust toolchain (and `git` if you want fingerprints of
-Git repositories). No releases are published yet — build from source:
+Prerequisites: a stable Rust toolchain and `git`. No releases are published
+yet — build from source:
 
 ```powershell
-cargo run -q -p riltra -- init --repo D:\Projects\sample
+git clone https://github.com/RyanAraaful/riltra.git
+cd riltra
+
+cargo run -q -p riltra -- init --repo . --name riltra
 cargo run -q -p riltra -- repo list
-cargo run -q -p riltra -- repo status --repo sample
-cargo run -q -p riltra -- doctor --repo sample
+cargo run -q -p riltra -- repo status --repo riltra
+cargo run -q -p riltra -- doctor --repo riltra
 ```
 
 `repo status` prints one JSON line per repository, for example (trimmed):
 
 ```json
-{"name":"sample","root":"D:\\Projects\\sample","git":{"present":true,"valid":true,"head":"…","branch":"main","dirty":false,"untracked":0}}
+{"name":"riltra","root":"…","git":{"present":true,"valid":true,"head":"…","branch":"main","dirty":false,"untracked":0}}
 ```
 
 Notes:
@@ -58,6 +62,9 @@ Notes:
 - The registry lives in `%APPDATA%\riltra` (Windows) or `~/.config/riltra`
   (Linux/macOS). Set `RILTRA_HOME` to point it elsewhere (useful for scripts
   and tests).
+- Git fingerprints need a Git executable: without one, `init` and `repo list`
+  still work, while `repo status` reports `valid:false` and `doctor` flags the
+  missing executable — nothing is silently faked.
 - Run `riltra --help` for the full command list.
 
 ## Roadmap (not yet implemented)
