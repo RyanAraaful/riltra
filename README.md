@@ -35,6 +35,10 @@ dependencies beyond itself:
 - **Machine-readable output** — stable JSON with fixed key order, meaningful
   exit codes (`0` ok, `2` usage error, `3` repository/data error), and an
   optional `.riltraignore` file per repository.
+- **Syntax baseline** — per-file definitions, imports, and unresolved call
+  candidates with line/column spans and byte offsets for Python, JavaScript,
+  TypeScript, Rust, C, and C++ (`scan`); other extensions are reported as
+  unsupported, never guessed.
 
 ## Quick start
 
@@ -49,6 +53,7 @@ cargo run -q -p riltra -- init --repo . --name riltra
 cargo run -q -p riltra -- repo list
 cargo run -q -p riltra -- repo status --repo riltra
 cargo run -q -p riltra -- doctor --repo riltra
+cargo run -q -p riltra -- scan --repo riltra --path crates/cli/src/main.rs
 ```
 
 `repo status` prints one JSON line per repository, for example (trimmed):
