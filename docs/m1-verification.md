@@ -20,7 +20,7 @@ CI gate below is PENDING, not claimed.
 | A7 | repo isolation proven | `repos_are_isolated_by_name`, `name_clash_across_roots_is_rejected` | PASS (local) |
 | A8 | ignore policy | `ignore::loads_file…`, `matches_exact_and_dir_prefix_only`, status carries `ignore` counts | PASS (local) |
 | A9 | path security | name validation, canonical records, canonical-match on status (gap 1), doctor checks | PASS (local) |
-| A10 | fmt/check/clippy/test green + CI Windows/Linux/macOS | local: fmt exit 0, check ok, clippy `-D warnings` exit 0, 39 unit + 14 integration pass. CI: **PENDING — push withheld for approval** | LOCAL PASS / CI PENDING |
+| A10 | fmt/check/clippy/test green + CI Windows/Linux/macOS | local: fmt exit 0, check ok, clippy `-D warnings` exit 0, 39 unit + 14 integration pass. CI run8 (`be762f2`): windows/ubuntu/macos `completed+success` (jobs API, 2026-10-14) | PASS |
 
 ## Audit gaps (this change) — red→green
 
@@ -58,8 +58,9 @@ CI gate below is PENDING, not claimed.
 - No validation weakened: fixes strictly narrow acceptance (new rejections, no new allowances).
 - Exit codes unchanged: 0 ok, 2 usage, 3 repository/data.
 
-## Final status: **BLOCKED** — local gates PASS (53/53), CI gate PENDING push approval
+## Final status: **PASS** — local gates PASS (53/53), CI run8 PASS (3/3 OS)
 
-- Verified code commit: `1dcedba` (`fix: M1 hardening per audit …`), local only.
-- Next step needs approval: `git push origin master` → CI run → this doc amended with run number.
+- Verified code commit: `1dcedba` (`fix: M1 hardening per audit …`).
+- CI evidence: run8 on `be762f2` (doc commit), windows/ubuntu/macos success.
+  Push approved by owner; remote HEAD tracks local.
 - M2 not started.
