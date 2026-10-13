@@ -9,9 +9,12 @@ No head-to-head or performance claims are made.
 | Commit | Message | Author |
 |---|---|---|
 | `d1af757` | chore: M0 open-source bootstrap and legal baseline | rnafulh-wq <terapetralabs@gmail.com> |
-| `0a30142` (HEAD) | ci: run cargo check --locked to cover blueprint M0 gate | rnafulh-wq <terapetralabs@gmail.com> |
+| `0a30142` | ci: run cargo check --locked to cover blueprint M0 gate | rnafulh-wq <terapetralabs@gmail.com> |
+| `61608d4` | docs: record auditable M0 verification report (this file, v1) | rnafulh-wq <terapetralabs@gmail.com> |
 
-Working tree at verification time: clean (`git status --short` empty).
+Verified code state: `0a30142`. Commits after it (`61608d4`, this clarification)
+are documentation-only and do not change code, workflow, or fixtures, so gates
+stay valid. Working tree at verification time: clean (`git status --short` empty).
 `git ls-remote origin`: HEAD and `refs/heads/master` both `0a30142` — local == remote.
 
 ## Gate G1 — Rust workspace compiles, fmt/check/test green (Windows local)
@@ -39,7 +42,8 @@ Workflow: `.github/workflows/ci.yml` (fmt, check, clippy, test, 3 CLI smokes), m
 | run1 (`38459223579`) | `2d886ea` | success | success | success |
 | run2 (`38459224942`) | `2d886ea` | success | success | success |
 | run3 (`38460006086`) | `d1af757` | success | success | success |
-| run4 (HEAD) | `0a30142` | success | success | success |
+| run4 (HEAD at writing) | `0a30142` | success | success | success |
+| run5 | `61608d4` | success | success | success |
 
 Source: `GET /repos/RyanAraaful/riltra/actions/runs/{id}/jobs` — every job
 `status=completed`, `conclusion=success` on all three runs covering both SHAs and HEAD.
@@ -74,4 +78,4 @@ Status: **PASS**.
 
 Status: **PASS** (proceed to M1 only on explicit approval; M1 not started).
 
-## Final status: **PASS** (4/4 gates), HEAD `0a30142`
+## Final status: **PASS** (4/4 gates), verified code `0a30142` (this doc: see Commits table)
