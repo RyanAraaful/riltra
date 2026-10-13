@@ -42,6 +42,13 @@ CI gate below is PENDING, not claimed.
    name clash, corrupt gitfile — all in `tests/cli.rs`; unicode round-trip in
    `registry.rs`; status-failure in `git.rs`.
 
+## Security gap closures (audit follow-up, code commit `d675690`)
+
+| # | Gap | Mitigasi minimum + bukti | Status |
+|---|---|---|---|
+| S1 | `git status` mengeksekusi `core.fsmonitor` milik repo (RCE sebagai user) | Override env kosong (`GIT_CONFIG_COUNT/KEY_0/VALUE_0`) di `git_out` (`git.rs`) — berlaku untuk `status` dan `doctor`. Probe: payload forward-slash tanpa mitigasi → marker TERBUAT; dengan mitigasi → marker absen + exit 0 + rev-parse ok. Cakupan minimum: hanya `core.fsmonitor` yang dioverride — tidak ada command kami (rev-parse/status/branch) yang menjalankan hooks, pager, editor, atau network helper; re-audit saat menambah command. Test: `git::status_never_runs_repo_configured_fsmonitor` (RED disaksikan: marker dibuat pre-fix), `tests/cli.rs:status_and_doctor_never_run_fsmonitor` | PASS (local); unix-payload RED diwakilkan mekanisme hook yang sama, CI unix mengonfirmasi GREEN |
+| S2 | `.riltraignore` mengikuti symlink/junction keluar root | `load_rules` resolve sekali + wajib containment via `contains` (`ignore.rs`); escape dibaca absent (konservatif). `contains` kini dipakai produksi (M1-enforced). Test: `ignore_symlink_outside_root_is_not_followed`, `ignore_symlink_retarget_outside_is_not_followed`, `ignore_hardlink_inside_is_read_not_falsely_rejected` (tanpa privilege, jalan di semua OS), `status_ignores_symlinked_ignore_outside_root` | PASS (local); symlink-file skip di Windows privilege (lihat §Skips), evidensi symlink dari CI unix |
+
 ## Skips (explicit, not PASS evidence)
 
 - `status_rejects_symlink_retarget_outside_root`: `symlink_dir` needs privilege
@@ -50,6 +57,13 @@ CI gate below is PENDING, not claimed.
 - `unreadable_git_metadata_is_invalid`: `#[cfg(unix)]` only; Windows ACL case unverified.
 - `contains_rejects_symlink_escape` (unit): same privilege skip on Windows.
 - Tests skip (not fail) when the `git` executable is absent.
+- `ignore_symlink_outside_root_is_not_followed`,
+  `ignore_symlink_retarget_outside_is_not_followed`, and
+  `status_ignores_symlinked_ignore_outside_root`: file-symlink creation needs
+  privilege on Windows → skipped on this machine (vacuous pass). Real
+  symlink-escape evidence for the ignore file must come from Linux/macOS CI.
+  Junction evidence for roots comes from Windows CI (`mklink /J`, no privilege).
+  The hardlink test needs no privilege and runs on all OSes.
 
 ## Invariants kept
 
@@ -58,9 +72,8 @@ CI gate below is PENDING, not claimed.
 - No validation weakened: fixes strictly narrow acceptance (new rejections, no new allowances).
 - Exit codes unchanged: 0 ok, 2 usage, 3 repository/data.
 
-## Final status: **PASS** — local gates PASS (53/53), CI run8 PASS (3/3 OS)
+## Final status: **BLOCKED** — local gates PASS (59 tests: 43 unit + 16 integrasi), CI gate PENDING push approval
 
-- Verified code commit: `1dcedba` (`fix: M1 hardening per audit …`).
-- CI evidence: run8 on `be762f2` (doc commit), windows/ubuntu/macos success.
-  Push approved by owner; remote HEAD tracks local.
+- Verified code commit: `d675690` (`fix: M1 close fsmonitor execution and ignore-file escape gaps`), local only.
+- Next step needs approval: `git push origin master` → CI run (Windows/Linux/macOS aktual) → gap S1/S2 unix-payload + symlink-ignore dikonfirmasi silang-OS.
 - M2 not started.
