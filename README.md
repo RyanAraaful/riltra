@@ -56,11 +56,28 @@ cargo run -q -p riltra -- doctor --repo riltra
 cargo run -q -p riltra -- scan --repo riltra --path crates/cli/src/main.rs
 ```
 
-`repo status` prints one JSON line per repository, for example (trimmed):
+`repo status` prints one JSON line per repository, for example (trimmed,
+illustrative values):
 
 ```json
-{"name":"riltra","root":"…","git":{"present":true,"valid":true,"head":"…","branch":"main","dirty":false,"untracked":0}}
+{"name":"riltra","root":"…","git":{"present":true,"valid":true,"head":"…","branch":"master","dirty":false,"untracked":0}}
 ```
+
+`scan` reports symbol names with source locations, for example (trimmed real
+output — `…` marks omitted facts):
+
+```json
+{"path":"crates/cli/src/main.rs","status":"ok","language":"rust",
+ "definitions":[{"kind":"function","name":"version_line",
+ "span":{"start_line":38,"start_col":1,"end_line":40,"end_col":2},"bytes":[1464,1527]}, …],
+ "calls":[{"kind":"call","name":"registry::load",
+ "span":{"start_line":58,"start_col":25,"end_line":58,"end_col":50},"bytes":[2044,2069]}, …],
+ "errors":0}
+```
+
+Call names are recorded exactly as written (`w.process`, `registry::load`)
+and are never resolved to targets — they are candidates for you or your agent
+to follow, not claims.
 
 Notes:
 
@@ -70,15 +87,17 @@ Notes:
 - Git fingerprints need a Git executable: without one, `init` and `repo list`
   still work, while `repo status` reports `valid:false` and `doctor` flags the
   missing executable — nothing is silently faked.
-- Run `riltra --help` for the full command list.
+- Run `cargo run -q -p riltra -- --help` for the full command list.
 
 ## Roadmap (not yet implemented)
 
 The following are planned directions, not working features and not dated
-promises:
+promises. Syntax analysis and `--symbol` filtering already work without a
+stored index; the roadmap is about going further:
 
-- Syntax-aware code search across multiple languages.
-- Cross-file call/reference/dependency graph with source evidence.
+- Persistent indexed search and cross-file navigation.
+- Relationship graph: callers, callees, and dependencies with source evidence.
+- Freshness tracking: always-clear staleness status and incremental refresh.
 - Opt-in semantic providers (language servers / index formats) for deeper accuracy.
 - Persistent, revisioned knowledge graph for decisions, constraints, and benchmarks.
 - An MCP server so AI agents can query code and knowledge through one interface.
@@ -87,7 +106,7 @@ promises:
 
 Riltra is in early, pre-release development. Continuous integration runs format,
 compile, lint, and test checks on Windows, Linux, and macOS for every change.
-See [docs/m1-verification.md](docs/m1-verification.md) for the latest verified
+See [docs/m2-validation.md](docs/m2-validation.md) for the latest verified
 capabilities and their evidence.
 
 ## Contributing

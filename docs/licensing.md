@@ -6,16 +6,18 @@ entry here (package + exact version + license + origin URL + redistributability
 note) in the same PR that introduces it. Never introduce code under
 noncommercial/use-restricted licenses or from sources without clear rights.
 
-## Current: zero third-party dependencies
+Current state: the syntax baseline below added pinned tree-sitter
+dependencies; the project started dependency-free (see history).
+
+## Original baseline: zero third-party dependencies (pre-syntax)
 
 | Component | Version | License | Origin | Redistributable? |
 |---|---|---|---|---|
 | Rust std only (no crates.io deps) | toolchain stable | MIT OR Apache-2.0 (std) | rust-lang/rust | yes — linked std, no vendoring |
 | Build/test tooling (rustc, cargo, rustfmt, clippy) | stable (see CI log) | MIT OR Apache-2.0 | rust-lang | build-time only, not shipped |
 
-The CLI is intentionally std-only so the legal baseline stays trivially
-auditable. Future capabilities (richer CLI, parsers, storage) will add
-SBOM entries here as they land.
+The registry core stays std-only; parsing support arrived with pinned
+dependencies (see M2 addition below), each with an SBOM entry.
 
 ## Reference notes for future introductions (NOT bundled — audit per package)
 
