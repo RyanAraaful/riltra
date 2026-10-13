@@ -13,11 +13,12 @@ Self-authored fixtures under `crates/cli/tests/fixtures/m2/`, one golden file
 per source file under `crates/cli/tests/golden/`. Every golden was generated
 once and verified by hand (names, spans, byte offsets) before pinning.
 
-Covered: definitions (functions/methods/classes/structs/interfaces), imports
-and includes (single-line span of the directive), call candidates, malformed
-input recovery (`errors` counted, neighboring facts still extracted),
-unsupported extensions, `.cu` refusal, byte-identical output on repeat runs,
-and `--symbol` filtering.
+Covered: definitions (functions/methods/classes/structs/interfaces, including
+qualified C++ definitions such as `PatchMatch::Run` recorded verbatim as
+unresolved candidates), imports and includes (single-line span of the
+directive), call candidates, malformed input recovery (`errors` counted,
+neighboring facts still extracted), unsupported extensions, `.cu` refusal,
+byte-identical output on repeat runs, and `--symbol` filtering.
 
 ## Tier B — real repository (MMSP, read-only, local only)
 
