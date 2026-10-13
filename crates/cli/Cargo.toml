@@ -1,0 +1,10 @@
+[package]
+name = "riltra"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Riltra M0 bootstrap placeholder — native CLI, no networking"
+
+[[bin]]
+name = "riltra"
+path = "src/main.rs"

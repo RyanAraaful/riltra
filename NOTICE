@@ -1,0 +1,11 @@
+Riltra — M0 bootstrap
+Copyright Riltra Contributors (see git history for individual authorship).
+
+This product includes no bundled third-party source in M0.
+The Rust toolchain (rustc/cargo/rustfmt/clippy) is used at build time only
+and is not redistributed with this repository.
+
+Future milestones MUST append third-party notices here for every bundled
+grammar, binary indexer, or vendored source, with exact package + version +
+license + origin URL, before any release.
+See docs/licensing.md for the audit table.
