@@ -72,8 +72,11 @@ CI gate below is PENDING, not claimed.
 - No validation weakened: fixes strictly narrow acceptance (new rejections, no new allowances).
 - Exit codes unchanged: 0 ok, 2 usage, 3 repository/data.
 
-## Final status: **BLOCKED** — local gates PASS (59 tests: 43 unit + 16 integrasi), CI gate PENDING push approval
+## Final status: **PASS** — local gates PASS (59 tests: 43 unit + 16 integrasi), CI run10 PASS (3/3 OS)
 
-- Verified code commit: `d675690` (`fix: M1 close fsmonitor execution and ignore-file escape gaps`), local only.
-- Next step needs approval: `git push origin master` → CI run (Windows/Linux/macOS aktual) → gap S1/S2 unix-payload + symlink-ignore dikonfirmasi silang-OS.
+- Verified code commit: `d675690` (`fix: M1 close fsmonitor execution and ignore-file escape gaps`).
+- CI evidence: run10 on `bdfc160`, windows/ubuntu/macos `completed+success`
+  (jobs API). Unix symlink-ignore + sh-fsmonitor payloads confirmed GREEN on
+  Linux/macOS runners; junction + hardlink + ps1-fsmonitor GREEN on Windows.
+  Push approved by owner; remote HEAD tracks local.
 - M2 not started.
