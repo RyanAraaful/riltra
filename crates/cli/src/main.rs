@@ -14,6 +14,8 @@ mod ignore;
 mod json;
 mod paths;
 mod registry;
+mod scan;
+mod syntax;
 
 #[cfg(test)]
 mod testutil;
@@ -29,7 +31,7 @@ const SCOPE: &str = "m1-registry";
 
 pub(crate) fn usage() -> String {
     format!(
-        "Usage:\n  {NAME} [--help] [--version] status\n  {NAME} init --repo <path> [--name <name>]\n  {NAME} repo list\n  {NAME} repo status --repo <name>\n  {NAME} doctor [--repo <name>]\n\nCommands:\n  status       Print deterministic bootstrap status as JSON\n  init         Register a local repository root\n  repo list    List registered repositories as JSON\n  repo status  Git/worktree fingerprint of a registered repository\n  doctor       Path-security and repository health checks as JSON\n"
+        "Usage:\n  {NAME} [--help] [--version] status\n  {NAME} init --repo <path> [--name <name>]\n  {NAME} repo list\n  {NAME} repo status --repo <name>\n  {NAME} doctor [--repo <name>]\n  {NAME} scan --repo <name> [--path <relpath>]... [--symbol <substr>]\n\nCommands:\n  status       Print deterministic bootstrap status as JSON\n  init         Register a local repository root\n  repo list    List registered repositories as JSON\n  repo status  Git/worktree fingerprint of a registered repository\n  doctor       Path-security and repository health checks as JSON\n  scan         Syntax facts (definitions/imports/calls) as JSON\n"
     )
 }
 
@@ -169,6 +171,59 @@ fn cmd_repo_status(name: &str, out: &mut String, err: &mut String) -> i32 {
     }
 }
 
+fn cmd_scan(
+    name: &str,
+    paths: &[String],
+    symbol: Option<&str>,
+    out: &mut String,
+    err: &mut String,
+) -> i32 {
+    let reg = match registry::load(&paths::registry_path()) {
+        Ok(r) => r,
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            return 3;
+        }
+    };
+    let entry = match registry::find(&reg, name) {
+        Some(e) => e,
+        None => {
+            err.push_str(&format!("error: unknown repository: '{name}'\n"));
+            return 3;
+        }
+    };
+    let recorded = entry.root.clone();
+    let canon = match paths::canonical_root(Path::new(&recorded)) {
+        Ok(c) => c,
+        Err(_) => {
+            err.push_str(&format!(
+                "error: registered root is missing: '{recorded}'\n"
+            ));
+            return 3;
+        }
+    };
+    if canon.to_string_lossy() != recorded {
+        err.push_str(&format!(
+            "error: registered root moved or retargeted (record '{recorded}')\n"
+        ));
+        return 3;
+    }
+    let opts = scan::ScanOptions {
+        paths: paths.to_vec(),
+        symbol: symbol.map(str::to_string),
+    };
+    match scan::scan_repo(name, &canon, &opts) {
+        Ok(json) => {
+            *out = json + "\n";
+            0
+        }
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            3
+        }
+    }
+}
+
 fn cmd_doctor(repo: Option<&str>, out: &mut String, err: &mut String) -> i32 {
     match repo {
         None => {
@@ -281,6 +336,11 @@ fn dispatch(cmd: Command, out: &mut String, err: &mut String) -> i32 {
         Command::RepoList => cmd_repo_list(out, err),
         Command::RepoStatus { repo } => cmd_repo_status(&repo, out, err),
         Command::Doctor { repo } => cmd_doctor(repo.as_deref(), out, err),
+        Command::Scan {
+            repo,
+            paths,
+            symbol,
+        } => cmd_scan(&repo, &paths, symbol.as_deref(), out, err),
     }
 }
 

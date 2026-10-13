@@ -7,10 +7,22 @@ pub enum Command {
     Help,
     Version,
     Status,
-    Init { repo: String, name: Option<String> },
+    Init {
+        repo: String,
+        name: Option<String>,
+    },
     RepoList,
-    RepoStatus { repo: String },
-    Doctor { repo: Option<String> },
+    RepoStatus {
+        repo: String,
+    },
+    Doctor {
+        repo: Option<String>,
+    },
+    Scan {
+        repo: String,
+        paths: Vec<String>,
+        symbol: Option<String>,
+    },
 }
 
 /// Parse full argv (including argv[0]-style first token). `Err` is the usage
@@ -71,6 +83,31 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                 }
             }
             Ok(Command::Doctor { repo })
+        }
+        "scan" => {
+            let mut repo = None;
+            let mut paths = Vec::new();
+            let mut symbol = None;
+            let mut i = 1;
+            while i < args.len() {
+                if let Some(v) = take_value(args, &mut i, "--repo") {
+                    repo = Some(v);
+                } else if let Some(v) = take_value(args, &mut i, "--path") {
+                    paths.push(v);
+                } else if let Some(v) = take_value(args, &mut i, "--symbol") {
+                    symbol = Some(v);
+                } else {
+                    return Err(crate::usage());
+                }
+            }
+            match repo {
+                Some(repo) => Ok(Command::Scan {
+                    repo,
+                    paths,
+                    symbol,
+                }),
+                None => Err(crate::usage()),
+            }
         }
         _ => Err(crate::usage()),
     }
@@ -142,6 +179,29 @@ mod tests {
             Ok(Command::Doctor { repo: Some(_) })
         ));
         assert!(p(&["doctor", "--repo"]).is_err());
+    }
+
+    #[test]
+    fn parses_scan_with_paths_and_symbol() {
+        assert!(matches!(
+            p(&["scan", "--repo", "r"]),
+            Ok(Command::Scan { paths, symbol: None, .. }) if paths.is_empty()
+        ));
+        assert!(matches!(
+            p(&[
+                "scan",
+                "--repo",
+                "r",
+                "--path",
+                "a.py",
+                "--path=b.py",
+                "--symbol",
+                "f"
+            ]),
+            Ok(Command::Scan { .. })
+        ));
+        assert!(p(&["scan"]).is_err());
+        assert!(p(&["scan", "--path", "a.py"]).is_err());
     }
 
     #[test]

@@ -3,7 +3,16 @@ name = "riltra"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Riltra M0 bootstrap placeholder — native CLI, no networking"
+description = "Riltra native CLI: repository registry and syntax baseline"
+
+[dependencies]
+tree-sitter = "0.25"
+tree-sitter-python = "0.25"
+tree-sitter-javascript = "0.25"
+tree-sitter-typescript = "0.23"
+tree-sitter-rust = "0.24"
+tree-sitter-c = "0.24"
+tree-sitter-cpp = "0.23"
 
 [[bin]]
 name = "riltra"

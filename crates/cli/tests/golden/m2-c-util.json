@@ -1,0 +1,1 @@
+{"path":"c/util.h","status":"ok","language":"cpp","bytes":179,"definitions":[{"kind":"struct","name":"Point","text":null,"span":{"start_line":6,"start_col":1,"end_line":9,"end_col":9},"bytes":[99,146]}],"imports":[],"calls":[],"errors":0}
