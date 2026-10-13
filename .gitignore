@@ -2,3 +2,6 @@
 **/*.rs.bk
 .env
 .DS_Store
+# Owner's private planning doc: kept out of the public repo (see backup outside
+# this directory). Never commit this file.
+OPEN_SOURCE_CODE_INTELLIGENCE_KNOWLEDGE_BLUEPRINT.md

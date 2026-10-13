@@ -1,51 +1,44 @@
-# Riltra — native code intelligence + engineering knowledge graph (M0 bootstrap)
+# Riltra
 
-> **Status: M0 — project bootstrap & legal baseline. Belum ada parser, graph,
-> MCP, knowledge ingestion, embedding, atau UI.** Semua klaim performa/akurasi
-> kompetitor dilarang sampai bukti benchmark reproduktif tersedia (§M10 blueprint).
+[![ci](https://github.com/RyanAraaful/riltra/actions/workflows/ci.yml/badge.svg)](https://github.com/RyanAraaful/riltra/actions)
 
-**Visi:** code intelligence dan persistent engineering knowledge yang lokal,
-cepat, transparan, lintas bahasa, callable dari terminal/AI agent, legal untuk
-bisnis di bawah Apache-2.0.
+Local-first code intelligence and engineering knowledge for developers and
+AI coding agents. Riltra runs entirely on your machine: no accounts, no cloud,
+no telemetry. It is free and open-source software under the Apache License 2.0,
+suitable for personal, organizational, and commercial use.
 
-**Arsitektur target (belum dibangun):** Rust core + Tree-sitter syntax,
-semantic opsional via LSP/SCIP, typed property graph, SQLite + FTS5, satu API
-untuk CLI dan MCP stdio. Core-only tetap offline; provider semantik opt-in.
+## Why Riltra
 
-**Nama binary M0:** `riltra`. Blueprint memakai nama kerja `ocik` sebagai contoh
-kontrak CLI, **bukan** klaim merek tersedia — M0 tidak mengadopsi `ocik`.
+Understanding a codebase means answering three questions: *what does this code
+do, what breaks if I change it, and why was it built this way?* Riltra is being
+built to answer all three locally — with evidence pointing at your source, in
+compact output that humans can skim and coding agents can consume without
+burning context.
 
-## Scope M0 (kontrak §15/§18 blueprint)
+For **developers**, that means definitions, callers, impact analysis, and the
+reasoning behind past decisions, without reading the whole repository.
+For **AI coding agents**, that means small, source-backed answers instead of
+thousands of dumped lines.
 
-- Rust workspace kosong yang compile; CLI placeholder std-only tanpa networking.
-- `LICENSE` Apache-2.0, `NOTICE`, `CONTRIBUTING.md` (DCO), `SECURITY.md`,
-  `docs/licensing.md` (inventory dependency + sumber).
-- CI lint/format/test Windows + Linux + macOS.
-- Fixtures kecil self-authored di `fixtures/`; histori repo bersih.
-- **STOP gate:** tanpa kode TK internal / GitNexus; klaim nama belum diverifikasi.
+## Available today
 
-## Non-goals M0
+The current binary already does the following, offline, with no runtime
+dependencies beyond itself:
 
-Parser, code graph, freshness/incremental, LSP/SCIP, impact/trace, knowledge
-graph, MCP server, embeddings, UI/TUI, SaaS, cross-repo tracing.
+- **Repository registry** — register local project roots (`init`) and list
+  them as deterministic JSON (`repo list`).
+- **Git fingerprint** — per repository: HEAD commit, branch, dirty/untracked
+  state, worktree detection, and ignore-file summary (`repo status`).
+- **Health checks** — path confinement, record integrity, and git readability
+  checks with explicit pass/fail (`doctor`).
+- **Machine-readable output** — stable JSON with fixed key order, meaningful
+  exit codes (`0` ok, `2` usage error, `3` repository/data error), and an
+  optional `.riltraignore` file per repository.
 
-## Quickstart
+## Quick start
 
-```powershell
-cargo fmt --check
-cargo check --locked
-cargo clippy --all-targets -- -D warnings
-cargo test --locked
-cargo run -q -p riltra -- status
-```
-
-Output `status` deterministik (satu baris JSON, key order tetap):
-
-```json
-{"name":"riltra","version":"0.1.0","scope":"m1-registry","networking":"disabled"}
-```
-
-## M1: repository registry (CLI)
+Prerequisites: a stable Rust toolchain (and `git` if you want fingerprints of
+Git repositories). No releases are published yet — build from source:
 
 ```powershell
 cargo run -q -p riltra -- init --repo D:\Projects\sample
@@ -54,32 +47,51 @@ cargo run -q -p riltra -- repo status --repo sample
 cargo run -q -p riltra -- doctor --repo sample
 ```
 
-- Registry disimpan di `%APPDATA%\riltra\registry.json` (Windows) atau
-  `~/.config/riltra/registry.json` (Linux/macOS); override isolasi dengan
-  env `RILTRA_HOME` (menunjuk langsung ke direktori registry, dipakai tests).
-- `repo status` → `head/branch/dirty/untracked/toplevel/worktree` + info
-  `.riltraignore`; repo non-git → `present:false`; `.git` korup atau `git status`
-  gagal → `valid:false` + exit 3 (JSON tetap ke stdout; tanpa bukti status,
-  tidak ada klaim `clean`/`valid`).
-- `repo status` menolak root yang berpindah atau di-retarget via symlink/junction
-  (canonical saat ini wajib sama dengan record; selain itu exit 3 tanpa stdout).
-- Exit codes: 0 ok, 2 usage error, 3 repository/data error.
-- Keamanan path: root dikanonikalisasi saat `init`, nama registry validated
-  (tanpa separator/`..`), query selalu lewat record kanonis; symlink-escape
-  terdeteksi karena hasil canonicalize keluar root. Git dibaca via plumbing
-  read-only (`GIT_TERMINAL_PROMPT=0`, `--no-optional-locks`); subprocess Git
-  berjalan dengan override `core.fsmonitor` kosong sehingga hook fsmonitor milik
-  repo tidak dieksekusi saat `status`/`doctor`. Tanpa `.git` di root → `absent`
-  (tidak meminjam repo induk). Pembacaan `.riltraignore` menolak symlink/junction
-  yang keluar root (dibaca absent, konservatif).
-- CLI std-only (tanpa `clap`/`serde`); ditunda sampai permukaan command
-  membesar (pra-M8).
+`repo status` prints one JSON line per repository, for example (trimmed):
 
-Catatan: `0.1.0` adalah versi workspace bootstrap, **bukan** rilis produk
-(rilis `v0.1.0` di-gate pada M9 bila MVP benar-benar usable).
+```json
+{"name":"sample","root":"D:\\Projects\\sample","git":{"present":true,"valid":true,"head":"…","branch":"main","dirty":false,"untracked":0}}
+```
 
-## Lisensi
+Notes:
 
-Apache-2.0 (`LICENSE`). Ketergantungan/grammar/provider kelak diaudit per
-paket+versi di `docs/licensing.md` sebelum dibundel. Jangan memasukkan kode
-berlisensi noncommercial/restricted tanpa izin yang sesuai.
+- The registry lives in `%APPDATA%\riltra` (Windows) or `~/.config/riltra`
+  (Linux/macOS). Set `RILTRA_HOME` to point it elsewhere (useful for scripts
+  and tests).
+- Run `riltra --help` for the full command list.
+
+## Roadmap (not yet implemented)
+
+The following are planned directions, not working features and not dated
+promises:
+
+- Syntax-aware code search across multiple languages.
+- Cross-file call/reference/dependency graph with source evidence.
+- Opt-in semantic providers (language servers / index formats) for deeper accuracy.
+- Persistent, revisioned knowledge graph for decisions, constraints, and benchmarks.
+- An MCP server so AI agents can query code and knowledge through one interface.
+
+## Project status
+
+Riltra is in early, pre-release development. Continuous integration runs format,
+compile, lint, and test checks on Windows, Linux, and macOS for every change.
+See [docs/m1-verification.md](docs/m1-verification.md) for the latest verified
+capabilities and their evidence.
+
+## Contributing
+
+Contributions are welcome under the Apache License 2.0 (inbound = outbound).
+Every commit needs a `Signed-off-by` line (`git commit -s`), and
+`cargo fmt`, `cargo clippy`, and `cargo test` must pass. Details live in
+[CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Security
+
+Riltra is local-first: it uploads nothing, phones home to nothing, and never
+executes a repository's code to inspect it. Future external tool integrations
+will be explicit opt-in only. Please report vulnerabilities through the
+repository host's private vulnerability reporting — see [SECURITY.md](SECURITY.md).
+
+## License
+
+Apache License 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
