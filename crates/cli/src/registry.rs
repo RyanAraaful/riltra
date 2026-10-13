@@ -182,10 +182,12 @@ impl<'a> Parser<'a> {
                 }
                 0x00..=0x1F => return Err("malformed registry JSON".to_string()),
                 _ => {
-                    // Copy through the full UTF-8 sequence for this character.
+                    // Copy through the full UTF-8 sequence for this character:
+                    // the loop consumed one byte, so advance past the rest.
                     let s = std::str::from_utf8(&self.bytes[self.pos - 1..])
                         .map_err(|_| "malformed registry JSON".to_string())?;
                     let ch = s.chars().next().ok_or("malformed registry JSON")?;
+                    self.pos += ch.len_utf8() - 1;
                     out.push(ch);
                 }
             }
@@ -402,5 +404,35 @@ mod tests {
             entry_json(&reg.repos[0]),
             "{\"name\":\"a\",\"root\":\"R:\\\\a\",\"added_unix\":1}"
         );
+    }
+
+    #[test]
+    fn round_trips_unicode_names_and_paths() {
+        let path = reg_path();
+        let mut reg = Registry {
+            version: 1,
+            repos: Vec::new(),
+        };
+        add(&mut reg, "tëst-üñî-🦀", "C:\\rëpös\\ünï", 7).unwrap();
+        save(&path, &reg).unwrap();
+        let back = load(&path).unwrap();
+        assert_eq!(back.repos.len(), 1);
+        assert_eq!(back.repos[0].name, "tëst-üñî-🦀");
+        assert_eq!(back.repos[0].root, "C:\\rëpös\\ünï");
+        assert_eq!(back.repos[0].added_unix, 7);
+    }
+
+    #[test]
+    fn parses_unicode_escapes_to_same_characters() {
+        let dir = tmpdir("registry-unicode-esc");
+        let file = dir.join("r.json");
+        // Hand-written file with a \u00e9 escape.
+        std::fs::write(
+            &file,
+            "{\"version\": 1, \"repos\": [{\"name\": \"caf\\u00e9\", \"root\": \"R:\\\\x\", \"added_unix\": 3}]}",
+        )
+        .unwrap();
+        let back = load(&file).unwrap();
+        assert_eq!(back.repos[0].name, "café");
     }
 }

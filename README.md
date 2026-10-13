@@ -58,8 +58,11 @@ cargo run -q -p riltra -- doctor --repo sample
   `~/.config/riltra/registry.json` (Linux/macOS); override isolasi dengan
   env `RILTRA_HOME` (menunjuk langsung ke direktori registry, dipakai tests).
 - `repo status` → `head/branch/dirty/untracked/toplevel/worktree` + info
-  `.riltraignore`; repo non-git → `present:false`; `.git` korup →
-  `valid:false` + exit 3 (JSON tetap ke stdout).
+  `.riltraignore`; repo non-git → `present:false`; `.git` korup atau `git status`
+  gagal → `valid:false` + exit 3 (JSON tetap ke stdout; tanpa bukti status,
+  tidak ada klaim `clean`/`valid`).
+- `repo status` menolak root yang berpindah atau di-retarget via symlink/junction
+  (canonical saat ini wajib sama dengan record; selain itu exit 3 tanpa stdout).
 - Exit codes: 0 ok, 2 usage error, 3 repository/data error.
 - Keamanan path: root dikanonikalisasi saat `init`, nama registry validated
   (tanpa separator/`..`), query selalu lewat record kanonis; symlink-escape

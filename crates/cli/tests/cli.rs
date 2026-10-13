@@ -186,3 +186,142 @@ fn repos_are_isolated_by_name() {
     assert!(!out_a.contains("same.txt")); // status carries metadata, never file content
     assert_ne!(out_a, out_b);
 }
+
+#[test]
+fn status_rejects_moved_root() {
+    let h = home("moved");
+    let target = mkrepo(&h, "work");
+    assert_eq!(run(&h, &["init", "--repo", target.to_str().unwrap()]).0, 0);
+    std::fs::rename(&target, h.join("gone")).unwrap();
+    let (code, out, err) = run(&h, &["repo", "status", "--repo", "work"]);
+    assert_eq!(code, 3);
+    assert!(out.is_empty());
+    assert!(err.contains("missing"));
+}
+
+#[test]
+fn status_rejects_symlink_retarget_outside_root() {
+    let h = home("retarget");
+    let target = mkrepo(&h, "real");
+    assert_eq!(run(&h, &["init", "--repo", target.to_str().unwrap()]).0, 0);
+    let outside = mkrepo(&h, "outside");
+    std::fs::remove_dir(&target).unwrap();
+    #[cfg(unix)]
+    let made = std::os::unix::fs::symlink(&outside, &target).is_ok();
+    #[cfg(windows)]
+    let made = std::os::windows::fs::symlink_dir(&outside, &target).is_ok();
+    if !made {
+        return; // Privilege skip: NOT junction evidence (see junction test below).
+    }
+    let (code, out, _) = run(&h, &["repo", "status", "--repo", "real"]);
+    assert_eq!(code, 3);
+    assert!(
+        out.is_empty(),
+        "must not fingerprint outside the recorded root"
+    );
+}
+
+#[test]
+fn status_rejects_windows_junction_retarget() {
+    if cfg!(not(windows)) {
+        return; // Junctions are Windows-only; unix coverage is the symlink test above.
+    }
+    let h = home("junction");
+    let target = mkrepo(&h, "real");
+    assert_eq!(run(&h, &["init", "--repo", target.to_str().unwrap()]).0, 0);
+    let outside = mkrepo(&h, "outside");
+    std::fs::remove_dir(&target).unwrap();
+    // mklink /J needs no elevation, so failure here is a real failure, not a skip.
+    let mk = Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(&target)
+        .arg(&outside)
+        .output()
+        .expect("run mklink");
+    assert!(
+        mk.status.success(),
+        "mklink /J failed: {}",
+        String::from_utf8_lossy(&mk.stderr)
+    );
+    assert!(target.is_dir(), "junction must resolve as a directory");
+    let (code, out, _) = run(&h, &["repo", "status", "--repo", "real"]);
+    assert_eq!(code, 3);
+    assert!(
+        out.is_empty(),
+        "must not fingerprint outside the recorded root"
+    );
+}
+
+#[test]
+fn init_fails_when_registry_home_is_a_file() {
+    // Portable IO-failure path: the registry directory cannot be created.
+    let h = home("reghome");
+    let file = h.join("file");
+    std::fs::write(&file, "x").unwrap();
+    let target = mkrepo(&h, "work");
+    let (code, _, err) = run(&file, &["init", "--repo", target.to_str().unwrap()]);
+    assert_eq!(code, 3);
+    assert!(err.contains("error"));
+}
+
+#[cfg(unix)]
+#[test]
+fn unreadable_git_metadata_is_invalid() {
+    use std::os::unix::fs::PermissionsExt;
+    if !git_available() {
+        return;
+    }
+    let h = home("noperm");
+    let target = mkrepo(&h, "code");
+    git_fixture(&target);
+    assert_eq!(run(&h, &["init", "--repo", target.to_str().unwrap()]).0, 0);
+    std::fs::set_permissions(target.join(".git"), std::fs::Permissions::from_mode(0o000)).unwrap();
+    let (code, out, _) = run(&h, &["repo", "status", "--repo", "code"]);
+    assert_eq!(code, 3);
+    assert!(out.contains("\"valid\":false"));
+}
+
+#[test]
+fn name_clash_across_roots_is_rejected() {
+    let h = home("clash");
+    let a = mkrepo(&h, "a");
+    let b = mkrepo(&h, "b");
+    assert_eq!(
+        run(
+            &h,
+            &["init", "--repo", a.to_str().unwrap(), "--name", "dup"]
+        )
+        .0,
+        0
+    );
+    let (code, _, err) = run(
+        &h,
+        &["init", "--repo", b.to_str().unwrap(), "--name", "dup"],
+    );
+    assert_eq!(code, 3);
+    assert!(err.contains("already registered"));
+    let (_, out, _) = run(&h, &["repo", "status", "--repo", "dup"]);
+    let canon_a = a
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .replace('\\', "\\\\");
+    assert!(out.contains(&canon_a));
+    assert!(!out.contains(
+        &b.canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "\\\\")
+    ));
+}
+
+#[test]
+fn status_corrupt_gitfile_reports_invalid_with_exit_3() {
+    let h = home("corruptfile");
+    let target = mkrepo(&h, "broken");
+    std::fs::write(target.join(".git"), "garbage").unwrap();
+    assert_eq!(run(&h, &["init", "--repo", target.to_str().unwrap()]).0, 0);
+    let (code, out, _) = run(&h, &["repo", "status", "--repo", "broken"]);
+    assert_eq!(code, 3);
+    assert!(out.contains("\"valid\":false"));
+}

@@ -109,17 +109,25 @@ pub fn fingerprint(root: &Path) -> GitInfo {
     let status = git_out(
         root,
         &["status", "--porcelain=v1", "--untracked-files=normal"],
-    )
-    .unwrap_or_default();
-    let mut dirty = false;
-    let mut untracked = 0u32;
-    for line in status.lines() {
-        if line.starts_with("??") {
-            untracked += 1;
-        } else if !line.is_empty() {
-            dirty = true;
+    );
+    // No status output without a successful run: an unverifiable work tree is
+    // never reported clean, and the fingerprint is not valid (a failed status
+    // used to fall through as clean + valid).
+    let (dirty, untracked, status_ok) = match status {
+        None => (false, 0, false),
+        Some(text) => {
+            let mut dirty = false;
+            let mut untracked = 0u32;
+            for line in text.lines() {
+                if line.starts_with("??") {
+                    untracked += 1;
+                } else if !line.is_empty() {
+                    dirty = true;
+                }
+            }
+            (dirty, untracked, true)
         }
-    }
+    };
     let git_dir = git_out(root, &["rev-parse", "--absolute-git-dir"])
         .and_then(|s| canonical_str(Path::new(&s)));
     // `--git-common-dir` may print relative (main repo) or absolute
@@ -132,7 +140,7 @@ pub fn fingerprint(root: &Path) -> GitInfo {
     };
     GitInfo {
         present: true,
-        valid: true,
+        valid: status_ok,
         head,
         branch,
         dirty,
@@ -239,6 +247,28 @@ mod tests {
         std::fs::write(corrupt_file.join(".git"), "garbage").unwrap();
         let f = fingerprint(&corrupt_file);
         assert!(f.present && !f.valid);
+    }
+
+    #[test]
+    fn status_failure_is_never_clean_nor_valid() {
+        let Some(dir) = git_repo("git-status-fail", "main") else {
+            return;
+        };
+        // Real modification that status must report...
+        std::fs::write(dir.join("a.txt"), "changed\n").unwrap();
+        // ...then destroy the evidence channel: rev-parse still works,
+        // but status cannot verify anything.
+        let index = std::fs::File::options()
+            .write(true)
+            .open(dir.join(".git").join("index"))
+            .unwrap();
+        index.set_len(20).unwrap();
+        let g = fingerprint(&dir);
+        assert!(g.present);
+        assert!(
+            !g.valid,
+            "unverifiable status must not be reported valid (and its clean/dirty flags are meaningless)"
+        );
     }
 
     #[test]

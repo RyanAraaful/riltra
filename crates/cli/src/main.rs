@@ -150,9 +150,17 @@ fn cmd_repo_status(name: &str, out: &mut String, err: &mut String) -> i32 {
             return 3;
         }
     };
+    let root = canon.to_string_lossy().to_string();
+    // The record must still resolve to itself: a moved root or a
+    // symlink/junction retarget is rejected instead of fingerprinted.
+    if root != recorded {
+        err.push_str(&format!(
+            "error: registered root moved or retargeted (record '{recorded}')\n"
+        ));
+        return 3;
+    }
     let info = git::fingerprint(&canon);
     let (_, ignore) = ignore::load_rules(&canon);
-    let root = canon.to_string_lossy().to_string();
     *out = repo_status_json(name, &root, &info, &ignore) + "\n";
     if info.present && !info.valid {
         3
