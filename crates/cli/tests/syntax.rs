@@ -116,6 +116,22 @@ fn golden_cpp() {
     let h = home("cpp");
     registered(&h);
     check_golden(&h, "cpp/app.cpp", "m2-cpp-app.json");
+    check_golden(&h, "cpp/qualified.cpp", "m2-cpp-qualified.json");
+}
+
+#[test]
+fn qualified_cpp_names_are_recorded() {
+    let h = home("qualified");
+    registered(&h);
+    let (code, out, err) = run(&h, &["scan", "--repo", "m2", "--path", "cpp/qualified.cpp"]);
+    assert_eq!(code, 0, "{err}");
+    let entry = entry_of(&out);
+    for name in ["PatchMatch::Run", "PatchMatch::Problem::Print", "add"] {
+        assert!(
+            entry.contains(&format!("\"name\":\"{name}\"")),
+            "missing qualified name {name} in: {entry}"
+        );
+    }
 }
 
 #[test]

@@ -153,13 +153,14 @@ fn def_name(node: tree_sitter::Node, src: &[u8]) -> Option<String> {
 }
 
 /// C/C++ declarator chain: `function_declarator`/`pointer`/`parenthesized`
-/// wrappers around the real identifier (`field_identifier` for methods).
-/// Bounded walk, `None` when anonymous.
+/// wrappers around the real identifier (`field_identifier` for methods,
+/// `qualified_identifier` for `Scope::name` definitions, kept verbatim as an
+/// unresolved candidate). Bounded walk, `None` when anonymous.
 fn c_function_name(node: tree_sitter::Node, src: &[u8]) -> Option<String> {
     let mut current = node.child_by_field_name("declarator")?;
     for _ in 0..6 {
         match current.kind() {
-            "identifier" | "field_identifier" => {
+            "identifier" | "field_identifier" | "qualified_identifier" => {
                 return node_text(current, src).map(|s| s.to_string())
             }
             "function_declarator"
@@ -174,6 +175,7 @@ fn c_function_name(node: tree_sitter::Node, src: &[u8]) -> Option<String> {
                                     c.kind(),
                                     "identifier"
                                         | "field_identifier"
+                                        | "qualified_identifier"
                                         | "function_declarator"
                                         | "parenthesized_declarator"
                                         | "pointer_declarator"
