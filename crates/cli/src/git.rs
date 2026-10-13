@@ -35,6 +35,15 @@ fn git_out(root: &Path, args: &[&str]) -> Option<String> {
         .arg(root)
         .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
+        // Read-only posture: our commands (rev-parse/status/branch) must never
+        // execute repo-configured helpers. `status` invokes core.fsmonitor when
+        // set; an empty override disables it for our subprocesses only
+        // (verified by probe + status_never_runs_repo_configured_fsmonitor).
+        // No other key needs overriding: none of our commands run hooks,
+        // pagers, editors, or network helpers. Re-audit when adding commands.
+        .env("GIT_CONFIG_COUNT", "1")
+        .env("GIT_CONFIG_KEY_0", "core.fsmonitor")
+        .env("GIT_CONFIG_VALUE_0", "")
         .output()
         .ok()?;
     if !out.status.success() {
@@ -268,6 +277,59 @@ mod tests {
         assert!(
             !g.valid,
             "unverifiable status must not be reported valid (and its clean/dirty flags are meaningless)"
+        );
+    }
+
+    fn set_config(dir: &std::path::Path, key: &str, value: &str) {
+        assert!(std::process::Command::new("git")
+            .args(["config", key, value])
+            .current_dir(dir)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .status()
+            .expect("git config")
+            .success());
+    }
+
+    #[test]
+    fn status_never_runs_repo_configured_fsmonitor() {
+        let Some(dir) = git_repo("git-fsmonitor", "main") else {
+            return;
+        };
+        let marker = dir.join("fsmonitor-marker");
+        let _ = std::fs::remove_file(&marker);
+        // Payload that provably executes pre-fix (verified by probe: marker
+        // created by plain `git status` without mitigation).
+        #[cfg(windows)]
+        {
+            std::fs::write(
+                dir.join("w.ps1"),
+                "New-Item -Path $args[0] -ItemType File -Force | Out-Null\n",
+            )
+            .unwrap();
+            let script = dir.join("w.ps1").to_string_lossy().replace('\\', "/");
+            let target = marker.to_string_lossy().replace('\\', "/");
+            set_config(
+                &dir,
+                "core.fsmonitor",
+                &format!("powershell -NoProfile -File {script} {target}"),
+            );
+        }
+        #[cfg(unix)]
+        {
+            set_config(
+                &dir,
+                "core.fsmonitor",
+                &format!("sh -c 'touch \"$1\"' sh {}", marker.to_string_lossy()),
+            );
+        }
+        let g = fingerprint(&dir);
+        assert!(
+            g.present && g.valid,
+            "mitigation must not break working repos"
+        );
+        assert!(
+            !marker.exists(),
+            "repo-configured fsmonitor must not execute during fingerprint"
         );
     }
 

@@ -67,8 +67,11 @@ cargo run -q -p riltra -- doctor --repo sample
 - Keamanan path: root dikanonikalisasi saat `init`, nama registry validated
   (tanpa separator/`..`), query selalu lewat record kanonis; symlink-escape
   terdeteksi karena hasil canonicalize keluar root. Git dibaca via plumbing
-  read-only (`GIT_TERMINAL_PROMPT=0`, `--no-optional-locks`); kode repo tidak
-  pernah dieksekusi. Tanpa `.git` di root → `absent` (tidak meminjam repo induk).
+  read-only (`GIT_TERMINAL_PROMPT=0`, `--no-optional-locks`); subprocess Git
+  berjalan dengan override `core.fsmonitor` kosong sehingga hook fsmonitor milik
+  repo tidak dieksekusi saat `status`/`doctor`. Tanpa `.git` di root → `absent`
+  (tidak meminjam repo induk). Pembacaan `.riltraignore` menolak symlink/junction
+  yang keluar root (dibaca absent, konservatif).
 - CLI std-only (tanpa `clap`/`serde`); ditunda sampai permukaan command
   membesar (pra-M8).
 

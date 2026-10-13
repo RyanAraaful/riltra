@@ -68,9 +68,7 @@ pub fn canonical_root(p: &Path) -> io::Result<PathBuf> {
 
 /// True only when `candidate` resolves to the root itself or below it.
 /// Missing paths and symlink escapes resolve outside (or fail) → false.
-// shortcut: unit-tested trust boundary for M2 file-scoped queries; M1 enforces
-// names + canonical records, so no production caller yet.
-#[allow(dead_code)]
+/// M1-enforced by ignore-file loading; M2 file-scoped queries reuse it.
 pub fn contains(canonical_root: &Path, candidate: &Path) -> bool {
     match candidate.canonicalize() {
         Ok(c) => c == *canonical_root || c.starts_with(canonical_root),

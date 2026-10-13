@@ -325,3 +325,76 @@ fn status_corrupt_gitfile_reports_invalid_with_exit_3() {
     assert_eq!(code, 3);
     assert!(out.contains("\"valid\":false"));
 }
+
+fn set_repo_config(dir: &Path, key: &str, value: &str) {
+    assert!(Command::new("git")
+        .args(["config", key, value])
+        .current_dir(dir)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .status()
+        .expect("git config")
+        .success());
+}
+
+#[test]
+fn status_and_doctor_never_run_fsmonitor() {
+    if !git_available() {
+        return;
+    }
+    let h = home("fsmonitor");
+    let target = mkrepo(&h, "code");
+    git_fixture(&target);
+    let marker = target.join("fsmonitor-marker");
+    #[cfg(windows)]
+    {
+        std::fs::write(
+            target.join("w.ps1"),
+            "New-Item -Path $args[0] -ItemType File -Force | Out-Null\n",
+        )
+        .unwrap();
+        let script = target.join("w.ps1").to_string_lossy().replace('\\', "/");
+        let goal = marker.to_string_lossy().replace('\\', "/");
+        set_repo_config(
+            &target,
+            "core.fsmonitor",
+            &format!("powershell -NoProfile -File {script} {goal}"),
+        );
+    }
+    #[cfg(unix)]
+    {
+        set_repo_config(
+            &target,
+            "core.fsmonitor",
+            &format!("sh -c 'touch \"$1\"' sh {}", marker.to_string_lossy()),
+        );
+    }
+    assert_eq!(run(&h, &["init", "--repo", target.to_str().unwrap()]).0, 0);
+    let (c1, _, _) = run(&h, &["repo", "status", "--repo", "code"]);
+    assert_eq!(c1, 0);
+    let (c2, _, _) = run(&h, &["doctor", "--repo", "code"]);
+    assert_eq!(c2, 0);
+    assert!(
+        !marker.exists(),
+        "fsmonitor must not run via status or doctor"
+    );
+}
+
+#[test]
+fn status_ignores_symlinked_ignore_outside_root() {
+    let h = home("ignore-link");
+    let target = mkrepo(&h, "work");
+    let outside = mkrepo(&h, "outside");
+    std::fs::write(outside.join("rules.txt"), "zzz\n").unwrap();
+    let link = target.join(".riltraignore");
+    #[cfg(unix)]
+    let made = std::os::unix::fs::symlink(outside.join("rules.txt"), &link).is_ok();
+    #[cfg(windows)]
+    let made = std::os::windows::fs::symlink_file(outside.join("rules.txt"), &link).is_ok();
+    if !made {
+        return; // Privilege skip on Windows; unix runs unprivileged (see CI).
+    }
+    assert_eq!(run(&h, &["init", "--repo", target.to_str().unwrap()]).0, 0);
+    let (code, out, _) = run(&h, &["repo", "status", "--repo", "work"]);
+    assert_eq!(code, 0);
+    assert!(out.contains("\"ignore\":{\"file\":false,\"rules\":0}"));
+}
