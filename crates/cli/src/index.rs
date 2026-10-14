@@ -4,7 +4,7 @@
 //! Queries never trust a timestamp alone — every verdict names its evidence.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::git;
@@ -79,10 +79,22 @@ pub fn input_fingerprint(root: &Path) -> String {
     )
 }
 
-/// Full rebuild into staging, then atomic promotion. Facts stream from the
-/// internal parser straight into one transaction — the whole repository is
-/// never buffered, and readers never see a half-written snapshot.
-pub fn build_full(home: &Path, name: &str, root: &Path) -> Result<IndexSummary, String> {
+/// Staging setup shared by full and incremental builds: everything before
+/// transaction creation. The 3-line transaction-open + snapshot insert stays
+/// inline at each caller (a returned `Transaction` cannot borrow a returned
+/// `Connection`).
+struct StagingMeta {
+    canon_root: PathBuf,
+    git_state: git::GitInfo,
+    cfg: String,
+    pre: String,
+}
+
+fn prepare_staging(
+    home: &Path,
+    name: &str,
+    root: &Path,
+) -> Result<(rusqlite::Connection, PathBuf, PathBuf, StagingMeta), String> {
     let db = store::db_path(home, name);
     let staging = store::staging_path(home, name);
     if let Some(parent) = db.parent() {
@@ -99,33 +111,100 @@ pub fn build_full(home: &Path, name: &str, root: &Path) -> Result<IndexSummary, 
     let git_state = git::fingerprint(&canon_root);
     let cfg = config_fingerprint(&canon_root);
     let pre = input_fingerprint(&canon_root);
-    let mut conn = store::open_live(&staging)?;
+    let conn = store::open_live(&staging)?;
+    Ok((
+        conn,
+        db,
+        staging,
+        StagingMeta {
+            canon_root,
+            git_state,
+            cfg,
+            pre,
+        },
+    ))
+}
+
+/// Shared build epilogue, first half: source verification, freshness
+/// verdict, snapshot finish, commit. Both pipelines end here, so neither
+/// can drift apart.
+fn finish_snapshot_tx(
+    tx: rusqlite::Transaction<'_>,
+    snapshot_id: i64,
+    summary: &mut IndexSummary,
+    meta: &StagingMeta,
+) -> Result<(), String> {
+    let post = input_fingerprint(&meta.canon_root);
+    // Content evidence at write time: re-verify every stored digest against
+    // current source before claiming fresh. A mid-build content flip that git
+    // cannot see still fails here. `fresh` requires all three agreements.
+    let content_verified =
+        verify_snapshot_content(&tx, snapshot_id, &meta.canon_root).unwrap_or(false);
+    let status = if summary.pre_fingerprint == post && content_verified {
+        "fresh"
+    } else {
+        "stale"
+    };
+    store::finish_snapshot(&tx, snapshot_id, &post, status)?;
+    tx.commit().map_err(|e| e.to_string())?;
+    summary.status_at_write = status.to_string();
+    summary.post_fingerprint = post;
+    Ok(())
+}
+
+/// Shared build epilogue, second half: atomic promotion plus staging
+/// cleanup. Split from the first half so callers drop the staging
+/// connection first — on Windows an open handle blocks file removal, which
+/// left corrupt staging leftovers behind (regression-tested).
+fn promote_live(db: &Path, staging: &Path) -> Result<(), String> {
+    let live = match store::open_live(db) {
+        Ok(live) => live,
+        Err(_) if !store::is_readable_db(db) => {
+            // Corrupt live database with a complete staging build ready:
+            // everything is re-derivable from source, so replace wholesale.
+            std::fs::remove_file(db)
+                .map_err(|e| format!("live index is corrupt and cannot be replaced: {e}"))?;
+            store::open_live(db)?
+        }
+        Err(e) => return Err(e),
+    };
+    store::promote_staging(&live, staging)?;
+    drop(live);
+    let _ = std::fs::remove_file(staging);
+    Ok(())
+}
+
+/// Full rebuild into staging, then atomic promotion. Facts stream from the
+/// internal parser straight into one transaction — the whole repository is
+/// never buffered, and readers never see a half-written snapshot.
+pub fn build_full(home: &Path, name: &str, root: &Path) -> Result<IndexSummary, String> {
+    let (mut conn, db, staging, meta) = prepare_staging(home, name, root)?;
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     let snapshot_id = store::insert_snapshot(
         &tx,
         &store::Snapshot {
             id: 0,
             repo: name.to_string(),
-            root: canon_root.to_string_lossy().to_string(),
+            root: meta.canon_root.to_string_lossy().to_string(),
             created_unix: now_unix(),
-            head: git_state.head.clone(),
-            branch: git_state.branch.clone(),
-            dirty: git_state.dirty,
-            untracked: git_state.untracked,
+            head: meta.git_state.head.clone(),
+            branch: meta.git_state.branch.clone(),
+            dirty: meta.git_state.dirty,
+            untracked: meta.git_state.untracked,
             parser_version: store::PARSER_VERSION,
             grammar_versions: store::grammar_versions(),
-            config_fingerprint: cfg,
-            pre_fingerprint: pre.clone(),
+            config_fingerprint: meta.cfg.clone(),
+            pre_fingerprint: meta.pre.clone(),
             post_fingerprint: String::new(),
             status_at_write: "stale".to_string(),
             nonce: store::new_nonce(),
         },
     )?;
-    let (plan, _) = scan::plan_walk(&canon_root)?;
+    let (plan, _) = scan::plan_walk(&meta.canon_root)?;
     let mut summary = IndexSummary {
         snapshot_id,
         status_at_write: "stale".to_string(),
-        pre_fingerprint: pre,
+        pre_fingerprint: meta.pre.clone(),
         post_fingerprint: String::new(),
         files_discovered: 0,
         processed: 0,
@@ -142,147 +221,134 @@ pub fn build_full(home: &Path, name: &str, root: &Path) -> Result<IndexSummary, 
         unsupported_total: 0,
     };
     for item in &plan {
-        summary.files_discovered += 1;
-        if let PlanAction::Skip(reason) = &item.action {
-            match *reason {
-                "ignored" => summary.skipped_ignored += 1,
-                "symlink-not-followed" => summary.skipped_symlink += 1,
-                _ => summary.skipped_unreadable += 1,
-            }
-            continue;
+        ingest_file(&tx, snapshot_id, item, &mut summary)?;
+    }
+    finish_snapshot_tx(tx, snapshot_id, &mut summary, &meta)?;
+    drop(conn);
+    promote_live(&db, &staging)?;
+    Ok(summary)
+}
+
+/// One file through the shared ingest path: skip counting, content gates,
+/// parse, fact inserts. Used by full builds for every file and by
+/// incremental builds for added/modified files only.
+fn ingest_file(
+    conn: &rusqlite::Connection,
+    snapshot_id: i64,
+    item: &scan::PlannedFile,
+    summary: &mut IndexSummary,
+) -> Result<(), String> {
+    summary.files_discovered += 1;
+    if let PlanAction::Skip(reason) = &item.action {
+        match *reason {
+            "ignored" => summary.skipped_ignored += 1,
+            "symlink-not-followed" => summary.skipped_symlink += 1,
+            _ => summary.skipped_unreadable += 1,
         }
-        // Content gates before the extension verdict, mirroring scan render:
-        // a huge or binary `.xyz` counts as skipped, not unsupported.
-        let bytes = match std::fs::read(&item.full) {
-            Ok(b) => b,
-            Err(_) => {
-                summary.skipped_unreadable += 1;
-                continue;
-            }
-        };
-        if bytes.len() as u64 > scan::MAX_FILE_BYTES {
-            summary.skipped_large += 1;
-            continue;
+        return Ok(());
+    }
+    // Content gates before the extension verdict, mirroring scan render:
+    // a huge or binary `.xyz` counts as skipped, not unsupported.
+    let bytes = match std::fs::read(&item.full) {
+        Ok(b) => b,
+        Err(_) => {
+            summary.skipped_unreadable += 1;
+            return Ok(());
         }
-        if bytes.contains(&0) || std::str::from_utf8(&bytes).is_err() {
-            summary.skipped_binary += 1;
-            continue;
-        }
-        match &item.action {
-            PlanAction::Parse(lang) => {
-                let facts = parse_source(*lang, &bytes);
-                let file_id = store::insert_file(
-                    &tx,
+    };
+    if bytes.len() as u64 > scan::MAX_FILE_BYTES {
+        summary.skipped_large += 1;
+        return Ok(());
+    }
+    if bytes.contains(&0) || std::str::from_utf8(&bytes).is_err() {
+        summary.skipped_binary += 1;
+        return Ok(());
+    }
+    match &item.action {
+        PlanAction::Parse(lang) => {
+            let facts = parse_source(*lang, &bytes);
+            let file_id = store::insert_file(
+                conn,
+                snapshot_id,
+                &store::FileRow {
+                    path: item.rel.clone(),
+                    language: language_name(*lang).to_string(),
+                    bytes: bytes.len() as u64,
+                    digest: store::content_digest(&bytes),
+                    errors: facts.errors,
+                },
+            )?;
+            let grammar = grammar_version(*lang).to_string();
+            let language = language_name(*lang).to_string();
+            for definition in &facts.definitions {
+                store::insert_symbol(
+                    conn,
                     snapshot_id,
-                    &store::FileRow {
-                        path: item.rel.clone(),
-                        language: language_name(*lang).to_string(),
-                        bytes: bytes.len() as u64,
-                        digest: store::content_digest(&bytes),
-                        errors: facts.errors,
+                    &store::SymbolRow {
+                        file_id,
+                        kind: definition.kind.to_string(),
+                        name: definition.name.clone(),
+                        start_line: definition.span.start_line,
+                        start_col: definition.span.start_col,
+                        end_line: definition.span.end_line,
+                        end_col: definition.span.end_col,
+                        byte_start: definition.byte_start,
+                        byte_end: definition.byte_end,
+                        provider: "syntax".to_string(),
+                        grammar: grammar.clone(),
+                        language: language.clone(),
                     },
                 )?;
-                let grammar = grammar_version(*lang).to_string();
-                let language = language_name(*lang).to_string();
-                for definition in &facts.definitions {
-                    store::insert_symbol(
-                        &tx,
-                        snapshot_id,
-                        &store::SymbolRow {
-                            file_id,
-                            kind: definition.kind.to_string(),
-                            name: definition.name.clone(),
-                            start_line: definition.span.start_line,
-                            start_col: definition.span.start_col,
-                            end_line: definition.span.end_line,
-                            end_col: definition.span.end_col,
-                            byte_start: definition.byte_start,
-                            byte_end: definition.byte_end,
-                            provider: "syntax".to_string(),
-                            grammar: grammar.clone(),
-                            language: language.clone(),
-                        },
-                    )?;
-                }
-                for import in &facts.imports {
-                    store::insert_import(
-                        &tx,
-                        snapshot_id,
-                        &store::ImportRow {
-                            file_id,
-                            text: import.text.clone(),
-                            start_line: import.span.start_line,
-                            start_col: import.span.start_col,
-                            end_line: import.span.end_line,
-                            end_col: import.span.end_col,
-                            byte_start: import.byte_start,
-                            byte_end: import.byte_end,
-                            provider: "syntax".to_string(),
-                            grammar: grammar.clone(),
-                            language: language.clone(),
-                        },
-                    )?;
-                }
-                for call in &facts.calls {
-                    store::insert_call(
-                        &tx,
-                        snapshot_id,
-                        &store::CallRow {
-                            file_id,
-                            name: call.name.clone(),
-                            start_line: call.span.start_line,
-                            start_col: call.span.start_col,
-                            end_line: call.span.end_line,
-                            end_col: call.span.end_col,
-                            byte_start: call.byte_start,
-                            byte_end: call.byte_end,
-                            unresolved: 1,
-                            provider: "syntax".to_string(),
-                            grammar: grammar.clone(),
-                            language: language.clone(),
-                        },
-                    )?;
-                }
-                summary.processed += 1;
-                summary.definitions += facts.definitions.len();
-                summary.imports += facts.imports.len();
-                summary.calls += facts.calls.len();
-                summary.errors += facts.errors;
             }
-            PlanAction::Unsupported(_) => summary.unsupported_total += 1,
-            PlanAction::Skip(_) => {} // returned early above; listed for exhaustiveness
+            for import in &facts.imports {
+                store::insert_import(
+                    conn,
+                    snapshot_id,
+                    &store::ImportRow {
+                        file_id,
+                        text: import.text.clone(),
+                        start_line: import.span.start_line,
+                        start_col: import.span.start_col,
+                        end_line: import.span.end_line,
+                        end_col: import.span.end_col,
+                        byte_start: import.byte_start,
+                        byte_end: import.byte_end,
+                        provider: "syntax".to_string(),
+                        grammar: grammar.clone(),
+                        language: language.clone(),
+                    },
+                )?;
+            }
+            for call in &facts.calls {
+                store::insert_call(
+                    conn,
+                    snapshot_id,
+                    &store::CallRow {
+                        file_id,
+                        name: call.name.clone(),
+                        start_line: call.span.start_line,
+                        start_col: call.span.start_col,
+                        end_line: call.span.end_line,
+                        end_col: call.span.end_col,
+                        byte_start: call.byte_start,
+                        byte_end: call.byte_end,
+                        unresolved: 1,
+                        provider: "syntax".to_string(),
+                        grammar: grammar.clone(),
+                        language: language.clone(),
+                    },
+                )?;
+            }
+            summary.processed += 1;
+            summary.definitions += facts.definitions.len();
+            summary.imports += facts.imports.len();
+            summary.calls += facts.calls.len();
+            summary.errors += facts.errors;
         }
+        PlanAction::Unsupported(_) => summary.unsupported_total += 1,
+        PlanAction::Skip(_) => {} // unreachable here; listed for exhaustiveness
     }
-    let post = input_fingerprint(&canon_root);
-    // Content evidence at write time: re-verify every stored digest against
-    // current source before claiming fresh. A mid-build content flip that git
-    // cannot see still fails here. `fresh` requires all three agreements.
-    let content_verified = verify_snapshot_content(&tx, snapshot_id, &canon_root).unwrap_or(false);
-    let status = if summary.pre_fingerprint == post && content_verified {
-        "fresh"
-    } else {
-        "stale"
-    };
-    store::finish_snapshot(&tx, snapshot_id, &post, status)?;
-    tx.commit().map_err(|e| e.to_string())?;
-    drop(conn);
-    let live = match store::open_live(&db) {
-        Ok(live) => live,
-        Err(_) if !store::is_readable_db(&db) => {
-            // Corrupt live database with a complete staging build ready:
-            // everything is re-derivable from source, so replace wholesale.
-            std::fs::remove_file(&db)
-                .map_err(|e| format!("live index is corrupt and cannot be replaced: {e}"))?;
-            store::open_live(&db)?
-        }
-        Err(e) => return Err(e),
-    };
-    store::promote_staging(&live, &staging)?;
-    drop(live);
-    let _ = std::fs::remove_file(&staging);
-    summary.status_at_write = status.to_string();
-    summary.post_fingerprint = post;
-    Ok(summary)
+    Ok(())
 }
 
 /// Re-verify every stored file digest of a snapshot against current source.
