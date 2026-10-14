@@ -20,11 +20,13 @@ daemon, watcher, dependency, or schema migration (`SCHEMA_VERSION` stays 2).
   `build()` dispatcher with explicit fallback reasons (`cold-start`,
   `forced-full`, `db-unreadable`, `no-snapshot`, `root-moved`,
   `parser-changed`, `grammar-changed`, `config-changed`, `head-changed`,
-  `branch-changed`, `none`).
+  `branch-changed`, `revision-changed`, `none`).
 - Reuse safety: classification inputs from one live read transaction; copy
   reads share the staging transaction's snapshot over the ATTACHed live
-  database with `snapshot_id`-predicated statements plus zero-row fallback
-  to ingest; the shared `verify_snapshot_content` gate and atomic promotion
+  database with `snapshot_id`+path+digest-predicated statements plus zero-row fallback
+  to ingest; a nonce check inside the staging transaction rolls back to a
+  `revision-changed` full rebuild if the live revision was replaced between
+  classification and copy; the shared `verify_snapshot_content` gate and atomic promotion
   are unchanged. Fresh nonces per revision; FTS5 follows triggers on a
   fresh staging database, so removed facts can never linger.
 - CLI: `index --repo <name> [--full]`; JSON gains `mode` (`full` /
@@ -105,6 +107,16 @@ two repetitions each.
   are build-time `fresh` + query-time `stale` (M3 dirty semantics), and a
   rebuild always incorporates source so stale labels were fabricated via
   `UPDATE` to test the reuse policy exactly.
+- Final review (fresh reviewer, one pass): one real hole — classification
+  and copy ran in disjoint transactions with rowid-only copy predicates,
+  so a concurrent replacement reusing rowids could mix revisions. Fixed by
+  path+digest copy predicates and an in-transaction nonce guard with
+  `revision-changed` fallback (RED-tested by driving `build_incremental`
+  with a superseded revision). Same-repo concurrent builds remain
+  uncoordinated (pre-existing M3 staging-file limitation, still out of
+  scope). Deferred as minors: gate-logic triplication across
+  ingest/diff/verify (parity-pinned, refactor later), symlink test
+  privilege early-return, JSON key-order plan wording.
 
 ## Gates
 

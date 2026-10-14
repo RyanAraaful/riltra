@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection};
 
 /// Current schema version (`PRAGMA user_version`).
 pub const SCHEMA_VERSION: u32 = 2;
@@ -385,32 +385,32 @@ pub struct CopiedTotals {
 }
 
 /// Copy one files row from the attached `src` database into this one.
-/// Returns the new rowid, or `None` when the source row is absent (a
-/// concurrent rebuild replaced the revision under us) — callers then ingest
-/// the file from current source instead of reusing.
+/// Returns the new rowid, or `None` when no source row matches id, path,
+/// AND digest (vanished row or a concurrent rebuild reusing rowids for
+/// different content) — callers then ingest the file from current source
+/// instead of reusing. The triple predicate is what makes reuse unable to
+/// mix two revisions: a rowid alone is recycled by every rebuild. Single
+/// `INSERT..SELECT` plus `changes()`: atomic, no TOCTOU.
 pub fn copy_file_row(
     staging: &Connection,
     new_snapshot_id: i64,
     old_snapshot_id: i64,
     old_file_id: i64,
+    expected_path: &str,
+    expected_digest: &str,
 ) -> Result<Option<i64>, String> {
-    let present: Option<i64> = staging
-        .query_row(
-            "SELECT 1 FROM src.files WHERE snapshot_id = ?1 AND id = ?2",
-            params![old_snapshot_id, old_file_id],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(|e| e.to_string())?;
-    if present.is_none() {
-        return Ok(None);
-    }
     staging
         .execute(
             "INSERT INTO files (snapshot_id, path, language, bytes, digest, errors)
              SELECT ?1, path, language, bytes, digest, errors FROM src.files
-             WHERE snapshot_id = ?2 AND id = ?3",
-            params![new_snapshot_id, old_snapshot_id, old_file_id],
+             WHERE snapshot_id = ?2 AND id = ?3 AND path = ?4 AND digest = ?5",
+            params![
+                new_snapshot_id,
+                old_snapshot_id,
+                old_file_id,
+                expected_path,
+                expected_digest
+            ],
         )
         .map_err(|e| e.to_string())?;
     if staging.changes() != 1 {
@@ -1197,14 +1197,26 @@ mod tests {
         let new_snap = insert_snapshot(&staging, &sample_snapshot()).unwrap();
         let live = open_live(&live_path).unwrap();
         let map = file_id_map(&live, old_snap).unwrap();
-        for (old_fid, _) in map.values() {
-            let new_fid = copy_file_row(&staging, new_snap, old_snap, *old_fid)
+        for (path, (old_fid, digest)) in &map {
+            let new_fid = copy_file_row(&staging, new_snap, old_snap, *old_fid, path, digest)
                 .unwrap()
                 .expect("source row present");
             record_file_map(&staging, *old_fid, new_fid).unwrap();
         }
         // Vanished source rows copy nothing instead of corrupting.
-        assert!(copy_file_row(&staging, new_snap, old_snap, 9999)
+        assert!(
+            copy_file_row(&staging, new_snap, old_snap, 9999, "x.py", "dx")
+                .unwrap()
+                .is_none()
+        );
+        // Same id but different path or digest (concurrent replacement
+        // reusing rowids) must also copy nothing: never mix revisions.
+        assert!(
+            copy_file_row(&staging, new_snap, old_snap, 1, "other.py", "d1")
+                .unwrap()
+                .is_none()
+        );
+        assert!(copy_file_row(&staging, new_snap, old_snap, 1, "a.py", "dx")
             .unwrap()
             .is_none());
         let totals = copy_mapped_facts(&staging, new_snap, old_snap).unwrap();

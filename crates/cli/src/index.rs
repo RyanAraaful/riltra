@@ -11,6 +11,7 @@ use crate::git;
 use crate::scan::{self, PlanAction};
 use crate::store;
 use crate::syntax::{grammar_version, language_name, parse_source};
+use rusqlite::OptionalExtension;
 
 pub const DEFAULT_SEARCH_LIMIT: usize = 50;
 pub const MAX_SEARCH_LIMIT: usize = 1000;
@@ -517,12 +518,25 @@ fn build_incremental(
     }
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     let snapshot_id = store::insert_snapshot(&tx, &new_snapshot_row(name, &meta))?;
+    // Pin the copy to the exact revision classification saw: nonces are
+    // never reused across rebuilds, so a mismatch means the live database
+    // was replaced under us. Roll back and rebuild fully from source.
+    let live_nonce: Option<String> = tx
+        .query_row(
+            "SELECT nonce FROM src.snapshots WHERE id = ?1",
+            [old.id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    if live_nonce.as_deref() != Some(old.nonce.as_str()) {
+        drop(tx);
+        drop(conn);
+        let _ = std::fs::remove_file(&staging);
+        return build_full_inner(home, name, root, "fallback-full", "revision-changed");
+    }
     store::create_file_map(&tx)?;
-    let unchanged_ids: BTreeMap<&str, i64> = diff
-        .unchanged
-        .iter()
-        .map(|(p, id)| (p.as_str(), *id))
-        .collect();
+    let unchanged: BTreeSet<&str> = diff.unchanged.iter().map(|(p, _)| p.as_str()).collect();
     let mut summary = IndexSummary {
         snapshot_id,
         status_at_write: "stale".to_string(),
@@ -556,27 +570,32 @@ fn build_incremental(
     };
     let t_ingest = Instant::now();
     for item in &plan {
-        if matches!(item.action, scan::PlanAction::Parse(_)) {
-            if let Some(old_fid) = unchanged_ids.get(item.rel.as_str()) {
-                // `reparsed` counts files actually parsed; gate-skipped files
-                // cost a hash, not a parse, so they never inflate it.
+        if matches!(item.action, scan::PlanAction::Parse(_))
+            && unchanged.contains(item.rel.as_str())
+        {
+            // `reparsed` counts files actually parsed; gate-skipped files
+            // cost a hash, not a parse, so they never inflate it. The stored
+            // digest pins the copy: same bytes or nothing.
+            if let Some((old_fid, digest)) = stored.get(item.rel.as_str()) {
                 summary.files_discovered += 1;
-                match store::copy_file_row(&tx, snapshot_id, old.id, *old_fid)? {
+                match store::copy_file_row(&tx, snapshot_id, old.id, *old_fid, &item.rel, digest)? {
                     Some(new_fid) => {
                         store::record_file_map(&tx, *old_fid, new_fid)?;
                         summary.reused += 1;
                         summary.processed += 1;
+                        continue;
                     }
                     None => {
-                        // Source row vanished under us: ingest from current
-                        // source (ingest counts the file; undo our increment).
+                        // Source row vanished or mismatched under us: ingest
+                        // from current source (ingest counts the file; undo
+                        // our increment).
                         if ingest_file(&tx, snapshot_id, item, &mut summary)? {
                             summary.reparsed += 1;
                         }
                         summary.files_discovered -= 1;
+                        continue;
                     }
                 }
-                continue;
             }
         }
         let was_stored = stored.contains_key(&item.rel);
@@ -1262,6 +1281,8 @@ mod tests {
         assert_eq!(paths, vec!["b.py"]);
         let (total, _) = store::search_symbols(&conn, snap.id, "alpha", 10, 0).unwrap();
         assert_eq!(total, 0, "symlink must not serve target facts as a.py");
+        let (total, hits) = store::search_symbols(&conn, snap.id, "beta", 10, 0).unwrap();
+        assert_eq!(total, 1, "target keeps exactly one fact set: {hits:?}");
         let _ = second;
     }
 
@@ -1435,12 +1456,43 @@ mod tests {
         std::fs::rename(repo.join("a.py"), repo.join("A.py")).unwrap();
         let second = build(&home, "r", &repo, false).unwrap();
         assert_eq!(second.removed, 1);
+        assert_eq!(second.added, 1);
         let db = store::db_path(&home, "r");
         let conn = store::open_live(&db).unwrap();
         let snap = store::latest_snapshot(&conn).unwrap().unwrap();
         assert_eq!(store::files_of(&conn, snap.id).unwrap().len(), 1);
         let (total, _) = store::search_symbols(&conn, snap.id, "alpha", 10, 0).unwrap();
         assert_eq!(total, 1);
+    }
+
+    #[test]
+    fn replaced_revision_falls_back_instead_of_mixing() {
+        // Reviewer Critical 1, deterministic: drive `build_incremental`
+        // with a superseded revision. The nonce guard must refuse the copy
+        // and rebuild fully rather than mix facts across revisions.
+        use super::build_incremental;
+        let home = tmpdir("idx-revchg-home");
+        let repo = plain_repo("idx-revchg");
+        build_full(&home, "r", &repo).unwrap();
+        let db = store::db_path(&home, "r");
+        let (old_a, map_a) = {
+            let conn = store::open_live(&db).unwrap();
+            let snap = store::latest_snapshot(&conn).unwrap().unwrap();
+            let map = store::file_id_map(&conn, snap.id).unwrap();
+            (snap, map)
+        };
+        // Promote an unrelated revision B the normal way.
+        std::fs::write(repo.join("b.py"), b"def g():\n    pass\n").unwrap();
+        build(&home, "r", &repo, false).unwrap();
+        // Now replay classification inputs from revision A against live B.
+        let summary = build_incremental(&home, "r", &repo, &old_a, &map_a, &db).unwrap();
+        assert_eq!(summary.mode, "fallback-full");
+        assert_eq!(summary.fallback_reason, "revision-changed");
+        assert_eq!(summary.status_at_write, "fresh");
+        let conn = store::open_live(&db).unwrap();
+        let snap = store::latest_snapshot(&conn).unwrap().unwrap();
+        let files = store::files_of(&conn, snap.id).unwrap();
+        assert_eq!(files.len(), 2, "fallback rebuilds current source whole");
     }
 
     #[test]
