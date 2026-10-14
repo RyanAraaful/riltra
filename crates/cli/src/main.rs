@@ -33,7 +33,7 @@ const SCOPE: &str = "m1-registry";
 
 pub(crate) fn usage() -> String {
     format!(
-        "Usage:\n  {NAME} [--help] [--version] status\n  {NAME} init --repo <path> [--name <name>]\n  {NAME} repo list\n  {NAME} repo status --repo <name>\n  {NAME} doctor [--repo <name>]\n  {NAME} scan --repo <name> [--path <relpath>]... [--symbol <substr>]\n  {NAME} index --repo <name>\n  {NAME} index status --repo <name>\n  {NAME} search --repo <name> --symbol <substr> [--limit <n>] [--offset <n>]\n\nCommands:\n  status       Print deterministic bootstrap status as JSON\n  init         Register a local repository root\n  repo list    List registered repositories as JSON\n  repo status  Git/worktree fingerprint of a registered repository\n  doctor       Path-security and repository health checks as JSON\n  scan         Syntax facts (definitions/imports/calls) as JSON\n  index        Build the durable code index for a repository\n  index status Report index freshness (fresh/stale/unknown) as JSON\n  search       Search indexed symbols as JSON\n"
+        "Usage:\n  {NAME} [--help] [--version] status\n  {NAME} init --repo <path> [--name <name>]\n  {NAME} repo list\n  {NAME} repo status --repo <name>\n  {NAME} doctor [--repo <name>]\n  {NAME} scan --repo <name> [--path <relpath>]... [--symbol <substr>]\n  {NAME} index --repo <name> [--full]\n  {NAME} index status --repo <name>\n  {NAME} search --repo <name> --symbol <substr> [--limit <n>] [--offset <n>]\n\nCommands:\n  status       Print deterministic bootstrap status as JSON\n  init         Register a local repository root\n  repo list    List registered repositories as JSON\n  repo status  Git/worktree fingerprint of a registered repository\n  doctor       Path-security and repository health checks as JSON\n  scan         Syntax facts (definitions/imports/calls) as JSON\n  index        Build the durable code index for a repository\n  index status Report index freshness (fresh/stale/unknown) as JSON\n  search       Search indexed symbols as JSON\n"
     )
 }
 
@@ -208,20 +208,30 @@ fn resolve_recorded_root(name: &str, err: &mut String) -> Result<(String, String
     Ok((root, recorded))
 }
 
-fn cmd_index(name: &str, out: &mut String, err: &mut String) -> i32 {
+fn cmd_index(name: &str, full: bool, out: &mut String, err: &mut String) -> i32 {
     let home = paths::config_dir();
     let (root, _) = match resolve_recorded_root(name, err) {
         Ok(paths) => paths,
         Err(code) => return code,
     };
-    match index::build_full(&home, name, Path::new(&root)) {
+    match index::build(&home, name, Path::new(&root), full) {
         Ok(summary) => {
             *out = format!(
-                "{{\"repo\":\"{}\",\"root\":\"{}\",\"snapshot\":{},\"status_at_write\":\"{}\",\"files\":{{\"discovered\":{},\"processed\":{},\"definitions\":{},\"imports\":{},\"calls\":{},\"errors\":{},\"skipped_ignored\":{},\"skipped_large\":{},\"skipped_binary\":{},\"skipped_symlink\":{},\"skipped_escape\":{},\"skipped_unreadable\":{},\"unsupported\":{}}}}}",
+                "{{\"repo\":\"{}\",\"root\":\"{}\",\"snapshot\":{},\"status_at_write\":\"{}\",\"mode\":\"{}\",\"reused\":{},\"reparsed\":{},\"added\":{},\"removed\":{},\"fallback_reason\":\"{}\",\"timings_ms\":{{\"diff\":{},\"ingest\":{},\"verify\":{},\"promote\":{}}},\"files\":{{\"discovered\":{},\"processed\":{},\"definitions\":{},\"imports\":{},\"calls\":{},\"errors\":{},\"skipped_ignored\":{},\"skipped_large\":{},\"skipped_binary\":{},\"skipped_symlink\":{},\"skipped_escape\":{},\"skipped_unreadable\":{},\"unsupported\":{}}}}}",
                 json::escape(name),
                 json::escape(&root),
                 summary.snapshot_id,
                 summary.status_at_write,
+                summary.mode,
+                summary.reused,
+                summary.reparsed,
+                summary.added,
+                summary.removed,
+                summary.fallback_reason,
+                summary.timings_ms.diff,
+                summary.timings_ms.ingest,
+                summary.timings_ms.verify,
+                summary.timings_ms.promote,
                 summary.files_discovered,
                 summary.processed,
                 summary.definitions,
@@ -633,7 +643,7 @@ fn dispatch(cmd: Command, out: &mut String, err: &mut String) -> i32 {
             paths,
             symbol,
         } => cmd_scan(&repo, &paths, symbol.as_deref(), out, err),
-        Command::Index { repo } => cmd_index(&repo, out, err),
+        Command::Index { repo, full } => cmd_index(&repo, full, out, err),
         Command::IndexStatus { repo } => cmd_index_status(&repo, out, err),
         Command::Search {
             repo,

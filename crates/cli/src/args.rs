@@ -25,6 +25,7 @@ pub enum Command {
     },
     Index {
         repo: String,
+        full: bool,
     },
     IndexStatus {
         repo: String,
@@ -127,8 +128,12 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                 _ => (false, 1),
             };
             let mut repo = None;
+            let mut full = false;
             while i < args.len() {
-                if let Some(v) = take_value(args, &mut i, "--repo") {
+                if args[i] == "--full" && !subcommand {
+                    full = true;
+                    i += 1;
+                } else if let Some(v) = take_value(args, &mut i, "--repo") {
                     repo = Some(v);
                 } else {
                     return Err(crate::usage());
@@ -136,7 +141,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             }
             match repo {
                 Some(repo) if subcommand => Ok(Command::IndexStatus { repo }),
-                Some(repo) => Ok(Command::Index { repo }),
+                Some(repo) => Ok(Command::Index { repo, full }),
                 None => Err(crate::usage()),
             }
         }
@@ -262,6 +267,20 @@ mod tests {
         ));
         assert!(p(&["scan"]).is_err());
         assert!(p(&["scan", "--path", "a.py"]).is_err());
+    }
+
+    #[test]
+    fn parses_index_full_flag() {
+        assert!(matches!(
+            p(&["index", "--repo", "r", "--full"]),
+            Ok(Command::Index { repo, full: true }) if repo == "r"
+        ));
+        assert!(matches!(
+            p(&["index", "--repo", "r"]),
+            Ok(Command::Index { repo, full: false }) if repo == "r"
+        ));
+        assert!(p(&["index", "--repo", "r", "--full=x"]).is_err());
+        assert!(p(&["index", "--repo", "r", "bogus"]).is_err());
     }
 
     #[test]

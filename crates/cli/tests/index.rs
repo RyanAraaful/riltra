@@ -417,3 +417,51 @@ fn index_output_contract_and_unknown_repo() {
     let (code, _, err) = run(&h, &["index", "--repo", "nope"]);
     assert_eq!(code, 3, "unknown repo must fail: {err}");
 }
+
+#[test]
+fn cli_cold_start_reports_cold_start() {
+    let h = home("coldstart");
+    let repo = mkrepo(&h, "work");
+    copy_fixture(&repo, "py/hello.py");
+    let (code, _, err) = run(
+        &h,
+        &["init", "--repo", repo.to_str().unwrap(), "--name", "r"],
+    );
+    assert_eq!(code, 0, "init failed: {err}");
+    let (code, out, err) = run(&h, &["index", "--repo", "r"]);
+    assert_eq!(code, 0, "index failed: {err}");
+    assert!(out.contains("\"mode\":\"full\""), "got: {out}");
+    assert!(
+        out.contains("\"fallback_reason\":\"cold-start\""),
+        "got: {out}"
+    );
+}
+
+#[test]
+fn cli_noop_reports_zero_reparsed() {
+    let h = home("noop");
+    let repo = mkrepo(&h, "work");
+    copy_fixture(&repo, "py/hello.py");
+    init_and_index(&h, &repo, "r");
+    let (code, out, err) = run(&h, &["index", "--repo", "r"]);
+    assert_eq!(code, 0, "index failed: {err}");
+    assert!(out.contains("\"mode\":\"incremental\""), "got: {out}");
+    assert!(out.contains("\"reparsed\":0"), "got: {out}");
+    assert!(out.contains("\"fallback_reason\":\"none\""), "got: {out}");
+    assert!(out.contains("\"timings_ms\":{\"diff\":"), "got: {out}");
+}
+
+#[test]
+fn cli_full_flag_forces_full() {
+    let h = home("forcedfull");
+    let repo = mkrepo(&h, "work");
+    copy_fixture(&repo, "py/hello.py");
+    init_and_index(&h, &repo, "r");
+    let (code, out, err) = run(&h, &["index", "--repo", "r", "--full"]);
+    assert_eq!(code, 0, "index failed: {err}");
+    assert!(out.contains("\"mode\":\"full\""), "got: {out}");
+    assert!(
+        out.contains("\"fallback_reason\":\"forced-full\""),
+        "got: {out}"
+    );
+}

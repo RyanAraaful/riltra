@@ -375,11 +375,9 @@ pub fn detach_src(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
-/// Result of copying one file's facts: the new file rowid plus exact child
-/// counts, so callers keep definition/import/call/error counters without
-/// extra aggregation queries.
+/// Result of copying one file's facts: exact child counts, so callers keep
+/// definition/import/call/error counters without extra aggregation queries.
 pub struct CopiedFacts {
-    pub file_id: i64,
     pub symbols: u64,
     pub imports: u64,
     pub calls: u64,
@@ -448,7 +446,6 @@ pub fn copy_file_facts(
         counts[i] = staging.changes();
     }
     Ok(Some(CopiedFacts {
-        file_id: new_file_id,
         symbols: counts[0],
         imports: counts[1],
         calls: counts[2],

@@ -218,6 +218,9 @@ fn new_snapshot_row(name: &str, meta: &StagingMeta) -> store::Snapshot {
 /// Full rebuild into staging, then atomic promotion. Facts stream from the
 /// internal parser straight into one transaction — the whole repository is
 /// never buffered, and readers never see a half-written snapshot.
+/// Production routes through `build`; this stays as the M3-compatible entry
+/// point and the test oracle for parity.
+#[allow(dead_code)]
 pub fn build_full(home: &Path, name: &str, root: &Path) -> Result<IndexSummary, String> {
     build_full_inner(home, name, root, "full", "none")
 }
@@ -411,6 +414,9 @@ struct FileDiff {
     unchanged: Vec<(String, i64)>,
     /// Rel paths to run through `ingest_file` (modified, added, and
     /// gate-skipped files alike — ingest counts skips exactly like full).
+    /// Asserted by unit tests; production routes the single ordered walk by
+    /// plan-minus-unchanged instead of a second set.
+    #[allow(dead_code)]
     ingest_rels: Vec<String>,
     /// Stored paths with no current `Parse` item (deleted, now-ignored,
     /// now-unsupported): facts dropped, nothing ingested.
@@ -584,10 +590,10 @@ fn build_incremental(
         }
     }
     summary.timings_ms.ingest = t_ingest.elapsed().as_millis() as u64;
-    // No DETACH here: detaching inside a write transaction that read the
-    // source reports it locked. The staging connection is single-use and
-    // dropped right below, which releases the attachment.
+    // Detach after commit: detaching inside the write transaction reports
+    // the source locked, and the connection is dropped right below anyway.
     finish_snapshot_tx(tx, snapshot_id, &mut summary, &meta)?;
+    store::detach_src(&conn)?;
     drop(conn);
     summary.timings_ms.promote = promote_live(&db, &staging)?;
     Ok(summary)
