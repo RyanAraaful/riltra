@@ -1186,6 +1186,259 @@ mod tests {
     }
 
     #[test]
+    fn reuse_reads_see_single_revision() {
+        // Mechanism pin (Review Focus 2): a held read transaction keeps
+        // seeing the old revision while a second connection commits a new
+        // snapshot row. The refresh copy inherits this by reading the live
+        // database inside transactions, never bare autocommit reads.
+        fn snap_with_nonce(nonce: &str) -> store::Snapshot {
+            store::Snapshot {
+                id: 0,
+                repo: "r".to_string(),
+                root: "C:\\r".to_string(),
+                created_unix: 1,
+                head: None,
+                branch: None,
+                dirty: false,
+                untracked: 0,
+                parser_version: store::PARSER_VERSION,
+                grammar_versions: store::grammar_versions(),
+                config_fingerprint: "c".to_string(),
+                pre_fingerprint: "p".to_string(),
+                post_fingerprint: "p".to_string(),
+                status_at_write: "fresh".to_string(),
+                nonce: nonce.to_string(),
+            }
+        }
+        let dir = tmpdir("idx-singlerev");
+        let path = dir.join("s.db");
+        {
+            let conn = store::open_live(&path).unwrap();
+            store::insert_snapshot(&conn, &snap_with_nonce("nonce-a")).unwrap();
+        }
+        let mut reader = store::open_live(&path).unwrap();
+        let read_tx = reader.transaction().unwrap();
+        let before = store::latest_snapshot(&read_tx).unwrap().unwrap();
+        {
+            let writer = store::open_live(&path).unwrap();
+            store::insert_snapshot(&writer, &snap_with_nonce("nonce-b")).unwrap();
+        }
+        let during = store::latest_snapshot(&read_tx).unwrap().unwrap();
+        assert_eq!(before.nonce, during.nonce);
+        assert_eq!(during.nonce, "nonce-a");
+        drop(read_tx);
+        let after = store::latest_snapshot(&reader).unwrap().unwrap();
+        assert_eq!(after.nonce, "nonce-b");
+    }
+
+    #[test]
+    fn symlink_at_known_path_is_not_reused() {
+        // Review Focus 3: a path replaced by a symlink must lose its old
+        // facts; the link target is never served under the old path.
+        let home = tmpdir("idx-symlink-home");
+        let repo = tmpdir("idx-symlink");
+        std::fs::write(repo.join("a.py"), b"def alpha():\n    pass\n").unwrap();
+        std::fs::write(repo.join("b.py"), b"def beta():\n    pass\n").unwrap();
+        build_full(&home, "r", &repo).unwrap();
+        std::fs::remove_file(repo.join("a.py")).unwrap();
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink("b.py", repo.join("a.py")).is_ok();
+        #[cfg(windows)]
+        let made = std::os::windows::fs::symlink_file(repo.join("b.py"), repo.join("a.py")).is_ok();
+        if !made {
+            return; // no symlink privilege on this machine; scan tests cover it
+        }
+        let second = build(&home, "r", &repo, false).unwrap();
+        let db = store::db_path(&home, "r");
+        let conn = store::open_live(&db).unwrap();
+        let snap = store::latest_snapshot(&conn).unwrap().unwrap();
+        let files = store::files_of(&conn, snap.id).unwrap();
+        let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, vec!["b.py"]);
+        let (total, _) = store::search_symbols(&conn, snap.id, "alpha", 10, 0).unwrap();
+        assert_eq!(total, 0, "symlink must not serve target facts as a.py");
+        let _ = second;
+    }
+
+    #[test]
+    fn incompatible_snapshot_falls_back_with_reason() {
+        let home = tmpdir("idx-fb-home");
+        let repo = plain_repo("idx-fb");
+        build_full(&home, "r", &repo).unwrap();
+        let db = store::db_path(&home, "r");
+        let fabricate = |sql: &str| {
+            let conn = store::open_live(&db).unwrap();
+            conn.execute(sql, []).unwrap();
+        };
+        let rebuild_expect = |reason: &str| {
+            let summary = build(&home, "r", &repo, false).unwrap();
+            assert_eq!(summary.mode, "fallback-full", "for {reason}");
+            assert_eq!(summary.fallback_reason, reason, "for {reason}");
+            assert_eq!(summary.status_at_write, "fresh");
+        };
+        fabricate("UPDATE snapshots SET parser_version = 99");
+        rebuild_expect("parser-changed");
+        fabricate("UPDATE snapshots SET grammar_versions = 'x'");
+        rebuild_expect("grammar-changed");
+        fabricate("UPDATE snapshots SET head = 'deadbeef'");
+        rebuild_expect("head-changed");
+        fabricate("UPDATE snapshots SET branch = 'other'");
+        rebuild_expect("branch-changed");
+        // An ignore rule matching nothing still changes the config.
+        std::fs::write(repo.join(".riltraignore"), "zzz-no-match\n").unwrap();
+        rebuild_expect("config-changed");
+    }
+
+    #[test]
+    fn dirty_worktree_with_same_head_stays_incremental() {
+        let Some(repo) = git_repo("idx-gitdirty", "main") else {
+            return;
+        };
+        let home = tmpdir("idx-gitdirty-home");
+        std::fs::write(repo.join("a.py"), b"def f():\n    pass\n").unwrap();
+        build_full(&home, "r", &repo).unwrap();
+        // Dirty the worktree without touching HEAD: content change only.
+        std::fs::write(repo.join("a.txt"), "changed\n").unwrap();
+        let second = build(&home, "r", &repo, false).unwrap();
+        assert_eq!(second.mode, "incremental");
+        // The build itself saw a consistent source; query time still reports
+        // the dirty worktree honestly stale (M3 dirty-reason semantics).
+        assert_eq!(second.status_at_write, "fresh");
+        let eval = evaluate(&home, "r", &repo);
+        assert_eq!(eval.status, "stale");
+        assert!(eval.reasons.iter().any(|r| r == "dirty"));
+    }
+
+    #[test]
+    fn ignored_files_are_never_reused() {
+        let home = tmpdir("idx-ign-home");
+        let repo = tmpdir("idx-ign");
+        std::fs::write(repo.join("a.py"), b"def alpha():\n    pass\n").unwrap();
+        std::fs::write(repo.join("b.py"), b"def beta():\n    pass\n").unwrap();
+        build_full(&home, "r", &repo).unwrap();
+        std::fs::write(repo.join(".riltraignore"), "b.py\n").unwrap();
+        let second = build(&home, "r", &repo, false).unwrap();
+        assert_eq!(second.mode, "fallback-full");
+        assert_eq!(second.fallback_reason, "config-changed");
+        let db = store::db_path(&home, "r");
+        let conn = store::open_live(&db).unwrap();
+        let snap = store::latest_snapshot(&conn).unwrap().unwrap();
+        let files = store::files_of(&conn, snap.id).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "a.py");
+        let (total, _) = store::search_symbols(&conn, snap.id, "beta", 10, 0).unwrap();
+        assert_eq!(total, 0, "now-ignored facts must be gone");
+    }
+
+    #[test]
+    fn stale_snapshot_still_reuses_verified_files() {
+        let home = tmpdir("idx-stalereuse-home");
+        let repo = plain_repo("idx-stalereuse");
+        build_full(&home, "r", &repo).unwrap();
+        // Label the stored snapshot stale the way a raced build would,
+        // without changing any source: reuse must still be allowed because
+        // every reused file is independently digest-verified.
+        let db = store::db_path(&home, "r");
+        {
+            let conn = store::open_live(&db).unwrap();
+            conn.execute(
+                "UPDATE snapshots SET status_at_write = 'stale', post_fingerprint = 'raced'",
+                [],
+            )
+            .unwrap();
+        }
+        let second = build(&home, "r", &repo, false).unwrap();
+        assert_eq!(second.mode, "incremental");
+        assert!(second.reused > 0, "unchanged files must be reused");
+        assert_eq!(second.reparsed, 0);
+        assert_eq!(second.status_at_write, "fresh");
+    }
+
+    #[test]
+    fn ineligible_transition_drops_facts() {
+        let home = tmpdir("idx-inelig-home");
+        let repo = tmpdir("idx-inelig");
+        std::fs::write(repo.join("a.py"), b"def alpha():\n    pass\n").unwrap();
+        std::fs::write(repo.join("b.py"), b"def beta():\n    pass\n").unwrap();
+        build_full(&home, "r", &repo).unwrap();
+        std::fs::write(repo.join("a.py"), b"\x00\x01").unwrap();
+        std::fs::write(repo.join("b.py"), vec![b'x'; 1024 * 1024 + 1]).unwrap();
+        let second = build(&home, "r", &repo, false).unwrap();
+        assert_eq!(second.skipped_binary, 1);
+        assert_eq!(second.skipped_large, 1);
+        let db = store::db_path(&home, "r");
+        let conn = store::open_live(&db).unwrap();
+        let snap = store::latest_snapshot(&conn).unwrap().unwrap();
+        assert!(store::files_of(&conn, snap.id).unwrap().is_empty());
+        for name in ["alpha", "beta"] {
+            let (total, _) = store::search_symbols(&conn, snap.id, name, 10, 0).unwrap();
+            assert_eq!(total, 0, "{name} facts must be gone");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ineligible_unreadable_drops_facts() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tmpdir("idx-inelig-u-home");
+        let repo = tmpdir("idx-inelig-u");
+        std::fs::write(repo.join("c.py"), b"def gamma():\n    pass\n").unwrap();
+        build_full(&home, "r", &repo).unwrap();
+        std::fs::set_permissions(repo.join("c.py"), std::fs::Permissions::from_mode(0o000))
+            .unwrap();
+        let second = build(&home, "r", &repo, false).unwrap();
+        assert_eq!(second.skipped_unreadable, 1);
+        let db = store::db_path(&home, "r");
+        let conn = store::open_live(&db).unwrap();
+        let snap = store::latest_snapshot(&conn).unwrap().unwrap();
+        assert!(store::files_of(&conn, snap.id).unwrap().is_empty());
+        let (total, _) = store::search_symbols(&conn, snap.id, "gamma", 10, 0).unwrap();
+        assert_eq!(total, 0, "unreadable facts must be gone");
+    }
+
+    #[test]
+    fn two_repos_stay_isolated_under_incremental() {
+        let home = tmpdir("idx-iso-home");
+        let a = tmpdir("idx-iso-a");
+        let b = tmpdir("idx-iso-b");
+        std::fs::write(a.join("x.py"), b"def only_in_a():\n    pass\n").unwrap();
+        std::fs::write(b.join("x.py"), b"def only_in_b():\n    pass\n").unwrap();
+        build(&home, "ra", &a, false).unwrap();
+        build(&home, "rb", &b, false).unwrap();
+        std::fs::write(a.join("x.py"), b"def only_in_a():\n    return 1\n").unwrap();
+        let ra = build(&home, "ra", &a, false).unwrap();
+        let rb = build(&home, "rb", &b, false).unwrap();
+        assert_eq!(ra.mode, "incremental");
+        assert_eq!(rb.mode, "incremental");
+        assert_eq!(rb.reparsed, 0);
+        for (repo, symbol) in [("ra", "only_in_b"), ("rb", "only_in_a")] {
+            let db = store::db_path(&home, repo);
+            let conn = store::open_live(&db).unwrap();
+            let snap = store::latest_snapshot(&conn).unwrap().unwrap();
+            let (total, _) = store::search_symbols(&conn, snap.id, symbol, 10, 0).unwrap();
+            assert_eq!(total, 0, "{symbol} must not leak into {repo}");
+        }
+    }
+
+    #[test]
+    fn case_only_rename_has_no_duplicates() {
+        // Guard; Windows CI proves the case-insensitive half.
+        let home = tmpdir("idx-case-home");
+        let repo = tmpdir("idx-case");
+        std::fs::write(repo.join("a.py"), b"def alpha():\n    pass\n").unwrap();
+        build_full(&home, "r", &repo).unwrap();
+        std::fs::rename(repo.join("a.py"), repo.join("A.py")).unwrap();
+        let second = build(&home, "r", &repo, false).unwrap();
+        assert_eq!(second.removed, 1);
+        let db = store::db_path(&home, "r");
+        let conn = store::open_live(&db).unwrap();
+        let snap = store::latest_snapshot(&conn).unwrap().unwrap();
+        assert_eq!(store::files_of(&conn, snap.id).unwrap().len(), 1);
+        let (total, _) = store::search_symbols(&conn, snap.id, "alpha", 10, 0).unwrap();
+        assert_eq!(total, 1);
+    }
+
+    #[test]
     fn reuse_window_mutation_is_caught() {
         use super::verify_snapshot_content;
         let home = tmpdir("idx-rwindow-home");

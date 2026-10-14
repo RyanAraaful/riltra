@@ -545,3 +545,89 @@ fn cli_search_parity_full_vs_incremental() {
         );
     }
 }
+
+#[test]
+fn concurrent_search_during_incremental_refresh_stays_consistent() {
+    let h = home("concurrent-inc");
+    let repo = mkrepo(&h, "work");
+    copy_fixture(&repo, "py/hello.py");
+    copy_fixture(&repo, "js/hello.js");
+    init_and_index(&h, &repo, "r");
+    let home_clone = h.clone();
+    let builder = std::thread::spawn(move || {
+        for _ in 0..2 {
+            let (code, out, err) = run(&home_clone, &["index", "--repo", "r"]);
+            assert_eq!(code, 0, "rebuild failed: {err}");
+            assert!(
+                out.contains("\"mode\":\"incremental\""),
+                "expected incremental refresh: {out}"
+            );
+        }
+    });
+    let mut checked = 0;
+    for _ in 0..30 {
+        let (code, out, _) = run(&h, &["search", "--repo", "r", "--symbol", "a"]);
+        assert_eq!(code, 0);
+        assert!(
+            snapshot_ids_consistent(&out),
+            "mixed snapshots in one response: {out}"
+        );
+        checked += 1;
+    }
+    builder.join().unwrap();
+    assert!(checked > 0);
+}
+
+#[test]
+fn incremental_two_repositories_stay_isolated() {
+    let h = home("isolated-inc");
+    let a = mkrepo(&h, "a");
+    let b = mkrepo(&h, "b");
+    std::fs::write(a.join("x.py"), b"def only_in_a():\n    pass\n").unwrap();
+    std::fs::write(b.join("x.py"), b"def only_in_b():\n    pass\n").unwrap();
+    init_and_index(&h, &a, "ra");
+    init_and_index(&h, &b, "rb");
+    let (code, out, err) = run(&h, &["index", "--repo", "ra"]);
+    assert_eq!(code, 0, "incremental index failed: {err}");
+    assert!(out.contains("\"mode\":\"incremental\""), "got: {out}");
+    let (code, out, err) = run(&h, &["index", "--repo", "rb"]);
+    assert_eq!(code, 0, "incremental index failed: {err}");
+    assert!(out.contains("\"mode\":\"incremental\""), "got: {out}");
+    let (_, out_a, _) = run(&h, &["search", "--repo", "ra", "--symbol", "only_in_b"]);
+    assert!(out_a.contains("\"total\":0"), "got: {out_a}");
+    let (_, out_b, _) = run(&h, &["search", "--repo", "rb", "--symbol", "only_in_a"]);
+    assert!(out_b.contains("\"total\":0"), "got: {out_b}");
+}
+
+#[test]
+fn incremental_recovers_partial_staging() {
+    let h = home("staging-inc");
+    let repo = mkrepo(&h, "work");
+    copy_fixture(&repo, "py/hello.py");
+    init_and_index(&h, &repo, "r");
+    let staging = h.join("index").join("r.db.staging");
+    std::fs::write(&staging, b"corrupt leftover").unwrap();
+    let (code, out, err) = run(&h, &["index", "--repo", "r"]);
+    assert_eq!(code, 0, "rebuild must overwrite corrupt staging: {err}");
+    assert!(!staging.exists(), "staging must be consumed by promote");
+    let _ = out;
+}
+
+#[test]
+fn incremental_recovers_corrupt_live_as_fallback() {
+    let h = home("corruptlive-inc");
+    let repo = mkrepo(&h, "work");
+    copy_fixture(&repo, "py/hello.py");
+    init_and_index(&h, &repo, "r");
+    std::fs::write(h.join("index").join("r.db"), b"not a database").unwrap();
+    let (code, out, err) = run(&h, &["index", "--repo", "r"]);
+    assert_eq!(code, 0, "recovery rebuild must succeed: {err}");
+    assert!(out.contains("\"mode\":\"fallback-full\""), "got: {out}");
+    assert!(
+        out.contains("\"fallback_reason\":\"db-unreadable\""),
+        "got: {out}"
+    );
+    let (code, out, err) = run(&h, &["search", "--repo", "r", "--symbol", "Worker"]);
+    assert_eq!(code, 0, "search after recovery failed: {err}");
+    assert!(out.contains("\"total\":1"), "got: {out}");
+}
