@@ -9,12 +9,12 @@
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::ignore::{is_ignored, load_rules};
 use crate::json::escape;
 use crate::paths::contains;
-use crate::syntax::{classify, file_facts_json, language_name, parse_source, FileKind};
+use crate::syntax::{classify, file_facts_json, language_name, parse_source, FileKind, Language};
 
 pub const MAX_FILE_BYTES: u64 = 1024 * 1024;
 pub const MAX_UNSUPPORTED_EXAMPLES: usize = 50;
@@ -30,6 +30,44 @@ pub struct ScanOptions {
 struct Entry {
     json: String,
     def_names: Vec<String>,
+}
+
+/// Walk decision per file, shared by JSON scanning and index building so both
+/// enforce identical policy (sorted walk, no symlink following, `.git` and
+/// ignore skips, containment). Content checks (size, binary) stay with the
+/// reader as a TOCTOU guard.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PlanAction {
+    Parse(Language),
+    Skip(&'static str),
+    Unsupported(&'static str),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlannedFile {
+    pub rel: String,
+    pub full: PathBuf,
+    pub action: PlanAction,
+}
+
+/// Full deterministic walk of `root`, returning one plan entry per file.
+/// Directory-level skips (escapes, unreadable dirs) ride along separately
+/// since directories produce no file entries.
+pub fn plan_walk(root: &Path) -> Result<(Vec<PlannedFile>, DirSkips), String> {
+    let canon_root = root
+        .canonicalize()
+        .map_err(|e| format!("cannot resolve root: {e}"))?;
+    let (rules, _) = load_rules(root);
+    let mut plan = Vec::new();
+    let mut skips = DirSkips::default();
+    walk_plan(&canon_root, &canon_root, "", &rules, &mut plan, &mut skips);
+    Ok((plan, skips))
+}
+
+#[derive(Debug, Default)]
+pub struct DirSkips {
+    pub escape: usize,
+    pub unreadable: usize,
 }
 
 #[derive(Default)]
@@ -73,16 +111,33 @@ fn unsupported_reason(kind: &FileKind) -> &'static str {
     }
 }
 
-fn process_file(
+/// Render one planned file into JSON, enforcing content checks at read time
+/// (size cap, binary refusal) as a TOCTOU guard behind the walk decision.
+fn render_planned(
     full: &Path,
     rel: &str,
+    action: &PlanAction,
     entries: &mut Vec<Entry>,
     counters: &mut Counters,
     unsupported: &mut Vec<(String, String)>,
     languages: &mut BTreeMap<String, u32>,
 ) {
     counters.discovered += 1;
-    // Size gate before reading: never load huge artifacts into memory.
+    if let PlanAction::Skip(reason) = action {
+        match *reason {
+            "ignored" => counters.skipped_ignored += 1,
+            "symlink-not-followed" => counters.skipped_symlink += 1,
+            _ => counters.skipped_unreadable += 1,
+        }
+        entries.push(Entry {
+            json: skipped_json(rel, reason),
+            def_names: Vec::new(),
+        });
+        return;
+    }
+    // Content gates run before the extension verdict, exactly like the
+    // original scan order: a huge or binary `.xyz` reports skipped, not
+    // unsupported.
     let too_large = std::fs::metadata(full)
         .map(|m| m.len() > MAX_FILE_BYTES)
         .unwrap_or(false);
@@ -121,16 +176,26 @@ fn process_file(
         });
         return;
     }
-    match classify(Path::new(rel)) {
-        FileKind::Supported(lang) => {
-            let facts = parse_source(lang, &bytes);
+    match action {
+        // Skips returned early above; listed for exhaustiveness only.
+        PlanAction::Skip(_) => {}
+        PlanAction::Unsupported(reason) => {
+            counters.unsupported_total += 1;
+            unsupported.push((rel.to_string(), reason.to_string()));
+            entries.push(Entry {
+                json: unsupported_json(rel, reason),
+                def_names: Vec::new(),
+            });
+        }
+        PlanAction::Parse(lang) => {
+            let facts = parse_source(*lang, &bytes);
             counters.processed += 1;
             counters.definitions += facts.definitions.len();
             counters.imports += facts.imports.len();
             counters.calls += facts.calls.len();
             counters.errors += facts.errors;
             *languages
-                .entry(language_name(lang).to_string())
+                .entry(language_name(*lang).to_string())
                 .or_insert(0) += 1;
             let def_names: Vec<String> = facts
                 .definitions
@@ -140,15 +205,6 @@ fn process_file(
             entries.push(Entry {
                 json: file_facts_json(rel, &facts),
                 def_names,
-            });
-        }
-        kind => {
-            let reason = unsupported_reason(&kind);
-            counters.unsupported_total += 1;
-            unsupported.push((rel.to_string(), reason.to_string()));
-            entries.push(Entry {
-                json: unsupported_json(rel, reason),
-                def_names: Vec::new(),
             });
         }
     }
@@ -163,21 +219,18 @@ fn sorted_entries(rd: std::fs::ReadDir) -> Vec<(OsString, std::fs::FileType)> {
     entries
 }
 
-#[allow(clippy::too_many_arguments)]
-fn walk(
+fn walk_plan(
     canon_root: &Path,
     dir: &Path,
     prefix: &str,
     rules: &[String],
-    entries: &mut Vec<Entry>,
-    counters: &mut Counters,
-    unsupported: &mut Vec<(String, String)>,
-    languages: &mut BTreeMap<String, u32>,
+    plan: &mut Vec<PlannedFile>,
+    skips: &mut DirSkips,
 ) {
     let dir_entries = match std::fs::read_dir(dir) {
         Ok(rd) => sorted_entries(rd),
         Err(_) => {
-            counters.skipped_unreadable += 1;
+            skips.unreadable += 1;
             return;
         }
     };
@@ -190,11 +243,10 @@ fn walk(
         };
         let full = dir.join(&name);
         if file_type.is_symlink() {
-            counters.discovered += 1;
-            counters.skipped_symlink += 1;
-            entries.push(Entry {
-                json: skipped_json(&rel, "symlink-not-followed"),
-                def_names: Vec::new(),
+            plan.push(PlannedFile {
+                rel,
+                full,
+                action: PlanAction::Skip("symlink-not-followed"),
             });
             continue;
         }
@@ -203,18 +255,11 @@ fn walk(
                 continue; // default + rule skips: subtrees never entered, uncounted
             }
             match full.canonicalize() {
-                Ok(c) if contains(canon_root, &c) => walk(
-                    canon_root,
-                    &full,
-                    &rel,
-                    rules,
-                    entries,
-                    counters,
-                    unsupported,
-                    languages,
-                ),
+                Ok(c) if contains(canon_root, &c) => {
+                    walk_plan(canon_root, &full, &rel, rules, plan, skips)
+                }
                 _ => {
-                    counters.skipped_escape += 1;
+                    skips.escape += 1;
                 }
             }
             continue;
@@ -223,15 +268,18 @@ fn walk(
             continue;
         }
         if is_ignored(rules, &rel) {
-            counters.discovered += 1;
-            counters.skipped_ignored += 1;
-            entries.push(Entry {
-                json: skipped_json(&rel, "ignored"),
-                def_names: Vec::new(),
+            plan.push(PlannedFile {
+                rel,
+                full,
+                action: PlanAction::Skip("ignored"),
             });
             continue;
         }
-        process_file(&full, &rel, entries, counters, unsupported, languages);
+        let action = match classify(Path::new(&rel)) {
+            FileKind::Supported(lang) => PlanAction::Parse(lang),
+            kind => PlanAction::Unsupported(unsupported_reason(&kind)),
+        };
+        plan.push(PlannedFile { rel, full, action });
     }
 }
 
@@ -253,23 +301,26 @@ pub fn scan_repo(name: &str, root: &Path, opts: &ScanOptions) -> Result<String, 
     let canon_root = root
         .canonicalize()
         .map_err(|e| format!("cannot resolve root: {e}"))?;
-    let (rules, _) = load_rules(root);
     let mut entries: Vec<Entry> = Vec::new();
     let mut counters = Counters::default();
     let mut unsupported: Vec<(String, String)> = Vec::new();
     let mut languages: BTreeMap<String, u32> = BTreeMap::new();
 
     if opts.paths.is_empty() {
-        walk(
-            &canon_root,
-            &canon_root,
-            "",
-            &rules,
-            &mut entries,
-            &mut counters,
-            &mut unsupported,
-            &mut languages,
-        );
+        let (plan, skips) = plan_walk(&canon_root)?;
+        counters.skipped_escape += skips.escape;
+        counters.skipped_unreadable += skips.unreadable;
+        for item in &plan {
+            render_planned(
+                &item.full,
+                &item.rel,
+                &item.action,
+                &mut entries,
+                &mut counters,
+                &mut unsupported,
+                &mut languages,
+            );
+        }
     } else {
         for raw in &opts.paths {
             let rel = normalize_rel(raw)?;
@@ -283,9 +334,14 @@ pub fn scan_repo(name: &str, root: &Path, opts: &ScanOptions) -> Result<String, 
             if !canon.is_file() {
                 return Err(format!("--path must be a file: '{raw}'"));
             }
-            process_file(
+            let action = match classify(Path::new(&rel)) {
+                FileKind::Supported(lang) => PlanAction::Parse(lang),
+                kind => PlanAction::Unsupported(unsupported_reason(&kind)),
+            };
+            render_planned(
                 &canon,
                 &rel,
+                &action,
                 &mut entries,
                 &mut counters,
                 &mut unsupported,

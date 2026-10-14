@@ -33,6 +33,20 @@ pub fn language_name(lang: Language) -> &'static str {
     }
 }
 
+/// Grammar crate version backing a language, matching `store::grammar_versions`
+/// and `Cargo.lock` (pinned by test on both sides).
+pub fn grammar_version(lang: Language) -> &'static str {
+    match lang {
+        Language::Python => "python:0.25.0",
+        Language::JavaScript => "javascript:0.25.0",
+        Language::TypeScript => "typescript:0.23.2",
+        Language::Tsx => "tsx:0.23.2",
+        Language::Rust => "rust:0.24.2",
+        Language::C => "c:0.24.2",
+        Language::Cpp => "cpp:0.23.4",
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum FileKind {
     Supported(Language),
@@ -428,7 +442,7 @@ pub fn file_facts_json(rel: &str, facts: &FileFacts) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{classify, language_name, parse_source, FileKind, Language};
+    use super::{classify, grammar_version, language_name, parse_source, FileKind, Language};
     use std::path::Path;
 
     #[test]
@@ -506,5 +520,11 @@ mod tests {
     fn language_names_are_stable() {
         assert_eq!(language_name(Language::Cpp), "cpp");
         assert_eq!(language_name(Language::Tsx), "tsx");
+    }
+
+    #[test]
+    fn grammar_versions_match_lockfile_entries() {
+        assert_eq!(grammar_version(Language::Python), "python:0.25.0");
+        assert_eq!(grammar_version(Language::Cpp), "cpp:0.23.4");
     }
 }

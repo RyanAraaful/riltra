@@ -11,10 +11,12 @@ mod args;
 mod doctor;
 mod git;
 mod ignore;
+mod index;
 mod json;
 mod paths;
 mod registry;
 mod scan;
+mod store;
 mod syntax;
 
 #[cfg(test)]
@@ -31,7 +33,7 @@ const SCOPE: &str = "m1-registry";
 
 pub(crate) fn usage() -> String {
     format!(
-        "Usage:\n  {NAME} [--help] [--version] status\n  {NAME} init --repo <path> [--name <name>]\n  {NAME} repo list\n  {NAME} repo status --repo <name>\n  {NAME} doctor [--repo <name>]\n  {NAME} scan --repo <name> [--path <relpath>]... [--symbol <substr>]\n\nCommands:\n  status       Print deterministic bootstrap status as JSON\n  init         Register a local repository root\n  repo list    List registered repositories as JSON\n  repo status  Git/worktree fingerprint of a registered repository\n  doctor       Path-security and repository health checks as JSON\n  scan         Syntax facts (definitions/imports/calls) as JSON\n"
+        "Usage:\n  {NAME} [--help] [--version] status\n  {NAME} init --repo <path> [--name <name>]\n  {NAME} repo list\n  {NAME} repo status --repo <name>\n  {NAME} doctor [--repo <name>]\n  {NAME} scan --repo <name> [--path <relpath>]... [--symbol <substr>]\n  {NAME} index --repo <name>\n  {NAME} index status --repo <name>\n  {NAME} search --repo <name> --symbol <substr> [--limit <n>] [--offset <n>]\n\nCommands:\n  status       Print deterministic bootstrap status as JSON\n  init         Register a local repository root\n  repo list    List registered repositories as JSON\n  repo status  Git/worktree fingerprint of a registered repository\n  doctor       Path-security and repository health checks as JSON\n  scan         Syntax facts (definitions/imports/calls) as JSON\n  index        Build the durable code index for a repository\n  index status Report index freshness (fresh/stale/unknown) as JSON\n  search       Search indexed symbols as JSON\n"
     )
 }
 
@@ -169,6 +171,281 @@ fn cmd_repo_status(name: &str, out: &mut String, err: &mut String) -> i32 {
     } else {
         0
     }
+}
+
+fn resolve_recorded_root(name: &str, err: &mut String) -> Result<(String, String), i32> {
+    let reg = match registry::load(&paths::registry_path()) {
+        Ok(r) => r,
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            return Err(3);
+        }
+    };
+    let entry = match registry::find(&reg, name) {
+        Some(e) => e,
+        None => {
+            err.push_str(&format!("error: unknown repository: '{name}'\n"));
+            return Err(3);
+        }
+    };
+    let recorded = entry.root.clone();
+    let canon = match paths::canonical_root(Path::new(&recorded)) {
+        Ok(c) => c,
+        Err(_) => {
+            err.push_str(&format!(
+                "error: registered root is missing: '{recorded}'\n"
+            ));
+            return Err(3);
+        }
+    };
+    let root = canon.to_string_lossy().to_string();
+    if root != recorded {
+        err.push_str(&format!(
+            "error: registered root moved or retargeted (record '{recorded}')\n"
+        ));
+        return Err(3);
+    }
+    Ok((root, recorded))
+}
+
+fn cmd_index(name: &str, out: &mut String, err: &mut String) -> i32 {
+    let home = paths::config_dir();
+    let (root, _) = match resolve_recorded_root(name, err) {
+        Ok(paths) => paths,
+        Err(code) => return code,
+    };
+    match index::build_full(&home, name, Path::new(&root)) {
+        Ok(summary) => {
+            *out = format!(
+                "{{\"repo\":\"{}\",\"root\":\"{}\",\"snapshot\":{},\"status_at_write\":\"{}\",\"files\":{{\"discovered\":{},\"processed\":{},\"definitions\":{},\"imports\":{},\"calls\":{},\"errors\":{},\"skipped_ignored\":{},\"skipped_large\":{},\"skipped_binary\":{},\"skipped_symlink\":{},\"skipped_escape\":{},\"skipped_unreadable\":{},\"unsupported\":{}}}}}",
+                json::escape(name),
+                json::escape(&root),
+                summary.snapshot_id,
+                summary.status_at_write,
+                summary.files_discovered,
+                summary.processed,
+                summary.definitions,
+                summary.imports,
+                summary.calls,
+                summary.errors,
+                summary.skipped_ignored,
+                summary.skipped_large,
+                summary.skipped_binary,
+                summary.skipped_symlink,
+                summary.skipped_escape,
+                summary.skipped_unreadable,
+                summary.unsupported_total
+            ) + "\n";
+            0
+        }
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            3
+        }
+    }
+}
+
+fn snapshot_json(snapshot: &store::Snapshot) -> String {
+    format!(
+        "{{\"id\":{},\"created_unix\":{},\"head\":{},\"branch\":{},\"dirty\":{},\"status_at_write\":\"{}\"}}",
+        snapshot.id,
+        snapshot.created_unix,
+        match &snapshot.head {
+            Some(h) => format!("\"{}\"", json::escape(h)),
+            None => "null".to_string(),
+        },
+        match &snapshot.branch {
+            Some(b) => format!("\"{}\"", json::escape(b)),
+            None => "null".to_string(),
+        },
+        snapshot.dirty,
+        snapshot.status_at_write
+    )
+}
+
+fn cmd_index_status(name: &str, out: &mut String, err: &mut String) -> i32 {
+    let home = paths::config_dir();
+    let reg = match registry::load(&paths::registry_path()) {
+        Ok(r) => r,
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            return 3;
+        }
+    };
+    let entry = match registry::find(&reg, name) {
+        Some(e) => e,
+        None => {
+            err.push_str(&format!("error: unknown repository: '{name}'\n"));
+            return 3;
+        }
+    };
+    let recorded = entry.root.clone();
+    let freshness = index::evaluate(&home, name, Path::new(&recorded));
+    let fts = store::open_live(&store::db_path(&home, name))
+        .map(|conn| store::fts_available(&conn))
+        .unwrap_or(false);
+    let reasons: Vec<String> = freshness
+        .reasons
+        .iter()
+        .map(|r| format!("\"{r}\""))
+        .collect();
+    *out = format!(
+        "{{\"repo\":\"{}\",\"root\":\"{}\",\"freshness\":\"{}\",\"reasons\":[{}],\"fts\":{},\"snapshot\":{}}}",
+        json::escape(name),
+        json::escape(&recorded),
+        freshness.status,
+        reasons.join(","),
+        fts,
+        match &freshness.snapshot {
+            Some(snapshot) => snapshot_json(snapshot),
+            None => "null".to_string(),
+        }
+    ) + "\n";
+    0
+}
+
+fn parse_count(value: Option<&str>, fallback: usize, arg: &str) -> Result<usize, String> {
+    match value {
+        None => Ok(fallback),
+        Some(text) => text
+            .parse::<usize>()
+            .map_err(|_| format!("invalid --{arg} value: '{text}'")),
+    }
+}
+
+fn cmd_search(
+    name: &str,
+    symbol: &str,
+    limit: Option<&str>,
+    offset: Option<&str>,
+    out: &mut String,
+    err: &mut String,
+) -> i32 {
+    let limit = match parse_count(limit, index::DEFAULT_SEARCH_LIMIT, "limit") {
+        Ok(n) => n,
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            return 2;
+        }
+    };
+    let offset = match parse_count(offset, 0, "offset") {
+        Ok(n) => n,
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            return 2;
+        }
+    };
+    if limit > index::MAX_SEARCH_LIMIT {
+        err.push_str(&format!(
+            "error: --limit exceeds maximum {}\n",
+            index::MAX_SEARCH_LIMIT
+        ));
+        return 2;
+    }
+    let home = paths::config_dir();
+    let reg = match registry::load(&paths::registry_path()) {
+        Ok(r) => r,
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            return 3;
+        }
+    };
+    let entry = match registry::find(&reg, name) {
+        Some(e) => e,
+        None => {
+            err.push_str(&format!("error: unknown repository: '{name}'\n"));
+            return 3;
+        }
+    };
+    let recorded = entry.root.clone();
+    let freshness = index::evaluate(&home, name, Path::new(&recorded));
+    let snapshot = match &freshness.snapshot {
+        Some(s) => s.clone(),
+        None => {
+            if store::db_path(&home, name).exists() {
+                // A database file exists but yields no snapshot: corrupt or
+                // tampered. Fail loudly instead of serving silent emptiness.
+                err.push_str("error: index database unreadable; rebuild with `index`\n");
+                return 3;
+            }
+            *out = format!(
+                "{{\"repo\":\"{}\",\"root\":\"{}\",\"snapshot\":null,\"freshness\":\"{}\",\"reasons\":[{}],\"query\":{{\"symbol\":\"{}\",\"limit\":{},\"offset\":{}}},\"total\":0,\"results\":[],\"truncated\":false}}\n",
+                json::escape(name),
+                json::escape(&recorded),
+                freshness.status,
+                freshness
+                    .reasons
+                    .iter()
+                    .map(|r| format!("\"{r}\""))
+                    .collect::<Vec<_>>()
+                    .join(","),
+                json::escape(symbol),
+                limit,
+                offset
+            );
+            return 0;
+        }
+    };
+    let db = store::db_path(&home, name);
+    let conn = match store::open_live(&db) {
+        Ok(c) => c,
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            return 3;
+        }
+    };
+    let (total, hits) = match store::search_symbols(&conn, snapshot.id, symbol, limit, offset) {
+        Ok(found) => found,
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            return 3;
+        }
+    };
+    let results: Vec<String> = hits
+        .iter()
+        .map(|hit| {
+            format!(
+                "{{\"path\":\"{}\",\"kind\":\"{}\",\"name\":{},\"span\":{{\"start_line\":{},\"start_col\":{},\"end_line\":{},\"end_col\":{}}},\"bytes\":[{},{}],\"provenance\":{{\"provider\":\"{}\",\"grammar\":\"{}\",\"language\":\"{}\"}},\"snapshot\":{}}}",
+                json::escape(&hit.path),
+                hit.kind,
+                match &hit.name {
+                    Some(n) => format!("\"{}\"", json::escape(n)),
+                    None => "null".to_string(),
+                },
+                hit.start_line,
+                hit.start_col,
+                hit.end_line,
+                hit.end_col,
+                hit.byte_start,
+                hit.byte_end,
+                hit.provider,
+                hit.grammar,
+                hit.language,
+                hit.snapshot_id
+            )
+        })
+        .collect();
+    let truncated = offset + results.len() < total;
+    *out = format!(
+        "{{\"repo\":\"{}\",\"root\":\"{}\",\"snapshot\":{},\"freshness\":\"{}\",\"reasons\":[{}],\"query\":{{\"symbol\":\"{}\",\"limit\":{},\"offset\":{}}},\"total\":{},\"results\":[{}],\"truncated\":{}}}",
+        json::escape(name),
+        json::escape(&snapshot.root),
+        snapshot.id,
+        freshness.status,
+        freshness
+            .reasons
+            .iter()
+            .map(|r| format!("\"{r}\""))
+            .collect::<Vec<_>>()
+            .join(","),
+        json::escape(symbol),
+        limit,
+        offset,
+        total,
+        results.join(","),
+        truncated
+    ) + "\n";
+    0
 }
 
 fn cmd_scan(
@@ -341,6 +618,21 @@ fn dispatch(cmd: Command, out: &mut String, err: &mut String) -> i32 {
             paths,
             symbol,
         } => cmd_scan(&repo, &paths, symbol.as_deref(), out, err),
+        Command::Index { repo } => cmd_index(&repo, out, err),
+        Command::IndexStatus { repo } => cmd_index_status(&repo, out, err),
+        Command::Search {
+            repo,
+            symbol,
+            limit,
+            offset,
+        } => cmd_search(
+            &repo,
+            &symbol,
+            limit.as_deref(),
+            offset.as_deref(),
+            out,
+            err,
+        ),
     }
 }
 

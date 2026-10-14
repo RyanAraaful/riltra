@@ -23,6 +23,18 @@ pub enum Command {
         paths: Vec<String>,
         symbol: Option<String>,
     },
+    Index {
+        repo: String,
+    },
+    IndexStatus {
+        repo: String,
+    },
+    Search {
+        repo: String,
+        symbol: String,
+        limit: Option<String>,
+        offset: Option<String>,
+    },
 }
 
 /// Parse full argv (including argv[0]-style first token). `Err` is the usage
@@ -107,6 +119,54 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                     symbol,
                 }),
                 None => Err(crate::usage()),
+            }
+        }
+        "index" => {
+            let (subcommand, mut i) = match args.get(1).map(String::as_str) {
+                Some("status") => (true, 2),
+                _ => (false, 1),
+            };
+            let mut repo = None;
+            while i < args.len() {
+                if let Some(v) = take_value(args, &mut i, "--repo") {
+                    repo = Some(v);
+                } else {
+                    return Err(crate::usage());
+                }
+            }
+            match repo {
+                Some(repo) if subcommand => Ok(Command::IndexStatus { repo }),
+                Some(repo) => Ok(Command::Index { repo }),
+                None => Err(crate::usage()),
+            }
+        }
+        "search" => {
+            let mut repo = None;
+            let mut symbol = None;
+            let mut limit = None;
+            let mut offset = None;
+            let mut i = 1;
+            while i < args.len() {
+                if let Some(v) = take_value(args, &mut i, "--repo") {
+                    repo = Some(v);
+                } else if let Some(v) = take_value(args, &mut i, "--symbol") {
+                    symbol = Some(v);
+                } else if let Some(v) = take_value(args, &mut i, "--limit") {
+                    limit = Some(v);
+                } else if let Some(v) = take_value(args, &mut i, "--offset") {
+                    offset = Some(v);
+                } else {
+                    return Err(crate::usage());
+                }
+            }
+            match (repo, symbol) {
+                (Some(repo), Some(symbol)) => Ok(Command::Search {
+                    repo,
+                    symbol,
+                    limit,
+                    offset,
+                }),
+                _ => Err(crate::usage()),
             }
         }
         _ => Err(crate::usage()),
@@ -202,6 +262,44 @@ mod tests {
         ));
         assert!(p(&["scan"]).is_err());
         assert!(p(&["scan", "--path", "a.py"]).is_err());
+    }
+
+    #[test]
+    fn parses_index_and_search() {
+        assert!(matches!(
+            p(&["index", "--repo", "r"]),
+            Ok(Command::Index { .. })
+        ));
+        assert!(matches!(
+            p(&["index", "status", "--repo", "r"]),
+            Ok(Command::IndexStatus { .. })
+        ));
+        assert!(p(&["index"]).is_err());
+        assert!(p(&["index", "status"]).is_err());
+        assert!(p(&["index", "bogus", "--repo", "r"]).is_err());
+        assert!(matches!(
+            p(&["search", "--repo", "r", "--symbol", "f"]),
+            Ok(Command::Search {
+                limit: None,
+                offset: None,
+                ..
+            })
+        ));
+        assert!(matches!(
+            p(&[
+                "search",
+                "--repo",
+                "r",
+                "--symbol",
+                "f",
+                "--limit",
+                "10",
+                "--offset=5"
+            ]),
+            Ok(Command::Search { .. })
+        ));
+        assert!(p(&["search", "--repo", "r"]).is_err());
+        assert!(p(&["search", "--symbol", "f"]).is_err());
     }
 
     #[test]
