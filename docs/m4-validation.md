@@ -82,8 +82,22 @@ two repetitions each.
   wall-time gap is modest — the hard guarantees are single-file reparsing
   and fact parity, both proven.
 - **D. Search/freshness:** `PatchMatch` 2.50/2.48 s (`total` 29, exact
-  spans as M3), `index status` 2.38/2.35 s `fresh` — M3 latencies
+  spans as M3), `index status` 2.38/2.35 s `fresh` - M3 latencies
   unchanged, no query impact.
+- **E. One-file delta at full MMSP scale (isolated copy: 18,057 files,
+  6.6 GB, copied in 49 s; original tree porcelain 0 throughout):**
+  cold full F1 332.3 s / 501.8 MB; delta D1 (one appended comment in
+  `patch_match.cc`) 15.3 s / 355.8 MB (`reused` 11,764, `reparsed` 1,
+  `fresh`, reason `none`); full F2 206.9 s / 433.8 MB; delta D2 (second
+  file) 15.3 s (`reused` 11,764, `reparsed` 1); independent full oracle
+  on the same final tree (fresh home) 210 s / 420.7 MB. Counters
+  byte-identical D2 vs oracle (170,586 / 64,954 / 562,384 / 152,543);
+  search `PatchMatch` 29=29 and `Run` 1398=1398 identical after
+  volatile-field normalization - no stale facts. Query-time status
+  honestly `stale`/`dirty` (the copy carries `.git`, two files modified)
+  while `status_at_write=fresh` - the two-level contract, demonstrated.
+  About **13.5x** vs the paired full (210 s to 15.3 s). No speedup was
+  claimed before these numbers existed.
 - **No-op verdict:** promote (~3.9 s of ~15.5 s) does not dominate; copy
   inserts do. The no-promotion short-circuit is declined — a second code
   path to save a quarter of the time is not worth it.
@@ -122,7 +136,11 @@ two repetitions each.
 
 - `cargo fmt --all -- --check`, `cargo check --locked`,
   `cargo clippy --all-targets -- -D warnings`, `cargo test --locked`:
-  green locally (155/155). CI Windows/Ubuntu/macOS pending push approval.
+  green locally (155/155). CI run #20 (code `360e7fb`): Windows, Ubuntu,
+  and macOS all green. CI run #21 (docs-only follow-up `bd14cce`):
+  Windows and Ubuntu green; the macOS job was cancelled without ever
+  receiving a runner (zero steps ran - not a test failure), re-run
+  pending at audit time.
 - No MMSP path in CI configuration or committed tests; Tier B outputs
   live outside the repo (private blueprint copy).
 
