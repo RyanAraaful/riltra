@@ -3,9 +3,9 @@
 //! database, promoted atomically; plus freshness evaluation with reasons.
 //! Queries never trust a timestamp alone — every verdict names its evidence.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::git;
 use crate::scan::{self, PlanAction};
@@ -40,6 +40,22 @@ pub struct IndexSummary {
     pub skipped_escape: usize,
     pub skipped_unreadable: usize,
     pub unsupported_total: usize,
+    pub mode: String,
+    pub reused: usize,
+    pub reparsed: usize,
+    pub added: usize,
+    pub removed: usize,
+    pub fallback_reason: String,
+    pub timings_ms: PhaseMs,
+}
+
+/// Milliseconds per build phase, for auditable before/after comparison.
+/// No telemetry: one small struct per `index` run, reported in its JSON.
+pub struct PhaseMs {
+    pub diff: u64,
+    pub ingest: u64,
+    pub verify: u64,
+    pub promote: u64,
 }
 
 pub struct Freshness {
@@ -134,6 +150,7 @@ fn finish_snapshot_tx(
     summary: &mut IndexSummary,
     meta: &StagingMeta,
 ) -> Result<(), String> {
+    let t_verify = Instant::now();
     let post = input_fingerprint(&meta.canon_root);
     // Content evidence at write time: re-verify every stored digest against
     // current source before claiming fresh. A mid-build content flip that git
@@ -147,6 +164,7 @@ fn finish_snapshot_tx(
     };
     store::finish_snapshot(&tx, snapshot_id, &post, status)?;
     tx.commit().map_err(|e| e.to_string())?;
+    summary.timings_ms.verify = t_verify.elapsed().as_millis() as u64;
     summary.status_at_write = status.to_string();
     summary.post_fingerprint = post;
     Ok(())
@@ -156,7 +174,8 @@ fn finish_snapshot_tx(
 /// cleanup. Split from the first half so callers drop the staging
 /// connection first — on Windows an open handle blocks file removal, which
 /// left corrupt staging leftovers behind (regression-tested).
-fn promote_live(db: &Path, staging: &Path) -> Result<(), String> {
+fn promote_live(db: &Path, staging: &Path) -> Result<u64, String> {
+    let t_promote = Instant::now();
     let live = match store::open_live(db) {
         Ok(live) => live,
         Err(_) if !store::is_readable_db(db) => {
@@ -171,36 +190,53 @@ fn promote_live(db: &Path, staging: &Path) -> Result<(), String> {
     store::promote_staging(&live, staging)?;
     drop(live);
     let _ = std::fs::remove_file(staging);
-    Ok(())
+    Ok(t_promote.elapsed().as_millis() as u64)
+}
+
+/// One fresh snapshot row from build metadata. Both pipelines insert the
+/// same shape; only the surrounding flow differs.
+fn new_snapshot_row(name: &str, meta: &StagingMeta) -> store::Snapshot {
+    store::Snapshot {
+        id: 0,
+        repo: name.to_string(),
+        root: meta.canon_root.to_string_lossy().to_string(),
+        created_unix: now_unix(),
+        head: meta.git_state.head.clone(),
+        branch: meta.git_state.branch.clone(),
+        dirty: meta.git_state.dirty,
+        untracked: meta.git_state.untracked,
+        parser_version: store::PARSER_VERSION,
+        grammar_versions: store::grammar_versions(),
+        config_fingerprint: meta.cfg.clone(),
+        pre_fingerprint: meta.pre.clone(),
+        post_fingerprint: String::new(),
+        status_at_write: "stale".to_string(),
+        nonce: store::new_nonce(),
+    }
 }
 
 /// Full rebuild into staging, then atomic promotion. Facts stream from the
 /// internal parser straight into one transaction — the whole repository is
 /// never buffered, and readers never see a half-written snapshot.
 pub fn build_full(home: &Path, name: &str, root: &Path) -> Result<IndexSummary, String> {
+    build_full_inner(home, name, root, "full", "none")
+}
+
+/// Shared full-rebuild body; `build` sets mode/reason for cold, forced, and
+/// fallback invocations.
+fn build_full_inner(
+    home: &Path,
+    name: &str,
+    root: &Path,
+    mode: &str,
+    fallback_reason: &str,
+) -> Result<IndexSummary, String> {
     let (mut conn, db, staging, meta) = prepare_staging(home, name, root)?;
     let tx = conn.transaction().map_err(|e| e.to_string())?;
-    let snapshot_id = store::insert_snapshot(
-        &tx,
-        &store::Snapshot {
-            id: 0,
-            repo: name.to_string(),
-            root: meta.canon_root.to_string_lossy().to_string(),
-            created_unix: now_unix(),
-            head: meta.git_state.head.clone(),
-            branch: meta.git_state.branch.clone(),
-            dirty: meta.git_state.dirty,
-            untracked: meta.git_state.untracked,
-            parser_version: store::PARSER_VERSION,
-            grammar_versions: store::grammar_versions(),
-            config_fingerprint: meta.cfg.clone(),
-            pre_fingerprint: meta.pre.clone(),
-            post_fingerprint: String::new(),
-            status_at_write: "stale".to_string(),
-            nonce: store::new_nonce(),
-        },
-    )?;
+    let snapshot_id = store::insert_snapshot(&tx, &new_snapshot_row(name, &meta))?;
+    let t_diff = Instant::now();
     let (plan, _) = scan::plan_walk(&meta.canon_root)?;
+    let diff_ms = t_diff.elapsed().as_millis() as u64;
     let mut summary = IndexSummary {
         snapshot_id,
         status_at_write: "stale".to_string(),
@@ -219,25 +255,41 @@ pub fn build_full(home: &Path, name: &str, root: &Path) -> Result<IndexSummary, 
         skipped_escape: 0,
         skipped_unreadable: 0,
         unsupported_total: 0,
+        mode: mode.to_string(),
+        reused: 0,
+        reparsed: 0,
+        added: 0,
+        removed: 0,
+        fallback_reason: fallback_reason.to_string(),
+        timings_ms: PhaseMs {
+            diff: diff_ms,
+            ingest: 0,
+            verify: 0,
+            promote: 0,
+        },
     };
+    let t_ingest = Instant::now();
     for item in &plan {
         ingest_file(&tx, snapshot_id, item, &mut summary)?;
     }
+    summary.timings_ms.ingest = t_ingest.elapsed().as_millis() as u64;
+    summary.reparsed = summary.processed;
     finish_snapshot_tx(tx, snapshot_id, &mut summary, &meta)?;
     drop(conn);
-    promote_live(&db, &staging)?;
+    summary.timings_ms.promote = promote_live(&db, &staging)?;
     Ok(summary)
 }
 
 /// One file through the shared ingest path: skip counting, content gates,
 /// parse, fact inserts. Used by full builds for every file and by
-/// incremental builds for added/modified files only.
+/// incremental builds for added/modified files only. Returns whether the
+/// file was actually parsed (gate-skipped files cost a hash, not a parse).
 fn ingest_file(
     conn: &rusqlite::Connection,
     snapshot_id: i64,
     item: &scan::PlannedFile,
     summary: &mut IndexSummary,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     summary.files_discovered += 1;
     if let PlanAction::Skip(reason) = &item.action {
         match *reason {
@@ -245,7 +297,7 @@ fn ingest_file(
             "symlink-not-followed" => summary.skipped_symlink += 1,
             _ => summary.skipped_unreadable += 1,
         }
-        return Ok(());
+        return Ok(false);
     }
     // Content gates before the extension verdict, mirroring scan render:
     // a huge or binary `.xyz` counts as skipped, not unsupported.
@@ -253,16 +305,16 @@ fn ingest_file(
         Ok(b) => b,
         Err(_) => {
             summary.skipped_unreadable += 1;
-            return Ok(());
+            return Ok(false);
         }
     };
     if bytes.len() as u64 > scan::MAX_FILE_BYTES {
         summary.skipped_large += 1;
-        return Ok(());
+        return Ok(false);
     }
     if bytes.contains(&0) || std::str::from_utf8(&bytes).is_err() {
         summary.skipped_binary += 1;
-        return Ok(());
+        return Ok(false);
     }
     match &item.action {
         PlanAction::Parse(lang) => {
@@ -344,11 +396,269 @@ fn ingest_file(
             summary.imports += facts.imports.len();
             summary.calls += facts.calls.len();
             summary.errors += facts.errors;
+            return Ok(true);
         }
         PlanAction::Unsupported(_) => summary.unsupported_total += 1,
         PlanAction::Skip(_) => {} // unreachable here; listed for exhaustiveness
     }
-    Ok(())
+    Ok(false)
+}
+
+/// Per-file classification of a fresh walk against a stored snapshot:
+/// owned paths only, no lifetime coupling to the plan.
+struct FileDiff {
+    /// (rel path, old file rowid) with byte-identical current content.
+    unchanged: Vec<(String, i64)>,
+    /// Rel paths to run through `ingest_file` (modified, added, and
+    /// gate-skipped files alike — ingest counts skips exactly like full).
+    ingest_rels: Vec<String>,
+    /// Stored paths with no current `Parse` item (deleted, now-ignored,
+    /// now-unsupported): facts dropped, nothing ingested.
+    removed: Vec<String>,
+    /// Stored paths whose current item fails the content gates (now too
+    /// large, binary, or unreadable): routed through ingest for skip
+    /// counting, old facts dropped.
+    dropped: Vec<String>,
+}
+
+/// Compare a fresh walk against stored (file id, digest) rows. Gate logic
+/// mirrors `ingest_file` (as `content_diff` already does): only Parse items
+/// passing every gate with a matching digest count as unchanged.
+fn diff_files(
+    stored: &BTreeMap<String, (i64, String)>,
+    plan: &[scan::PlannedFile],
+    _canon_root: &Path,
+) -> FileDiff {
+    let mut unchanged = Vec::new();
+    let mut ingest_rels = Vec::new();
+    let mut removed = Vec::new();
+    let mut dropped = Vec::new();
+    let mut seen_parse = BTreeSet::new();
+    for item in plan {
+        if !matches!(item.action, scan::PlanAction::Parse(_)) {
+            continue;
+        }
+        seen_parse.insert(item.rel.clone());
+        let bytes = match std::fs::read(&item.full) {
+            Ok(b) => b,
+            Err(_) => {
+                ingest_rels.push(item.rel.clone());
+                if stored.contains_key(&item.rel) {
+                    dropped.push(item.rel.clone());
+                }
+                continue;
+            }
+        };
+        if bytes.len() as u64 > scan::MAX_FILE_BYTES
+            || bytes.contains(&0)
+            || std::str::from_utf8(&bytes).is_err()
+        {
+            ingest_rels.push(item.rel.clone());
+            if stored.contains_key(&item.rel) {
+                dropped.push(item.rel.clone());
+            }
+            continue;
+        }
+        match stored.get(&item.rel) {
+            Some((fid, digest)) if *digest == store::content_digest(&bytes) => {
+                unchanged.push((item.rel.clone(), *fid));
+            }
+            _ => ingest_rels.push(item.rel.clone()),
+        }
+    }
+    for path in stored.keys() {
+        if !seen_parse.contains(path) {
+            removed.push(path.clone());
+        }
+    }
+    FileDiff {
+        unchanged,
+        ingest_rels,
+        removed,
+        dropped,
+    }
+}
+
+/// Incremental rebuild: copy digest-verified files set-based from the old
+/// snapshot, parse only the rest. `stored` and `old` must come from one
+/// live read transaction (see `build`); the copy itself runs inside the
+/// staging transaction over the ATTACHed live database, so all source reads
+/// share that transaction's consistent view — one revision, never a mix.
+/// A source row vanishing under us (concurrent replacement) copies zero
+/// rows, and the file falls through to ingest from current source.
+fn build_incremental(
+    home: &Path,
+    name: &str,
+    root: &Path,
+    old: &store::Snapshot,
+    stored: &BTreeMap<String, (i64, String)>,
+    live_db: &Path,
+) -> Result<IndexSummary, String> {
+    let (mut conn, db, staging, meta) = prepare_staging(home, name, root)?;
+    let t_diff = Instant::now();
+    let (plan, _) = scan::plan_walk(&meta.canon_root)?;
+    let diff = diff_files(stored, &plan, &meta.canon_root);
+    let diff_ms = t_diff.elapsed().as_millis() as u64;
+    // ATTACH on the staging connection before its write transaction starts:
+    // attaching inside an active write transaction reports the source as
+    // locked. Reads still share the transaction's consistent view below.
+    if store::attach_src(&conn, live_db).is_err() {
+        // Live database unreadable mid-refresh with staging prepared: drop
+        // everything and take the explicit full-rebuild recovery.
+        drop(conn);
+        let _ = std::fs::remove_file(&staging);
+        return build_full_inner(home, name, root, "fallback-full", "db-unreadable");
+    }
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let snapshot_id = store::insert_snapshot(&tx, &new_snapshot_row(name, &meta))?;
+    let unchanged_ids: BTreeMap<&str, i64> = diff
+        .unchanged
+        .iter()
+        .map(|(p, id)| (p.as_str(), *id))
+        .collect();
+    let mut summary = IndexSummary {
+        snapshot_id,
+        status_at_write: "stale".to_string(),
+        pre_fingerprint: meta.pre.clone(),
+        post_fingerprint: String::new(),
+        files_discovered: 0,
+        processed: 0,
+        definitions: 0,
+        imports: 0,
+        calls: 0,
+        errors: 0,
+        skipped_ignored: 0,
+        skipped_large: 0,
+        skipped_binary: 0,
+        skipped_symlink: 0,
+        skipped_escape: 0,
+        skipped_unreadable: 0,
+        unsupported_total: 0,
+        mode: "incremental".to_string(),
+        reused: 0,
+        reparsed: 0,
+        added: 0,
+        removed: diff.removed.len() + diff.dropped.len(),
+        fallback_reason: "none".to_string(),
+        timings_ms: PhaseMs {
+            diff: diff_ms,
+            ingest: 0,
+            verify: 0,
+            promote: 0,
+        },
+    };
+    let t_ingest = Instant::now();
+    for item in &plan {
+        if matches!(item.action, scan::PlanAction::Parse(_)) {
+            if let Some(old_fid) = unchanged_ids.get(item.rel.as_str()) {
+                // `reparsed` counts files actually parsed; gate-skipped files
+                // cost a hash, not a parse, so they never inflate it.
+                summary.files_discovered += 1;
+                match store::copy_file_facts(&tx, snapshot_id, old.id, *old_fid)? {
+                    Some(copied) => {
+                        summary.reused += 1;
+                        summary.processed += 1;
+                        summary.definitions += copied.symbols as usize;
+                        summary.imports += copied.imports as usize;
+                        summary.calls += copied.calls as usize;
+                        summary.errors += copied.errors;
+                    }
+                    None => {
+                        // Source row vanished under us: ingest from current
+                        // source (ingest counts the file; undo our increment).
+                        if ingest_file(&tx, snapshot_id, item, &mut summary)? {
+                            summary.reparsed += 1;
+                        }
+                        summary.files_discovered -= 1;
+                    }
+                }
+                continue;
+            }
+        }
+        let was_stored = stored.contains_key(&item.rel);
+        if ingest_file(&tx, snapshot_id, item, &mut summary)? {
+            summary.reparsed += 1;
+            if !was_stored {
+                summary.added += 1;
+            }
+        }
+    }
+    summary.timings_ms.ingest = t_ingest.elapsed().as_millis() as u64;
+    // No DETACH here: detaching inside a write transaction that read the
+    // source reports it locked. The staging connection is single-use and
+    // dropped right below, which releases the attachment.
+    finish_snapshot_tx(tx, snapshot_id, &mut summary, &meta)?;
+    drop(conn);
+    summary.timings_ms.promote = promote_live(&db, &staging)?;
+    Ok(summary)
+}
+
+/// Full rebuild with an explicit mode and fallback reason. `build_full`
+/// stays the plain M3 entry point (`"full"` / `"none"`).
+fn fallback_full(
+    home: &Path,
+    name: &str,
+    root: &Path,
+    reason: &str,
+) -> Result<IndexSummary, String> {
+    build_full_inner(home, name, root, "fallback-full", reason)
+}
+
+/// Dispatcher: cold start and `--full` go straight to full rebuilds;
+/// otherwise reuse is attempted only when the previous snapshot is provably
+/// compatible (root, parser, grammars, config, HEAD, branch). Dirty
+/// worktrees and untracked-count changes with the same HEAD/branch stay
+/// incremental — per-file digests decide. A stale previous snapshot still
+/// allows reuse: every reused file is independently digest-verified.
+pub fn build(home: &Path, name: &str, root: &Path, full: bool) -> Result<IndexSummary, String> {
+    if full {
+        return build_full_inner(home, name, root, "full", "forced-full");
+    }
+    let db = store::db_path(home, name);
+    if !db.exists() {
+        return build_full_inner(home, name, root, "full", "cold-start");
+    }
+    // Classification inputs (snapshot row + id map) come from one live read
+    // transaction: mutually consistent by construction.
+    let mut live = match store::open_live(&db) {
+        Ok(conn) => conn,
+        Err(_) => return fallback_full(home, name, root, "db-unreadable"),
+    };
+    let (old, stored) = {
+        let read_tx = live.transaction().map_err(|e| e.to_string())?;
+        let old = match store::latest_snapshot(&read_tx)? {
+            Some(s) => s,
+            None => return fallback_full(home, name, root, "no-snapshot"),
+        };
+        let stored = store::file_id_map(&read_tx, old.id)?;
+        (old, stored)
+    };
+    // Classification inputs are owned from here on; drop the live handle so
+    // the staging transaction below is the only reader of the live file.
+    drop(live);
+    let canon_root = root
+        .canonicalize()
+        .map_err(|e| format!("cannot resolve root: {e}"))?;
+    if canon_root.to_string_lossy() != old.root {
+        return fallback_full(home, name, root, "root-moved");
+    }
+    if old.parser_version != store::PARSER_VERSION {
+        return fallback_full(home, name, root, "parser-changed");
+    }
+    if old.grammar_versions != store::grammar_versions() {
+        return fallback_full(home, name, root, "grammar-changed");
+    }
+    if old.config_fingerprint != config_fingerprint(&canon_root) {
+        return fallback_full(home, name, root, "config-changed");
+    }
+    let live_git = git::fingerprint(&canon_root);
+    if live_git.head != old.head {
+        return fallback_full(home, name, root, "head-changed");
+    }
+    if live_git.branch != old.branch {
+        return fallback_full(home, name, root, "branch-changed");
+    }
+    build_incremental(home, name, root, &old, &stored, &db)
 }
 
 /// Re-verify every stored file digest of a snapshot against current source.
@@ -555,7 +865,7 @@ pub fn evaluate_snapshot(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_full, config_fingerprint, evaluate, input_fingerprint};
+    use super::{build, build_full, config_fingerprint, diff_files, evaluate, input_fingerprint};
     use crate::store;
     use crate::testutil::{git_repo, tmpdir};
 
@@ -584,6 +894,126 @@ mod tests {
             "skips must not self-invalidate: {:?}",
             fresh.reasons
         );
+    }
+
+    #[test]
+    fn noop_refresh_reparses_zero_files() {
+        let home = tmpdir("idx-noop-home");
+        let repo = plain_repo("idx-noop");
+        let first = build_full(&home, "r", &repo).unwrap();
+        let second = build(&home, "r", &repo, false).unwrap();
+        assert_eq!(second.mode, "incremental");
+        assert_eq!(second.reparsed, 0);
+        assert_eq!(second.added, 0);
+        assert_eq!(second.removed, 0);
+        assert_eq!(second.reused, first.processed);
+        assert_eq!(second.processed, first.processed);
+        assert_eq!(second.status_at_write, "fresh");
+        assert_eq!(second.fallback_reason, "none");
+    }
+
+    #[test]
+    fn one_file_delta_reparses_only_that_file() {
+        let home = tmpdir("idx-delta-home");
+        let repo = tmpdir("idx-delta");
+        std::fs::write(repo.join("a.py"), b"def f():\n    pass\n").unwrap();
+        std::fs::write(repo.join("b.py"), b"def g():\n    pass\n").unwrap();
+        build_full(&home, "r", &repo).unwrap();
+        std::fs::write(repo.join("b.py"), b"def g():\n    return 1\n").unwrap();
+        let second = build(&home, "r", &repo, false).unwrap();
+        assert_eq!(second.mode, "incremental");
+        assert_eq!(second.reparsed, 1);
+        assert_eq!(second.reused, 1);
+        assert_eq!(second.status_at_write, "fresh");
+        let db = store::db_path(&home, "r");
+        let conn = store::open_live(&db).unwrap();
+        let snap = store::latest_snapshot(&conn).unwrap().unwrap();
+        let files = store::files_of(&conn, snap.id).unwrap();
+        assert_eq!(files.len(), 2);
+        let (total, _) = store::search_symbols(&conn, snap.id, "Worker", 10, 0).unwrap();
+        assert_eq!(total, 0);
+    }
+
+    #[test]
+    fn add_remove_rename_yield_exact_facts() {
+        let home = tmpdir("idx-arr-home");
+        let repo = tmpdir("idx-arr");
+        std::fs::write(repo.join("a.py"), b"def alpha():\n    pass\n").unwrap();
+        std::fs::write(repo.join("b.py"), b"def beta():\n    pass\n").unwrap();
+        build_full(&home, "r", &repo).unwrap();
+        std::fs::remove_file(repo.join("a.py")).unwrap();
+        std::fs::rename(repo.join("b.py"), repo.join("c.py")).unwrap();
+        std::fs::write(repo.join("d.py"), b"def delta():\n    pass\n").unwrap();
+        let second = build(&home, "r", &repo, false).unwrap();
+        assert_eq!(second.removed, 2, "a.py deleted, b.py renamed away");
+        assert_eq!(second.status_at_write, "fresh");
+        let db = store::db_path(&home, "r");
+        let conn = store::open_live(&db).unwrap();
+        let snap = store::latest_snapshot(&conn).unwrap().unwrap();
+        let files = store::files_of(&conn, snap.id).unwrap();
+        let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, vec!["c.py", "d.py"]);
+        let (total, _) = store::search_symbols(&conn, snap.id, "alpha", 10, 0).unwrap();
+        assert_eq!(total, 0, "deleted facts must not survive");
+        let (total, _) = store::search_symbols(&conn, snap.id, "beta", 10, 0).unwrap();
+        assert_eq!(total, 1, "renamed facts move with the path");
+    }
+
+    #[test]
+    fn repeated_changes_do_not_duplicate_facts() {
+        let home = tmpdir("idx-dup-home");
+        let repo = plain_repo("idx-dup");
+        build_full(&home, "r", &repo).unwrap();
+        for i in 0..3 {
+            std::fs::write(repo.join("a.py"), format!("def f{i}():\n    pass\n")).unwrap();
+            build(&home, "r", &repo, false).unwrap();
+        }
+        let db = store::db_path(&home, "r");
+        let conn = store::open_live(&db).unwrap();
+        let snap = store::latest_snapshot(&conn).unwrap().unwrap();
+        assert_eq!(store::files_of(&conn, snap.id).unwrap().len(), 1);
+        let (total, hits) = store::search_symbols(&conn, snap.id, "f", 10, 0).unwrap();
+        assert_eq!(total, 1, "exactly one current definition: {hits:?}");
+        assert_eq!(hits[0].name.as_deref(), Some("f2"));
+    }
+
+    #[test]
+    fn empty_repo_stays_fresh_and_empty_file_is_eligible() {
+        let home = tmpdir("idx-empty-home");
+        let repo = tmpdir("idx-empty");
+        let first = build_full(&home, "r", &repo).unwrap();
+        assert_eq!(first.status_at_write, "fresh");
+        assert_eq!(first.processed, 0);
+        std::fs::write(repo.join("a.py"), b"").unwrap();
+        let second = build(&home, "r", &repo, false).unwrap();
+        assert_eq!(second.processed, 1, "zero-byte files are eligible");
+        assert_eq!(second.status_at_write, "fresh");
+    }
+
+    #[test]
+    fn reuse_window_mutation_is_caught() {
+        use super::verify_snapshot_content;
+        let home = tmpdir("idx-rwindow-home");
+        let repo = plain_repo("idx-rwindow");
+        build_full(&home, "r", &repo).unwrap();
+        let db = store::db_path(&home, "r");
+        let conn = store::open_live(&db).unwrap();
+        let snap = store::latest_snapshot(&conn).unwrap().unwrap();
+        let canon = repo.canonicalize().unwrap();
+        let stored = store::file_id_map(&conn, snap.id).unwrap();
+        let (plan, _) = crate::scan::plan_walk(&canon).unwrap();
+        let diff = diff_files(&stored, &plan, &canon);
+        assert_eq!(diff.unchanged.len(), 1);
+        assert!(
+            diff.ingest_rels.is_empty(),
+            "clean tree diffs to all-unchanged"
+        );
+        // Mutate inside the window between the reuse read and final verification.
+        std::fs::write(repo.join("a.py"), b"def f():\n    return h()\n").unwrap();
+        assert!(!verify_snapshot_content(&conn, snap.id, &canon).unwrap());
+        let (plan2, _) = crate::scan::plan_walk(&canon).unwrap();
+        let diff2 = diff_files(&stored, &plan2, &canon);
+        assert_eq!(diff2.ingest_rels, vec!["a.py".to_string()]);
     }
 
     #[test]

@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 /// Current schema version (`PRAGMA user_version`).
 pub const SCHEMA_VERSION: u32 = 2;
@@ -375,19 +375,45 @@ pub fn detach_src(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+/// Result of copying one file's facts: the new file rowid plus exact child
+/// counts, so callers keep definition/import/call/error counters without
+/// extra aggregation queries.
+pub struct CopiedFacts {
+    pub file_id: i64,
+    pub symbols: u64,
+    pub imports: u64,
+    pub calls: u64,
+    pub errors: u32,
+}
+
 /// Copy one file's facts from the attached `src` database into this one:
 /// the files row first, then its symbols/imports/calls under the new file
 /// id, without round-tripping rows through Rust. Column lists mirror the
-/// matching `insert_*` functions. Returns the new file rowid. Rejected
-/// alternative: reading every symbol/import/call into Vecs and re-inserting
-/// per row — per-row traffic and allocations for zero gain, since ATTACH
-/// copies are already proven by `promote_staging`.
+/// matching `insert_*` functions. Returns `None` when the source row is
+/// absent (a concurrent rebuild replaced the revision under us) — callers
+/// then ingest the file from current source instead of reusing.
+/// Child counts come from `changes()` on each `INSERT..SELECT`: exact, with
+/// zero extra queries. Rejected alternative: reading every symbol/import/
+/// call into Vecs and re-inserting per row — per-row traffic and allocations
+/// for zero gain, since ATTACH copies are already proven by `promote_staging`.
 pub fn copy_file_facts(
     staging: &Connection,
     new_snapshot_id: i64,
     old_snapshot_id: i64,
     old_file_id: i64,
-) -> Result<i64, String> {
+) -> Result<Option<CopiedFacts>, String> {
+    let errors: Option<i64> = staging
+        .query_row(
+            "SELECT errors FROM src.files WHERE snapshot_id = ?1 AND id = ?2",
+            params![old_snapshot_id, old_file_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let errors = match errors {
+        Some(e) => e as u32,
+        None => return Ok(None),
+    };
     staging
         .execute(
             "INSERT INTO files (snapshot_id, path, language, bytes, digest, errors)
@@ -396,12 +422,19 @@ pub fn copy_file_facts(
             params![new_snapshot_id, old_snapshot_id, old_file_id],
         )
         .map_err(|e| e.to_string())?;
+    if staging.changes() != 1 {
+        return Ok(None);
+    }
     let new_file_id = staging.last_insert_rowid();
-    for (table, extra) in [
+    let mut counts = [0u64; 3];
+    for (i, (table, extra)) in [
         ("symbols", "kind, name, start_line, start_col, end_line, end_col, byte_start, byte_end, provider, grammar, language"),
         ("imports", "text, start_line, start_col, end_line, end_col, byte_start, byte_end, provider, grammar, language"),
         ("calls", "name, start_line, start_col, end_line, end_col, byte_start, byte_end, unresolved, provider, grammar, language"),
-    ] {
+    ]
+    .iter()
+    .enumerate()
+    {
         staging
             .execute(
                 &format!(
@@ -412,8 +445,15 @@ pub fn copy_file_facts(
                 params![new_snapshot_id, new_file_id, old_snapshot_id, old_file_id],
             )
             .map_err(|e| e.to_string())?;
+        counts[i] = staging.changes();
     }
-    Ok(new_file_id)
+    Ok(Some(CopiedFacts {
+        file_id: new_file_id,
+        symbols: counts[0],
+        imports: counts[1],
+        calls: counts[2],
+        errors,
+    }))
 }
 
 pub fn insert_file(conn: &Connection, snapshot_id: i64, file: &FileRow) -> Result<i64, String> {
@@ -1120,7 +1160,13 @@ mod tests {
         let staging = open_live(&staging_path).unwrap();
         attach_src(&staging, &live_path).unwrap();
         let new_snap = insert_snapshot(&staging, &sample_snapshot()).unwrap();
-        copy_file_facts(&staging, new_snap, old_snap, old_fid).unwrap();
+        let copied = copy_file_facts(&staging, new_snap, old_snap, old_fid)
+            .unwrap()
+            .expect("source row present");
+        assert_eq!(copied.symbols, 1);
+        assert_eq!(copied.imports, 1);
+        assert_eq!(copied.calls, 1);
+        assert_eq!(copied.errors, 0);
         detach_src(&staging).unwrap();
         let files = files_of(&staging, new_snap).unwrap();
         assert_eq!(files.len(), 1);
