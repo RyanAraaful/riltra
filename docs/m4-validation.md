@@ -135,6 +135,15 @@ two repetitions each.
 - Unreadable-file transition is covered on unix only (`cfg(unix)` chmod
   test); Windows lacks a portable unreadable-file fixture. The ingest
   path is shared, so behavior is identical by construction.
+- Symlink-transition regression (`symlink_at_known_path_is_not_reused`):
+  proven on unix CI, where symlink creation needs no privilege. On
+  Windows the test early-returns with zero assertions when creation lacks
+  privilege — verified it does NOT run on the dev machine (creation probe
+  failed there), and Windows CI execution cannot be confirmed from
+  available evidence (an early return still reports `ok`). No bypass was
+  added to force it green; the non-symlink ineligibility paths
+  (binary/large/unreadable) are proven on all three OSs through the same
+  shared ingest path the symlink case uses.
 - `ingest_rels` in `FileDiff` and `build_full` carry `#[allow(dead_code)]`
   (test-asserted diff output / M3-compatible oracle); production routes
   the single ordered walk off the unchanged set.
