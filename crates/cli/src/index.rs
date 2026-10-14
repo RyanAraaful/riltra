@@ -997,6 +997,195 @@ mod tests {
     }
 
     #[test]
+    fn incremental_matches_independent_full_rebuild() {
+        // Guard test (Task 5): PASS-first-run expected. Any FAIL stops the
+        // line — core parity broken, never loosen normalization to hide it.
+        use std::collections::BTreeMap;
+        type Span9 = (u32, u32, u32, u32, usize, usize);
+        type SymRow = (
+            String,
+            String,
+            Option<String>,
+            Span9,
+            String,
+            String,
+            String,
+        );
+        type ImpRow = (String, Option<String>, Span9, String, String, String);
+        type CallRow = (String, Option<String>, Span9, i64, String, String, String);
+        #[derive(Debug, PartialEq, PartialOrd, Ord, Eq)]
+        struct Facts {
+            files: Vec<(String, String, u64, String, u32)>,
+            symbols: Vec<SymRow>,
+            imports: Vec<ImpRow>,
+            calls: Vec<CallRow>,
+        }
+        fn dump(conn: &rusqlite::Connection, snap_id: i64) -> Facts {
+            let files = store::files_of(conn, snap_id).unwrap();
+            let mut id_map = BTreeMap::new();
+            let map = store::file_id_map(conn, snap_id).unwrap();
+            for (path, (id, _)) in &map {
+                id_map.insert(*id, path.clone());
+            }
+            let path_of = |id: i64| id_map.get(&id).cloned().unwrap_or_default();
+            let mut symbols = Vec::new();
+            {
+                let mut st = conn
+                    .prepare("SELECT file_id, kind, name, start_line, start_col, end_line, end_col, byte_start, byte_end, provider, grammar, language FROM symbols WHERE snapshot_id = ?1")
+                    .unwrap();
+                let rows = st
+                    .query_map([snap_id], |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                            row.get::<_, i64>(3)? as u32,
+                            row.get::<_, i64>(4)? as u32,
+                            row.get::<_, i64>(5)? as u32,
+                            row.get::<_, i64>(6)? as u32,
+                            row.get::<_, i64>(7)? as usize,
+                            row.get::<_, i64>(8)? as usize,
+                            row.get::<_, String>(9)?,
+                            row.get::<_, String>(10)?,
+                            row.get::<_, String>(11)?,
+                        ))
+                    })
+                    .unwrap();
+                for r in rows {
+                    let r = r.unwrap();
+                    symbols.push((
+                        path_of(r.0),
+                        r.1,
+                        r.2,
+                        (r.3, r.4, r.5, r.6, r.7, r.8),
+                        r.9,
+                        r.10,
+                        r.11,
+                    ));
+                }
+            }
+            let mut imports = Vec::new();
+            {
+                let mut st = conn
+                    .prepare("SELECT file_id, text, start_line, start_col, end_line, end_col, byte_start, byte_end, provider, grammar, language FROM imports WHERE snapshot_id = ?1")
+                    .unwrap();
+                let rows = st
+                    .query_map([snap_id], |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, i64>(2)? as u32,
+                            row.get::<_, i64>(3)? as u32,
+                            row.get::<_, i64>(4)? as u32,
+                            row.get::<_, i64>(5)? as u32,
+                            row.get::<_, i64>(6)? as usize,
+                            row.get::<_, i64>(7)? as usize,
+                            row.get::<_, String>(8)?,
+                            row.get::<_, String>(9)?,
+                            row.get::<_, String>(10)?,
+                        ))
+                    })
+                    .unwrap();
+                for r in rows {
+                    let r = r.unwrap();
+                    imports.push((
+                        path_of(r.0),
+                        r.1,
+                        (r.2, r.3, r.4, r.5, r.6, r.7),
+                        r.8,
+                        r.9,
+                        r.10,
+                    ));
+                }
+            }
+            let mut calls = Vec::new();
+            {
+                let mut st = conn
+                    .prepare("SELECT file_id, name, start_line, start_col, end_line, end_col, byte_start, byte_end, unresolved, provider, grammar, language FROM calls WHERE snapshot_id = ?1")
+                    .unwrap();
+                let rows = st
+                    .query_map([snap_id], |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, i64>(2)? as u32,
+                            row.get::<_, i64>(3)? as u32,
+                            row.get::<_, i64>(4)? as u32,
+                            row.get::<_, i64>(5)? as u32,
+                            row.get::<_, i64>(6)? as usize,
+                            row.get::<_, i64>(7)? as usize,
+                            row.get::<_, i64>(8)?,
+                            row.get::<_, String>(9)?,
+                            row.get::<_, String>(10)?,
+                            row.get::<_, String>(11)?,
+                        ))
+                    })
+                    .unwrap();
+                for r in rows {
+                    let r = r.unwrap();
+                    calls.push((
+                        path_of(r.0),
+                        r.1,
+                        (r.2, r.3, r.4, r.5, r.6, r.7),
+                        r.8,
+                        r.9,
+                        r.10,
+                        r.11,
+                    ));
+                }
+            }
+            let mut file_vec: Vec<(String, String, u64, String, u32)> = files
+                .into_iter()
+                .map(|f| (f.path, f.language, f.bytes, f.digest, f.errors))
+                .collect();
+            file_vec.sort();
+            symbols.sort();
+            imports.sort();
+            calls.sort();
+            Facts {
+                files: file_vec,
+                symbols,
+                imports,
+                calls,
+            }
+        }
+        let home_b = tmpdir("idx-par-b-home");
+        let home_c = tmpdir("idx-par-c-home");
+        let repo = tmpdir("idx-par");
+        std::fs::write(repo.join("a.py"), b"def alpha():\n    pass\n").unwrap();
+        std::fs::write(
+            repo.join("b.py"),
+            b"import os\ndef beta():\n    return os.name\n",
+        )
+        .unwrap();
+        std::fs::write(repo.join("c.js"), b"function gamma() { return 1; }\n").unwrap();
+        std::fs::write(repo.join("bin.py"), b"\x00\x01").unwrap();
+        std::fs::write(repo.join("note.xyz"), b"plain\n").unwrap();
+        build_full(&home_b, "r", &repo).unwrap();
+        // Stage 1: modify. Stage 2: add + delete. Stage 3: rename.
+        std::fs::write(
+            repo.join("b.py"),
+            b"import sys\ndef beta():\n    return sys.argv\n",
+        )
+        .unwrap();
+        build(&home_b, "r", &repo, false).unwrap();
+        std::fs::write(repo.join("d.py"), b"def delta():\n    pass\n").unwrap();
+        std::fs::remove_file(repo.join("c.js")).unwrap();
+        build(&home_b, "r", &repo, false).unwrap();
+        std::fs::rename(repo.join("a.py"), repo.join("z.py")).unwrap();
+        let inc = build(&home_b, "r", &repo, false).unwrap();
+        assert_eq!(inc.status_at_write, "fresh");
+        build_full(&home_c, "r", &repo).unwrap();
+        let read = |home: &std::path::Path| {
+            let db = store::db_path(home, "r");
+            let conn = store::open_live(&db).unwrap();
+            let snap = store::latest_snapshot(&conn).unwrap().unwrap();
+            dump(&conn, snap.id)
+        };
+        assert_eq!(read(&home_b), read(&home_c), "incremental must equal full");
+    }
+
+    #[test]
     fn reuse_window_mutation_is_caught() {
         use super::verify_snapshot_content;
         let home = tmpdir("idx-rwindow-home");

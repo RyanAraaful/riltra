@@ -465,3 +465,83 @@ fn cli_full_flag_forces_full() {
         "got: {out}"
     );
 }
+
+/// Replace volatile envelope values (nonce, snapshot ids, timestamps) so
+/// two independent builds can be compared string-for-string.
+fn normalize_search(out: &str) -> String {
+    let mut s = out.to_string();
+    if let Some(pos) = s.find("\"nonce\":\"") {
+        let start = pos + "\"nonce\":\"".len();
+        if let Some(end) = s[start..].find('"') {
+            let nonce = s[start..start + end].to_string();
+            s = s.replace(&nonce, "NONCE");
+        }
+    }
+    // Rewrite every `"key":<digits>` occurrence for volatile numeric keys.
+    for key in ["\"id\":", "\"created_unix\":", "\"snapshot\":"] {
+        let mut result = String::new();
+        let mut rest = s.as_str();
+        while let Some(pos) = rest.find(key) {
+            result.push_str(&rest[..pos + key.len()]);
+            rest = &rest[pos + key.len()..];
+            let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            rest = &rest[digits.len()..];
+            result.push('0');
+        }
+        result.push_str(rest);
+        s = result;
+    }
+    s
+}
+
+fn files_counters(out: &str) -> String {
+    let pos = out.find("\"files\":").expect("index JSON must carry files");
+    out[pos..].trim_end().to_string()
+}
+
+#[test]
+fn cli_search_parity_full_vs_incremental() {
+    // Guard test (Task 5): PASS-first-run expected.
+    let h = home("paritycli");
+    let repo = mkrepo(&h, "work");
+    copy_fixture(&repo, "py/hello.py");
+    let (code, _, err) = run(
+        &h,
+        &["init", "--repo", repo.to_str().unwrap(), "--name", "r"],
+    );
+    assert_eq!(code, 0, "init failed: {err}");
+    // Evolve through an incremental path in the default home.
+    let (code, full_first, err) = run(&h, &["index", "--repo", "r"]);
+    assert_eq!(code, 0, "index failed: {err}");
+    std::fs::write(repo.join("extra.py"), b"def helper():\n    pass\n").unwrap();
+    let (code, inc_out, err) = run(&h, &["index", "--repo", "r"]);
+    assert_eq!(code, 0, "index failed: {err}");
+    assert!(
+        inc_out.contains("\"mode\":\"incremental\""),
+        "got: {inc_out}"
+    );
+    // Independent full rebuild of the same final tree in a second home.
+    let h2 = home("paritycli-full");
+    let (code, _, err) = run(
+        &h2,
+        &["init", "--repo", repo.to_str().unwrap(), "--name", "r"],
+    );
+    assert_eq!(code, 0, "init failed: {err}");
+    let (code, full_out, err) = run(&h2, &["index", "--repo", "r"]);
+    assert_eq!(code, 0, "index failed: {err}");
+    assert_eq!(
+        files_counters(&inc_out),
+        files_counters(&full_out),
+        "fact-bearing counters must match"
+    );
+    let _ = full_first;
+    for symbol in ["Worker", "helper", "missing-symbol-zzz"] {
+        let (_, inc_search, _) = run(&h, &["search", "--repo", "r", "--symbol", symbol]);
+        let (_, full_search, _) = run(&h2, &["search", "--repo", "r", "--symbol", symbol]);
+        assert_eq!(
+            normalize_search(&inc_search),
+            normalize_search(&full_search),
+            "search parity for {symbol}"
+        );
+    }
+}
