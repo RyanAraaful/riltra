@@ -375,43 +375,36 @@ pub fn detach_src(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
-/// Result of copying one file's facts: exact child counts, so callers keep
-/// definition/import/call/error counters without extra aggregation queries.
-pub struct CopiedFacts {
+/// Totals over bulk-copied facts, so callers keep definition/import/call/
+/// error counters without extra aggregation queries.
+pub struct CopiedTotals {
     pub symbols: u64,
     pub imports: u64,
     pub calls: u64,
     pub errors: u32,
 }
 
-/// Copy one file's facts from the attached `src` database into this one:
-/// the files row first, then its symbols/imports/calls under the new file
-/// id, without round-tripping rows through Rust. Column lists mirror the
-/// matching `insert_*` functions. Returns `None` when the source row is
-/// absent (a concurrent rebuild replaced the revision under us) — callers
-/// then ingest the file from current source instead of reusing.
-/// Child counts come from `changes()` on each `INSERT..SELECT`: exact, with
-/// zero extra queries. Rejected alternative: reading every symbol/import/
-/// call into Vecs and re-inserting per row — per-row traffic and allocations
-/// for zero gain, since ATTACH copies are already proven by `promote_staging`.
-pub fn copy_file_facts(
+/// Copy one files row from the attached `src` database into this one.
+/// Returns the new rowid, or `None` when the source row is absent (a
+/// concurrent rebuild replaced the revision under us) — callers then ingest
+/// the file from current source instead of reusing.
+pub fn copy_file_row(
     staging: &Connection,
     new_snapshot_id: i64,
     old_snapshot_id: i64,
     old_file_id: i64,
-) -> Result<Option<CopiedFacts>, String> {
-    let errors: Option<i64> = staging
+) -> Result<Option<i64>, String> {
+    let present: Option<i64> = staging
         .query_row(
-            "SELECT errors FROM src.files WHERE snapshot_id = ?1 AND id = ?2",
+            "SELECT 1 FROM src.files WHERE snapshot_id = ?1 AND id = ?2",
             params![old_snapshot_id, old_file_id],
             |row| row.get(0),
         )
         .optional()
         .map_err(|e| e.to_string())?;
-    let errors = match errors {
-        Some(e) => e as u32,
-        None => return Ok(None),
-    };
+    if present.is_none() {
+        return Ok(None);
+    }
     staging
         .execute(
             "INSERT INTO files (snapshot_id, path, language, bytes, digest, errors)
@@ -423,7 +416,42 @@ pub fn copy_file_facts(
     if staging.changes() != 1 {
         return Ok(None);
     }
-    let new_file_id = staging.last_insert_rowid();
+    Ok(Some(staging.last_insert_rowid()))
+}
+
+/// Session-local old→new file id map for bulk fact copies. A `TEMP` table:
+/// invisible to other connections, gone when this one closes, no schema
+/// migration. Per-file child `SELECT`s cannot use the `file_id` column
+/// efficiently (no index by design), so the map turns thousands of filtered
+/// copies into three joined bulk statements.
+pub fn create_file_map(staging: &Connection) -> Result<(), String> {
+    staging
+        .execute_batch(
+            "CREATE TEMP TABLE fmap (old_id INTEGER PRIMARY KEY, new_id INTEGER NOT NULL)",
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn record_file_map(staging: &Connection, old_id: i64, new_id: i64) -> Result<(), String> {
+    staging
+        .execute(
+            "INSERT INTO fmap (old_id, new_id) VALUES (?1, ?2)",
+            params![old_id, new_id],
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Bulk-copy every mapped file's symbols/imports/calls in three joined
+/// statements. Column lists mirror the matching `insert_*` functions.
+/// Rejected alternative: per-file filtered child copies — one full snapshot
+/// scan per file without a `file_id` index (quadratic at MMSP scale).
+pub fn copy_mapped_facts(
+    staging: &Connection,
+    new_snapshot_id: i64,
+    old_snapshot_id: i64,
+) -> Result<CopiedTotals, String> {
     let mut counts = [0u64; 3];
     for (i, (table, extra)) in [
         ("symbols", "kind, name, start_line, start_col, end_line, end_col, byte_start, byte_end, provider, grammar, language"),
@@ -437,20 +465,30 @@ pub fn copy_file_facts(
             .execute(
                 &format!(
                     "INSERT INTO {table} (snapshot_id, file_id, {extra})
-                     SELECT ?1, ?2, {extra} FROM src.{table}
-                     WHERE snapshot_id = ?3 AND file_id = ?4"
+                     SELECT ?1, m.new_id, {extra} FROM src.{table} AS s
+                     JOIN fmap AS m ON m.old_id = s.file_id
+                     WHERE s.snapshot_id = ?2"
                 ),
-                params![new_snapshot_id, new_file_id, old_snapshot_id, old_file_id],
+                params![new_snapshot_id, old_snapshot_id],
             )
             .map_err(|e| e.to_string())?;
         counts[i] = staging.changes();
     }
-    Ok(Some(CopiedFacts {
+    let errors: i64 = staging
+        .query_row(
+            "SELECT COALESCE(SUM(f.errors), 0) FROM src.files AS f
+             JOIN fmap AS m ON m.old_id = f.id
+             WHERE f.snapshot_id = ?1",
+            params![old_snapshot_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(CopiedTotals {
         symbols: counts[0],
         imports: counts[1],
         calls: counts[2],
-        errors,
-    }))
+        errors: errors as u32,
+    })
 }
 
 pub fn insert_file(conn: &Connection, snapshot_id: i64, file: &FileRow) -> Result<i64, String> {
@@ -1087,33 +1125,37 @@ mod tests {
     }
 
     #[test]
-    fn id_map_and_set_copy_roundtrip() {
-        use super::{attach_src, copy_file_facts, detach_src, file_id_map, CallRow, ImportRow};
-        let dir = tmpdir("store-copy");
+    fn file_map_bulk_copy_roundtrip() {
+        use super::{
+            attach_src, copy_file_row, copy_mapped_facts, create_file_map, detach_src, file_id_map,
+            record_file_map, CallRow, ImportRow,
+        };
+        let dir = tmpdir("store-bulk");
         let live_path = dir.join("live.db");
         let old_snap;
-        let old_fid;
         {
             let live = open_live(&live_path).unwrap();
             old_snap = insert_snapshot(&live, &sample_snapshot()).unwrap();
-            old_fid = insert_file(
-                &live,
-                old_snap,
-                &FileRow {
-                    path: "a.py".to_string(),
-                    language: "python".to_string(),
-                    bytes: 30,
-                    digest: "d1".to_string(),
-                    errors: 0,
-                },
-            )
-            .unwrap();
-            insert_symbol(&live, old_snap, &sample_symbol(old_fid, "f")).unwrap();
+            for (path, errors) in [("a.py", 2), ("b.py", 0)] {
+                let fid = insert_file(
+                    &live,
+                    old_snap,
+                    &FileRow {
+                        path: path.to_string(),
+                        language: "python".to_string(),
+                        bytes: 30,
+                        digest: "d1".to_string(),
+                        errors,
+                    },
+                )
+                .unwrap();
+                insert_symbol(&live, old_snap, &sample_symbol(fid, &format!("f_{path}"))).unwrap();
+            }
             insert_import(
                 &live,
                 old_snap,
                 &ImportRow {
-                    file_id: old_fid,
+                    file_id: 1,
                     text: Some("import os".to_string()),
                     start_line: 1,
                     start_col: 1,
@@ -1131,7 +1173,7 @@ mod tests {
                 &live,
                 old_snap,
                 &CallRow {
-                    file_id: old_fid,
+                    file_id: 2,
                     name: Some("g()".to_string()),
                     start_line: 2,
                     start_col: 5,
@@ -1147,31 +1189,34 @@ mod tests {
             )
             .unwrap();
             let map = file_id_map(&live, old_snap).unwrap();
-            assert_eq!(
-                map.get("a.py"),
-                Some(&(old_fid, "d1".to_string())),
-                "map must carry rowid and digest: {map:?}"
-            );
+            assert_eq!(map.len(), 2);
         }
-        let staging_path = dir.join("staging.db");
-        let staging = open_live(&staging_path).unwrap();
+        let staging = open_live(&dir.join("staging.db")).unwrap();
         attach_src(&staging, &live_path).unwrap();
+        create_file_map(&staging).unwrap();
         let new_snap = insert_snapshot(&staging, &sample_snapshot()).unwrap();
-        let copied = copy_file_facts(&staging, new_snap, old_snap, old_fid)
+        let live = open_live(&live_path).unwrap();
+        let map = file_id_map(&live, old_snap).unwrap();
+        for (old_fid, _) in map.values() {
+            let new_fid = copy_file_row(&staging, new_snap, old_snap, *old_fid)
+                .unwrap()
+                .expect("source row present");
+            record_file_map(&staging, *old_fid, new_fid).unwrap();
+        }
+        // Vanished source rows copy nothing instead of corrupting.
+        assert!(copy_file_row(&staging, new_snap, old_snap, 9999)
             .unwrap()
-            .expect("source row present");
-        assert_eq!(copied.symbols, 1);
-        assert_eq!(copied.imports, 1);
-        assert_eq!(copied.calls, 1);
-        assert_eq!(copied.errors, 0);
+            .is_none());
+        let totals = copy_mapped_facts(&staging, new_snap, old_snap).unwrap();
+        assert_eq!(totals.symbols, 2);
+        assert_eq!(totals.imports, 1);
+        assert_eq!(totals.calls, 1);
+        assert_eq!(totals.errors, 2);
         detach_src(&staging).unwrap();
         let files = files_of(&staging, new_snap).unwrap();
-        assert_eq!(files.len(), 1);
-        assert_eq!(files[0].path, "a.py");
-        assert_eq!(files[0].digest, "d1");
-        let (total, hits) = search_symbols(&staging, new_snap, "f", 10, 0).unwrap();
-        assert_eq!(total, 1, "copied symbol must be searchable: {hits:?}");
-        assert_eq!(hits[0].path, "a.py");
+        assert_eq!(files.len(), 2);
+        let (total, hits) = search_symbols(&staging, new_snap, "f_a", 10, 0).unwrap();
+        assert_eq!(total, 1, "copied symbols must be searchable: {hits:?}");
     }
 
     #[test]

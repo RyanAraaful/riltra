@@ -517,6 +517,7 @@ fn build_incremental(
     }
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     let snapshot_id = store::insert_snapshot(&tx, &new_snapshot_row(name, &meta))?;
+    store::create_file_map(&tx)?;
     let unchanged_ids: BTreeMap<&str, i64> = diff
         .unchanged
         .iter()
@@ -560,14 +561,11 @@ fn build_incremental(
                 // `reparsed` counts files actually parsed; gate-skipped files
                 // cost a hash, not a parse, so they never inflate it.
                 summary.files_discovered += 1;
-                match store::copy_file_facts(&tx, snapshot_id, old.id, *old_fid)? {
-                    Some(copied) => {
+                match store::copy_file_row(&tx, snapshot_id, old.id, *old_fid)? {
+                    Some(new_fid) => {
+                        store::record_file_map(&tx, *old_fid, new_fid)?;
                         summary.reused += 1;
                         summary.processed += 1;
-                        summary.definitions += copied.symbols as usize;
-                        summary.imports += copied.imports as usize;
-                        summary.calls += copied.calls as usize;
-                        summary.errors += copied.errors;
                     }
                     None => {
                         // Source row vanished under us: ingest from current
@@ -589,6 +587,13 @@ fn build_incremental(
             }
         }
     }
+    // One joined bulk copy per fact table: per-file filtered child SELECTs
+    // would scan the whole snapshot once per file (quadratic at MMSP scale).
+    let totals = store::copy_mapped_facts(&tx, snapshot_id, old.id)?;
+    summary.definitions += totals.symbols as usize;
+    summary.imports += totals.imports as usize;
+    summary.calls += totals.calls as usize;
+    summary.errors += totals.errors;
     summary.timings_ms.ingest = t_ingest.elapsed().as_millis() as u64;
     // Detach after commit: detaching inside the write transaction reports
     // the source locked, and the connection is dropped right below anyway.
