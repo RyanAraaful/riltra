@@ -9,7 +9,8 @@ never permanent cross-revision identities.
 ## Architecture (as built)
 
 - `store.rs`: `rusqlite` 0.40 + bundled SQLite (FTS5 verified per OS by test).
-  Schema v1 (`PRAGMA user_version`): `meta`, `snapshots`, `files`, `symbols`,
+  Schema v2 (`PRAGMA user_version`): `meta`, `snapshots` (+ `nonce` revision
+  identity, backfilled as `v1-legacy-<id>` from v1), `files`, `symbols`,
   `imports`, `calls`, `symbols_fts` (external-content FTS5 with triggers).
   One database file per repository under the local Riltra home
   (`<home>/index/<name>.db`); forward-incompatible versions are rejected,
@@ -68,6 +69,34 @@ modified; no MMSP source copied anywhere; all outputs outside the MMSP tree.
   distinct pages, `truncated:true`). A mid-validation rebuild raced the live
   ninja build tree and was honestly reported `stale(file-added)` — the
   freshness net working as designed, not a defect.
+- **Re-run after audit fixes (same MMSP `main/d62f06a`, clean, porcelain 0):**
+  index build 214.9 s, peak 357.1 MB RSS, exit 0; database 81,281,024 bytes,
+  counts byte-identical to the build above (15,176 discovered / 11,765
+  processed / 170,586 definitions / 64,954 imports / 562,384 call candidates /
+  152,543 errors). `status_at_write=stale` with identical pre/post git
+  fingerprints: the new content re-verify caught transient build-tree churn
+  inside the 215 s window (file came and went — query-time re-walk finds no
+  diff). Reopen + `index status`: `fresh`, reasons empty; `PatchMatch` (29
+  hits) and `run` searches hit exact spans with envelope nonce
+  `1452-1791956675203774600-0` and consistent per-hit snapshot ids.
+
+## Audit follow-up closures (post-M3, kept minimal, no M4 work)
+
+1. **Content-verified `fresh`:** `input_fingerprint()` covers git state and
+   config only, so `status_at_write=fresh` previously rested on no content
+   evidence. Builds now re-verify every stored digest against live source
+   inside the build transaction (`verify_snapshot_content`); any drift marks
+   the snapshot stale. Mid-build flips that git cannot see are caught here or,
+   failing that, by the query-time digest walk — never silently fresh.
+2. **Revision identities + consistent reads:** staging rebuilds restart
+   `AUTOINCREMENT`, so bare rowids are reused across revisions and cannot
+   distinguish them. Every snapshot now mints a unique nonce (schema v2 with
+   `v1-legacy-*` backfill), carried in status/search envelopes. Query paths
+   additionally read snapshot, verdict inputs, and fact rows inside one read
+   transaction on WAL-mode databases, so a response can never mix two
+   revisions even if a rebuild commits mid-query. Proven by a deterministic
+   two-connection isolation test plus nonce-uniqueness tests — not by
+   comparing reused id numbers.
 
 ## Limitations observed (honest, not fixed in M3)
 
