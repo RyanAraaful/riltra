@@ -6,8 +6,9 @@ entry here (package + exact version + license + origin URL + redistributability
 note) in the same PR that introduces it. Never introduce code under
 noncommercial/use-restricted licenses or from sources without clear rights.
 
-Current state: the syntax baseline below added pinned tree-sitter
-dependencies; the project started dependency-free (see history).
+Current state: tree-sitter parsing (M2) plus a durable SQLite index via
+`rusqlite` with bundled SQLite (M3), all pinned and permissive; the project
+started dependency-free (see history).
 
 ## Original baseline: zero third-party dependencies (pre-syntax)
 
@@ -25,15 +26,16 @@ dependencies (see M2 addition below), each with an SBOM entry.
 - SCIP spec/tooling: Apache-2.0 — record proto origin + version.
 - Rust MCP SDK (`rmcp`): license changed over time; keep the exact LICENSE of
   the pinned version.
-- `rusqlite`: MIT; bundled SQLite: public domain — audit features + bundled libs.
 - `gix`/gitoxide: MIT OR Apache-2.0.
 - clangd/LLVM: Apache-2.0 WITH LLVM-exception — keep notices.
 - rust-analyzer: MIT OR Apache-2.0. petgraph: MIT OR Apache-2.0 (optional algo only).
 
-## Audit result
+## Audit result (rebased at M3 — the zero-dependency claim below is history)
 
-- `cargo tree`: no dependencies (workspace has zero `[dependencies]`).
-- License risk: none beyond Rust std build-time linkage.
+- `cargo tree --depth 1`: `rusqlite`, `tree-sitter`, and 6 grammar crates;
+  full transitive set audited in the M2/M3 sections below.
+- License risk: permissive-only (MIT / Apache-2.0 / Unlicense / Zlib /
+  Unicode-3.0); no copyleft, no noncommercial code.
 
 ## M2 addition: tree-sitter syntax baseline (pinned versions, verified 2026-10-14)
 
@@ -70,3 +72,23 @@ Notes:
   everything arrives via crates.io with pinned versions.
 - `proc-macro2`/`quote`/`syn`/`serde`/`serde_derive` appear in the resolve graph
   but are not compiled into this feature set (absent from the build cache).
+
+## M3 addition: durable SQLite index (pinned versions, verified 2026-10-14)
+
+| Package | Version | License | Origin |
+|---|---|---|---|
+| rusqlite | 0.40.2 | MIT (declared in package metadata) | https://github.com/rusqlite/rusqlite |
+| libsqlite3-sys | 0.38.2 | MIT (declared); bundled SQLite amalgamation is public domain | bundled via `rusqlite/bundled` |
+| smallvec | 1.16.3 | MIT OR Apache-2.0 | transitive via rusqlite |
+| bitflags | 2.13.2 | MIT OR Apache-2.0 | transitive via rusqlite |
+| fallible-iterator | 0.3.0 | MIT/Apache-2.0 | transitive via rusqlite |
+| fallible-streaming-iterator | 0.1.9 | MIT/Apache-2.0 | transitive via rusqlite |
+| hashlink | 0.12.2 | MIT OR Apache-2.0 | transitive via rusqlite |
+| hashbrown | 0.17.1 | MIT OR Apache-2.0 | transitive via rusqlite |
+
+Notes:
+
+- The `bundled` feature compiles SQLite from source (no system library);
+  FTS5 availability is pinned by test (`fts5_is_available_in_bundled_sqlite`)
+  on every platform.
+- No graph database, vector store, or second database engine is used.

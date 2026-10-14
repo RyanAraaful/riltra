@@ -39,6 +39,10 @@ dependencies beyond itself:
   candidates with line/column spans and byte offsets for Python, JavaScript,
   TypeScript, Rust, C, and C++ (`scan`); other extensions are reported as
   unsupported, never guessed.
+- **Durable code index** — SQLite-backed snapshots of the syntax facts with
+  source digests, provenance, full-text search, and explicit
+  fresh/stale/unknown freshness (`index`, `search`); one database file per
+  repository under the local Riltra home.
 
 ## Quick start
 
@@ -54,6 +58,9 @@ cargo run -q -p riltra -- repo list
 cargo run -q -p riltra -- repo status --repo riltra
 cargo run -q -p riltra -- doctor --repo riltra
 cargo run -q -p riltra -- scan --repo riltra --path crates/cli/src/main.rs
+cargo run -q -p riltra -- index --repo riltra
+cargo run -q -p riltra -- index status --repo riltra
+cargo run -q -p riltra -- search --repo riltra --symbol version --limit 5
 ```
 
 `repo status` prints one JSON line per repository, for example (trimmed,
