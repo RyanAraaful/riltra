@@ -3,6 +3,7 @@
 //! FTS5 lexical search, and snapshot-scoped facts. Symbol rowids are
 //! per-snapshot only — never permanent cross-revision identities.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use rusqlite::{params, Connection};
@@ -359,6 +360,62 @@ pub fn promote_staging(live: &Connection, staging: &Path) -> Result<(), String> 
     Ok(())
 }
 
+/// Attach another database file as `src` for set-based copies. Same
+/// single-quote escaping as `promote_staging`.
+pub fn attach_src(conn: &Connection, path: &Path) -> Result<(), String> {
+    let escaped = path.to_string_lossy().replace('\'', "''");
+    conn.execute_batch(&format!("ATTACH DATABASE '{escaped}' AS src"))
+        .map_err(|e| format!("cannot attach source database: {e}"))?;
+    Ok(())
+}
+
+pub fn detach_src(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch("DETACH DATABASE src")
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Copy one file's facts from the attached `src` database into this one:
+/// the files row first, then its symbols/imports/calls under the new file
+/// id, without round-tripping rows through Rust. Column lists mirror the
+/// matching `insert_*` functions. Returns the new file rowid. Rejected
+/// alternative: reading every symbol/import/call into Vecs and re-inserting
+/// per row — per-row traffic and allocations for zero gain, since ATTACH
+/// copies are already proven by `promote_staging`.
+pub fn copy_file_facts(
+    staging: &Connection,
+    new_snapshot_id: i64,
+    old_snapshot_id: i64,
+    old_file_id: i64,
+) -> Result<i64, String> {
+    staging
+        .execute(
+            "INSERT INTO files (snapshot_id, path, language, bytes, digest, errors)
+             SELECT ?1, path, language, bytes, digest, errors FROM src.files
+             WHERE snapshot_id = ?2 AND id = ?3",
+            params![new_snapshot_id, old_snapshot_id, old_file_id],
+        )
+        .map_err(|e| e.to_string())?;
+    let new_file_id = staging.last_insert_rowid();
+    for (table, extra) in [
+        ("symbols", "kind, name, start_line, start_col, end_line, end_col, byte_start, byte_end, provider, grammar, language"),
+        ("imports", "text, start_line, start_col, end_line, end_col, byte_start, byte_end, provider, grammar, language"),
+        ("calls", "name, start_line, start_col, end_line, end_col, byte_start, byte_end, unresolved, provider, grammar, language"),
+    ] {
+        staging
+            .execute(
+                &format!(
+                    "INSERT INTO {table} (snapshot_id, file_id, {extra})
+                     SELECT ?1, ?2, {extra} FROM src.{table}
+                     WHERE snapshot_id = ?3 AND file_id = ?4"
+                ),
+                params![new_snapshot_id, new_file_id, old_snapshot_id, old_file_id],
+            )
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(new_file_id)
+}
+
 pub fn insert_file(conn: &Connection, snapshot_id: i64, file: &FileRow) -> Result<i64, String> {
     conn.execute(
         "INSERT INTO files (snapshot_id, path, language, bytes, digest, errors) VALUES (?1,?2,?3,?4,?5,?6)",
@@ -502,6 +559,27 @@ pub fn files_of(conn: &Connection, snapshot_id: i64) -> Result<Vec<FileRow>, Str
         })
         .map_err(|e| e.to_string())?;
     rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())
+}
+
+/// Path → (file rowid, content digest) for one snapshot. The id map lets
+/// incremental reuse locate old facts without touching `FileRow`.
+pub fn file_id_map(
+    conn: &Connection,
+    snapshot_id: i64,
+) -> Result<BTreeMap<String, (i64, String)>, String> {
+    let mut statement = conn
+        .prepare("SELECT id, path, digest FROM files WHERE snapshot_id = ?1 ORDER BY path")
+        .map_err(|e| e.to_string())?;
+    let rows = statement
+        .query_map([snapshot_id], |row| {
+            Ok((
+                row.get::<_, String>(1)?,
+                (row.get::<_, i64>(0)?, row.get::<_, String>(2)?),
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<BTreeMap<_, _>, _>>()
         .map_err(|e| e.to_string())
 }
 
@@ -969,6 +1047,88 @@ mod tests {
         .unwrap();
         let (total, hits) = search_symbols(&conn, snap, "w.process", 10, 0).unwrap();
         assert_eq!(total, 0, "calls are not symbol definitions: {hits:?}");
+    }
+
+    #[test]
+    fn id_map_and_set_copy_roundtrip() {
+        use super::{attach_src, copy_file_facts, detach_src, file_id_map, CallRow, ImportRow};
+        let dir = tmpdir("store-copy");
+        let live_path = dir.join("live.db");
+        let old_snap;
+        let old_fid;
+        {
+            let live = open_live(&live_path).unwrap();
+            old_snap = insert_snapshot(&live, &sample_snapshot()).unwrap();
+            old_fid = insert_file(
+                &live,
+                old_snap,
+                &FileRow {
+                    path: "a.py".to_string(),
+                    language: "python".to_string(),
+                    bytes: 30,
+                    digest: "d1".to_string(),
+                    errors: 0,
+                },
+            )
+            .unwrap();
+            insert_symbol(&live, old_snap, &sample_symbol(old_fid, "f")).unwrap();
+            insert_import(
+                &live,
+                old_snap,
+                &ImportRow {
+                    file_id: old_fid,
+                    text: Some("import os".to_string()),
+                    start_line: 1,
+                    start_col: 1,
+                    end_line: 1,
+                    end_col: 10,
+                    byte_start: 0,
+                    byte_end: 9,
+                    provider: "syntax".to_string(),
+                    grammar: "python:0.25.0".to_string(),
+                    language: "python".to_string(),
+                },
+            )
+            .unwrap();
+            insert_call(
+                &live,
+                old_snap,
+                &CallRow {
+                    file_id: old_fid,
+                    name: Some("g()".to_string()),
+                    start_line: 2,
+                    start_col: 5,
+                    end_line: 2,
+                    end_col: 20,
+                    byte_start: 15,
+                    byte_end: 30,
+                    unresolved: 1,
+                    provider: "syntax".to_string(),
+                    grammar: "python:0.25.0".to_string(),
+                    language: "python".to_string(),
+                },
+            )
+            .unwrap();
+            let map = file_id_map(&live, old_snap).unwrap();
+            assert_eq!(
+                map.get("a.py"),
+                Some(&(old_fid, "d1".to_string())),
+                "map must carry rowid and digest: {map:?}"
+            );
+        }
+        let staging_path = dir.join("staging.db");
+        let staging = open_live(&staging_path).unwrap();
+        attach_src(&staging, &live_path).unwrap();
+        let new_snap = insert_snapshot(&staging, &sample_snapshot()).unwrap();
+        copy_file_facts(&staging, new_snap, old_snap, old_fid).unwrap();
+        detach_src(&staging).unwrap();
+        let files = files_of(&staging, new_snap).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "a.py");
+        assert_eq!(files[0].digest, "d1");
+        let (total, hits) = search_symbols(&staging, new_snap, "f", 10, 0).unwrap();
+        assert_eq!(total, 1, "copied symbol must be searchable: {hits:?}");
+        assert_eq!(hits[0].path, "a.py");
     }
 
     #[test]
