@@ -286,48 +286,18 @@ pub fn build_full(home: &Path, name: &str, root: &Path) -> Result<IndexSummary, 
 }
 
 /// Re-verify every stored file digest of a snapshot against current source.
-/// True only when each stored file still resolves to identical content.
-/// Used at the end of a build (before claiming `fresh`) and covered by
-/// regression tests; `evaluate` performs the same comparison at query time.
+/// Uses exactly the comparison the query-time evaluator runs, so build
+/// admission and verification can never disagree: legitimately skipped files
+/// (too large, binary, unreadable-and-absent) confirm nothing but incriminate
+/// nothing, while added, removed, changed, or newly ineligible files fail.
+/// There is no vacuous `true` for empty snapshots: a source appearing
+/// afterwards reports `file-added`.
 pub fn verify_snapshot_content(
     conn: &rusqlite::Connection,
     snapshot_id: i64,
     canon_root: &Path,
 ) -> Result<bool, String> {
-    let stored: BTreeMap<String, String> = store::files_of(conn, snapshot_id)?
-        .into_iter()
-        .map(|f| (f.path, f.digest))
-        .collect();
-    if stored.is_empty() {
-        return Ok(true);
-    }
-    let (plan, _) = scan::plan_walk(canon_root)?;
-    let mut current = BTreeMap::new();
-    for item in &plan {
-        if !matches!(item.action, scan::PlanAction::Parse(_)) {
-            continue;
-        }
-        // Same skip mirror as the build: unreadable/size-changed/binary-now
-        // files cannot confirm the snapshot.
-        if std::fs::metadata(&item.full)
-            .map(|m| m.len() > scan::MAX_FILE_BYTES)
-            .unwrap_or(false)
-        {
-            return Ok(false);
-        }
-        let bytes = match std::fs::read(&item.full) {
-            Ok(b) => b,
-            Err(_) => return Ok(false),
-        };
-        if bytes.len() as u64 > scan::MAX_FILE_BYTES
-            || bytes.contains(&0)
-            || std::str::from_utf8(&bytes).is_err()
-        {
-            return Ok(false);
-        }
-        current.insert(item.rel.clone(), store::content_digest(&bytes));
-    }
-    Ok(current == stored)
+    Ok(content_diff(conn, snapshot_id, canon_root)?.is_empty())
 }
 
 /// Compare stored file digests against a fresh content walk. Only parsed
@@ -547,6 +517,57 @@ mod tests {
             fresh.status, "fresh",
             "skips must not self-invalidate: {:?}",
             fresh.reasons
+        );
+    }
+
+    #[test]
+    fn skipped_files_do_not_break_write_time_fresh() {
+        use super::verify_snapshot_content;
+        // One indexed file plus supported-extension files skipped since the
+        // start (too large / binary): with no changes and all indexed files
+        // matching, the build must still claim fresh.
+        let home = tmpdir("idx-wverify-home");
+        let repo = tmpdir("idx-wverify");
+        std::fs::write(repo.join("a.py"), b"def f():\n    pass\n").unwrap();
+        std::fs::write(repo.join("big.py"), vec![b'x'; 1024 * 1024 + 1]).unwrap();
+        std::fs::write(repo.join("bin.py"), b"\x00\x01").unwrap();
+        let summary = build_full(&home, "r", &repo).unwrap();
+        assert_eq!(summary.processed, 1);
+        assert_eq!(
+            summary.status_at_write, "fresh",
+            "longstanding skips must not break write-time verification"
+        );
+        let db = store::db_path(&home, "r");
+        let conn = store::open_live(&db).unwrap();
+        let snap = store::latest_snapshot(&conn).unwrap().unwrap();
+        let canon = repo.canonicalize().unwrap();
+        assert!(verify_snapshot_content(&conn, snap.id, &canon).unwrap());
+        // A previously indexed file turning ineligible must still be caught.
+        std::fs::write(repo.join("a.py"), vec![b'y'; 1024 * 1024 + 1]).unwrap();
+        assert!(
+            !verify_snapshot_content(&conn, snap.id, &canon).unwrap(),
+            "indexed-then-ineligible must fail verification"
+        );
+    }
+
+    #[test]
+    fn empty_snapshot_does_not_verify_new_sources() {
+        use super::verify_snapshot_content;
+        // A snapshot that stored nothing must not verify new sources as
+        // matching: the empty check is not evidence of agreement.
+        let home = tmpdir("idx-vempty-home");
+        let repo = tmpdir("idx-vempty");
+        std::fs::write(repo.join("note.xyz"), b"plain\n").unwrap();
+        build_full(&home, "r", &repo).unwrap();
+        let db = store::db_path(&home, "r");
+        let conn = store::open_live(&db).unwrap();
+        let snap = store::latest_snapshot(&conn).unwrap().unwrap();
+        let canon = repo.canonicalize().unwrap();
+        assert!(verify_snapshot_content(&conn, snap.id, &canon).unwrap());
+        std::fs::write(repo.join("a.py"), b"def f():\n    pass\n").unwrap();
+        assert!(
+            !verify_snapshot_content(&conn, snap.id, &canon).unwrap(),
+            "a source appearing after an empty snapshot is file-added, not verified"
         );
     }
 
