@@ -102,26 +102,65 @@ fn init_and_index(home: &Path, dir: &Path, name: &str) -> String {
     out
 }
 
-/// Envelope `"snapshot":<id>` (first occurrence is the envelope-level one).
+/// Envelope `"snapshot":{"id":N,...}` (first occurrence is the envelope-level
+/// one); per-hit entries stay `"snapshot":N`.
 fn envelope_snapshot(out: &str) -> String {
-    let key = "\"snapshot\":";
+    let key = "\"snapshot\":{\"id\":";
     let pos = out.find(key).expect("envelope must carry snapshot");
     let rest = &out[pos + key.len()..];
     rest.chars().take_while(|c| c.is_ascii_digit()).collect()
 }
 
-/// Every `"snapshot":N` in the output must equal the envelope id.
+/// Every per-hit `"snapshot":N` in the output must equal the envelope id.
+/// Requires at least one hit: vacuous consistency proves nothing.
 fn snapshot_ids_consistent(out: &str) -> bool {
     let id = envelope_snapshot(out);
     let mut rest = out;
+    let mut found_hit = false;
     while let Some(pos) = rest.find("\"snapshot\":") {
         rest = &rest[pos + "\"snapshot\":".len()..];
+        // Skip the envelope object form `"snapshot":{...}`.
+        if rest.starts_with('{') {
+            rest = &rest[1..];
+            continue;
+        }
         let value: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
         if value.is_empty() || value != id {
             return false;
         }
+        found_hit = true;
     }
-    true
+    found_hit
+}
+
+#[test]
+fn search_response_carries_one_revision_identity() {
+    let h = home("nonce");
+    let repo = mkrepo(&h, "work");
+    copy_fixture(&repo, "py/hello.py");
+    init_and_index(&h, &repo, "r");
+    let (_, first, _) = run(&h, &["search", "--repo", "r", "--symbol", "Worker"]);
+    assert!(first.contains("\"nonce\":\""), "got: {first}");
+    assert!(
+        !first.contains("\"nonce\":\"\""),
+        "nonce must not be empty: {first}"
+    );
+    assert!(snapshot_ids_consistent(&first));
+    std::fs::write(repo.join("b.py"), b"def g():\n    pass\n").unwrap();
+    init_and_index(&h, &repo, "r");
+    let (_, second, _) = run(&h, &["search", "--repo", "r", "--symbol", "Worker"]);
+    let nonce_of = |out: &str| -> String {
+        let key = "\"nonce\":\"";
+        let pos = out.find(key).expect("nonce in envelope");
+        let rest = &out[pos + key.len()..];
+        rest[..rest.find('"').unwrap()].to_string()
+    };
+    assert_ne!(
+        nonce_of(&first),
+        nonce_of(&second),
+        "revisions must be distinguishable"
+    );
+    assert!(snapshot_ids_consistent(&second));
 }
 
 #[test]

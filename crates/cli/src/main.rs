@@ -247,7 +247,7 @@ fn cmd_index(name: &str, out: &mut String, err: &mut String) -> i32 {
 
 fn snapshot_json(snapshot: &store::Snapshot) -> String {
     format!(
-        "{{\"id\":{},\"created_unix\":{},\"head\":{},\"branch\":{},\"dirty\":{},\"status_at_write\":\"{}\"}}",
+        "{{\"id\":{},\"created_unix\":{},\"head\":{},\"branch\":{},\"dirty\":{},\"status_at_write\":\"{}\",\"nonce\":\"{}\"}}",
         snapshot.id,
         snapshot.created_unix,
         match &snapshot.head {
@@ -259,7 +259,8 @@ fn snapshot_json(snapshot: &store::Snapshot) -> String {
             None => "null".to_string(),
         },
         snapshot.dirty,
-        snapshot.status_at_write
+        snapshot.status_at_write,
+        snapshot.nonce
     )
 }
 
@@ -281,6 +282,8 @@ fn cmd_index_status(name: &str, out: &mut String, err: &mut String) -> i32 {
     };
     let recorded = entry.root.clone();
     let freshness = index::evaluate(&home, name, Path::new(&recorded));
+    // The FTS flag reflects build capability, not revision content, so a
+    // separate connection is safe here.
     let fts = store::open_live(&store::db_path(&home, name))
         .map(|conn| store::fts_available(&conn))
         .unwrap_or(false);
@@ -358,27 +361,50 @@ fn cmd_search(
         }
     };
     let recorded = entry.root.clone();
-    let freshness = index::evaluate(&home, name, Path::new(&recorded));
-    let snapshot = match &freshness.snapshot {
-        Some(s) => s.clone(),
-        None => {
-            if store::db_path(&home, name).exists() {
-                // A database file exists but yields no snapshot: corrupt or
-                // tampered. Fail loudly instead of serving silent emptiness.
-                err.push_str("error: index database unreadable; rebuild with `index`\n");
-                return 3;
-            }
+    let db = store::db_path(&home, name);
+    if !db.exists() {
+        *out = format!(
+            "{{\"repo\":\"{}\",\"root\":\"{}\",\"snapshot\":null,\"freshness\":\"unknown\",\"reasons\":[\"no-index\"],\"query\":{{\"symbol\":\"{}\",\"limit\":{},\"offset\":{}}},\"total\":0,\"results\":[],\"truncated\":false}}\n",
+            json::escape(name),
+            json::escape(&recorded),
+            json::escape(symbol),
+            limit,
+            offset
+        );
+        return 0;
+    }
+    // One read transaction across snapshot read, verdict, and fact rows:
+    // the response can never mix two revisions.
+    let mut conn = match store::open_live(&db) {
+        Ok(c) => c,
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            return 3;
+        }
+    };
+    let tx = match conn.transaction() {
+        Ok(tx) => tx,
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            return 3;
+        }
+    };
+    let snapshot = match store::latest_snapshot(&tx) {
+        Ok(Some(snapshot)) => snapshot,
+        _ => {
+            err.push_str("error: index database unreadable; rebuild with `index`\n");
+            return 3;
+        }
+    };
+    let canon_root = match Path::new(&recorded).canonicalize() {
+        Ok(c) => c,
+        Err(_) => {
+            let _ = tx.commit();
             *out = format!(
-                "{{\"repo\":\"{}\",\"root\":\"{}\",\"snapshot\":null,\"freshness\":\"{}\",\"reasons\":[{}],\"query\":{{\"symbol\":\"{}\",\"limit\":{},\"offset\":{}}},\"total\":0,\"results\":[],\"truncated\":false}}\n",
+                "{{\"repo\":\"{}\",\"root\":\"{}\",\"snapshot\":{},\"freshness\":\"unknown\",\"reasons\":[\"root-unreadable\"],\"query\":{{\"symbol\":\"{}\",\"limit\":{},\"offset\":{}}},\"total\":0,\"results\":[],\"truncated\":false}}\n",
                 json::escape(name),
                 json::escape(&recorded),
-                freshness.status,
-                freshness
-                    .reasons
-                    .iter()
-                    .map(|r| format!("\"{r}\""))
-                    .collect::<Vec<_>>()
-                    .join(","),
+                snapshot_json(&snapshot),
                 json::escape(symbol),
                 limit,
                 offset
@@ -386,21 +412,15 @@ fn cmd_search(
             return 0;
         }
     };
-    let db = store::db_path(&home, name);
-    let conn = match store::open_live(&db) {
-        Ok(c) => c,
-        Err(e) => {
-            err.push_str(&format!("error: {e}\n"));
-            return 3;
-        }
-    };
-    let (total, hits) = match store::search_symbols(&conn, snapshot.id, symbol, limit, offset) {
+    let (status, reasons) = index::evaluate_snapshot(&tx, name, &canon_root, &snapshot);
+    let (total, hits) = match store::search_symbols(&tx, snapshot.id, symbol, limit, offset) {
         Ok(found) => found,
         Err(e) => {
             err.push_str(&format!("error: {e}\n"));
             return 3;
         }
     };
+    let _ = tx.commit();
     let results: Vec<String> = hits
         .iter()
         .map(|hit| {
@@ -430,14 +450,9 @@ fn cmd_search(
         "{{\"repo\":\"{}\",\"root\":\"{}\",\"snapshot\":{},\"freshness\":\"{}\",\"reasons\":[{}],\"query\":{{\"symbol\":\"{}\",\"limit\":{},\"offset\":{}}},\"total\":{},\"results\":[{}],\"truncated\":{}}}",
         json::escape(name),
         json::escape(&snapshot.root),
-        snapshot.id,
-        freshness.status,
-        freshness
-            .reasons
-            .iter()
-            .map(|r| format!("\"{r}\""))
-            .collect::<Vec<_>>()
-            .join(","),
+        snapshot_json(&snapshot),
+        status,
+        reasons.iter().map(|r| format!("\"{r}\"")).collect::<Vec<_>>().join(","),
         json::escape(symbol),
         limit,
         offset,

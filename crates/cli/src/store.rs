@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use rusqlite::{params, Connection};
 
 /// Current schema version (`PRAGMA user_version`).
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 /// Parser/extraction version. Bump whenever `syntax.rs` extraction changes;
 /// freshness treats a mismatch as stale (never silently current).
 pub const PARSER_VERSION: u32 = 1;
@@ -53,10 +53,14 @@ fn open_inner(path: Option<&Path>) -> Result<Connection, String> {
         row.get::<_, i64>(0)
     })
     .map_err(|e| format!("not a readable database: {e}"))?;
-    // Every open ends at the current schema: empty files become v1 here, so
+    // Every open ends at the current schema: empty files are built here, so
     // no caller can ever observe missing tables. Forward versions still fail
     // loudly inside `migrate`.
     migrate(&conn)?;
+    // WAL lets readers hold a stable snapshot while a rebuild commits.
+    // Best-effort: exotic filesystems fall back to rollback mode (still
+    // correct, less concurrent).
+    let _ = conn.execute_batch("PRAGMA journal_mode=WAL;");
     Ok(conn)
 }
 
@@ -94,7 +98,8 @@ CREATE TABLE IF NOT EXISTS snapshots (
   head TEXT, branch TEXT, dirty INTEGER NOT NULL, untracked INTEGER NOT NULL,
   parser_version INTEGER NOT NULL, grammar_versions TEXT NOT NULL,
   config_fingerprint TEXT NOT NULL, pre_fingerprint TEXT NOT NULL,
-  post_fingerprint TEXT NOT NULL, status_at_write TEXT NOT NULL
+  post_fingerprint TEXT NOT NULL, status_at_write TEXT NOT NULL,
+  nonce TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS files (
   id INTEGER PRIMARY KEY AUTOINCREMENT, snapshot_id INTEGER NOT NULL,
@@ -137,8 +142,9 @@ CREATE TRIGGER IF NOT EXISTS symbols_ad AFTER DELETE ON symbols BEGIN
 END;
 ";
 
-/// Bring any database to the current schema. Empty files become v1;
-/// newer-than-known versions are rejected, never guessed.
+/// Bring any database to the current schema. Empty files are built at
+/// current; v1 files gain the `nonce` column with per-row backfill; newer
+/// versions are rejected, never guessed.
 pub fn migrate(conn: &Connection) -> Result<(), String> {
     let version: u32 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
@@ -150,7 +156,14 @@ pub fn migrate(conn: &Connection) -> Result<(), String> {
     }
     conn.execute_batch(SCHEMA_SQL)
         .map_err(|e| format!("schema migration failed: {e}"))?;
-    conn.execute("PRAGMA user_version = 1", [])
+    if version == 1 {
+        conn.execute_batch(
+            "ALTER TABLE snapshots ADD COLUMN nonce TEXT NOT NULL DEFAULT '';
+             UPDATE snapshots SET nonce = 'v1-legacy-' || id WHERE nonce = '';",
+        )
+        .map_err(|e| format!("schema migration v1->v2 failed: {e}"))?;
+    }
+    conn.execute("PRAGMA user_version = 2", [])
         .map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -183,6 +196,8 @@ pub struct Snapshot {
     pub pre_fingerprint: String,
     pub post_fingerprint: String,
     pub status_at_write: String,
+    /// Unique revision identity: never reused across rebuilds.
+    pub nonce: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -260,7 +275,7 @@ pub struct Hit {
 
 pub fn insert_snapshot(conn: &Connection, snapshot: &Snapshot) -> Result<i64, String> {
     conn.execute(
-        "INSERT INTO snapshots (repo, root, created_unix, head, branch, dirty, untracked, parser_version, grammar_versions, config_fingerprint, pre_fingerprint, post_fingerprint, status_at_write) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+        "INSERT INTO snapshots (repo, root, created_unix, head, branch, dirty, untracked, parser_version, grammar_versions, config_fingerprint, pre_fingerprint, post_fingerprint, status_at_write, nonce) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
         params![
             snapshot.repo,
             snapshot.root,
@@ -275,10 +290,28 @@ pub fn insert_snapshot(conn: &Connection, snapshot: &Snapshot) -> Result<i64, St
             snapshot.pre_fingerprint,
             snapshot.post_fingerprint,
             snapshot.status_at_write,
+            snapshot.nonce,
         ],
     )
     .map_err(|e| e.to_string())?;
     Ok(conn.last_insert_rowid())
+}
+
+/// Fresh revision identities: process id, nanosecond clock, and a counter.
+/// Uniqueness is what lets tests and envelopes distinguish revisions.
+pub fn new_nonce() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!(
+        "{}-{}-{}",
+        std::process::id(),
+        nanos,
+        COUNTER.fetch_add(1, Ordering::SeqCst)
+    )
 }
 
 /// Record the post-build fingerprint and verdict on a snapshot row.
@@ -434,10 +467,11 @@ fn snapshot_from_row(row: &rusqlite::Row) -> rusqlite::Result<Snapshot> {
         pre_fingerprint: row.get(11)?,
         post_fingerprint: row.get(12)?,
         status_at_write: row.get(13)?,
+        nonce: row.get(14)?,
     })
 }
 
-const SNAPSHOT_COLS: &str = "id, repo, root, created_unix, head, branch, dirty, untracked, parser_version, grammar_versions, config_fingerprint, pre_fingerprint, post_fingerprint, status_at_write";
+const SNAPSHOT_COLS: &str = "id, repo, root, created_unix, head, branch, dirty, untracked, parser_version, grammar_versions, config_fingerprint, pre_fingerprint, post_fingerprint, status_at_write, nonce";
 
 pub fn latest_snapshot(conn: &Connection) -> Result<Option<Snapshot>, String> {
     let mut statement = conn
@@ -595,6 +629,7 @@ mod tests {
             pre_fingerprint: "pre1".to_string(),
             post_fingerprint: "pre1".to_string(),
             status_at_write: "fresh".to_string(),
+            nonce: "test-nonce-1".to_string(),
         }
     }
 
@@ -682,6 +717,83 @@ mod tests {
         }
         assert!(is_readable_db(&path));
         assert!(!is_readable_db(&dir.join("missing.db")));
+    }
+
+    #[test]
+    fn wal_mode_is_enabled() {
+        let dir = tmpdir("store-wal");
+        let path = dir.join("w.db");
+        let conn = open_live(&path).unwrap();
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mode.to_lowercase(), "wal", "concurrent readers need WAL");
+    }
+
+    #[test]
+    fn migrate_upgrades_v1_snapshots_with_nonce_backfill() {
+        let dir = tmpdir("store-v1");
+        let path = dir.join("old.db");
+        {
+            // Raw connection: open_live would auto-migrate, defeating the
+            // v1 simulation.
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            // Simulate a v1 database: v1-shaped table, version marker 1.
+            conn.execute_batch(
+                "CREATE TABLE snapshots (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 repo TEXT NOT NULL, root TEXT NOT NULL, created_unix INTEGER NOT NULL,
+                 head TEXT, branch TEXT, dirty INTEGER NOT NULL, untracked INTEGER NOT NULL,
+                 parser_version INTEGER NOT NULL, grammar_versions TEXT NOT NULL,
+                 config_fingerprint TEXT NOT NULL, pre_fingerprint TEXT NOT NULL,
+                 post_fingerprint TEXT NOT NULL, status_at_write TEXT NOT NULL);
+                 INSERT INTO snapshots (repo, root, created_unix, head, branch, dirty, untracked, parser_version, grammar_versions, config_fingerprint, pre_fingerprint, post_fingerprint, status_at_write)
+                 VALUES ('r', 'C:\\r', 1, 'abc', 'main', 0, 0, 1, 'g', 'c', 'p', 'p', 'fresh');
+                 PRAGMA user_version = 1;",
+            )
+            .unwrap();
+        }
+        let conn = open_live(&path).unwrap();
+        migrate(&conn).unwrap();
+        let version: u32 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, super::SCHEMA_VERSION);
+        let snap = latest_snapshot(&conn).unwrap().unwrap();
+        assert!(!snap.nonce.is_empty(), "migrated rows need identities");
+        assert_eq!(
+            snap.head.as_deref(),
+            Some("abc"),
+            "data must survive migration"
+        );
+    }
+
+    #[test]
+    fn read_transaction_sees_stable_snapshot_during_writer_commit() {
+        // Deterministic concurrency proof without threads: reader opens a
+        // read transaction, writer commits a new snapshot row, reader must
+        // still see the old one. Fails on autocommit reads (sees new row)
+        // and deadlocks-or-errors without WAL.
+        let dir = tmpdir("store-isolation");
+        let path = dir.join("iso.db");
+        let writer = open_live(&path).unwrap();
+        let mut first = sample_snapshot();
+        first.created_unix = 1;
+        insert_snapshot(&writer, &first).unwrap();
+        let mut reader = open_live(&path).unwrap();
+        let tx = reader.transaction().unwrap();
+        let before = latest_snapshot(&tx).unwrap().unwrap();
+        let mut second = sample_snapshot();
+        second.created_unix = 2;
+        insert_snapshot(&writer, &second).unwrap();
+        let during = latest_snapshot(&tx).unwrap().unwrap();
+        assert_eq!(before.created_unix, 1);
+        assert_eq!(
+            during.created_unix, 1,
+            "read txn must not see the concurrent commit"
+        );
+        tx.commit().unwrap();
+        let after = latest_snapshot(&reader).unwrap().unwrap();
+        assert_eq!(after.created_unix, 2);
     }
 
     #[test]

@@ -118,6 +118,7 @@ pub fn build_full(home: &Path, name: &str, root: &Path) -> Result<IndexSummary, 
             pre_fingerprint: pre.clone(),
             post_fingerprint: String::new(),
             status_at_write: "stale".to_string(),
+            nonce: store::new_nonce(),
         },
     )?;
     let (plan, _) = scan::plan_walk(&canon_root)?;
@@ -253,7 +254,11 @@ pub fn build_full(home: &Path, name: &str, root: &Path) -> Result<IndexSummary, 
         }
     }
     let post = input_fingerprint(&canon_root);
-    let status = if summary.pre_fingerprint == post {
+    // Content evidence at write time: re-verify every stored digest against
+    // current source before claiming fresh. A mid-build content flip that git
+    // cannot see still fails here. `fresh` requires all three agreements.
+    let content_verified = verify_snapshot_content(&tx, snapshot_id, &canon_root).unwrap_or(false);
+    let status = if summary.pre_fingerprint == post && content_verified {
         "fresh"
     } else {
         "stale"
@@ -278,6 +283,51 @@ pub fn build_full(home: &Path, name: &str, root: &Path) -> Result<IndexSummary, 
     summary.status_at_write = status.to_string();
     summary.post_fingerprint = post;
     Ok(summary)
+}
+
+/// Re-verify every stored file digest of a snapshot against current source.
+/// True only when each stored file still resolves to identical content.
+/// Used at the end of a build (before claiming `fresh`) and covered by
+/// regression tests; `evaluate` performs the same comparison at query time.
+pub fn verify_snapshot_content(
+    conn: &rusqlite::Connection,
+    snapshot_id: i64,
+    canon_root: &Path,
+) -> Result<bool, String> {
+    let stored: BTreeMap<String, String> = store::files_of(conn, snapshot_id)?
+        .into_iter()
+        .map(|f| (f.path, f.digest))
+        .collect();
+    if stored.is_empty() {
+        return Ok(true);
+    }
+    let (plan, _) = scan::plan_walk(canon_root)?;
+    let mut current = BTreeMap::new();
+    for item in &plan {
+        if !matches!(item.action, scan::PlanAction::Parse(_)) {
+            continue;
+        }
+        // Same skip mirror as the build: unreadable/size-changed/binary-now
+        // files cannot confirm the snapshot.
+        if std::fs::metadata(&item.full)
+            .map(|m| m.len() > scan::MAX_FILE_BYTES)
+            .unwrap_or(false)
+        {
+            return Ok(false);
+        }
+        let bytes = match std::fs::read(&item.full) {
+            Ok(b) => b,
+            Err(_) => return Ok(false),
+        };
+        if bytes.len() as u64 > scan::MAX_FILE_BYTES
+            || bytes.contains(&0)
+            || std::str::from_utf8(&bytes).is_err()
+        {
+            return Ok(false);
+        }
+        current.insert(item.rel.clone(), store::content_digest(&bytes));
+    }
+    Ok(current == stored)
 }
 
 /// Compare stored file digests against a fresh content walk. Only parsed
@@ -372,7 +422,7 @@ pub fn evaluate(home: &Path, name: &str, root: &Path) -> Freshness {
             snapshot: None,
         };
     }
-    let conn = match store::open_live(&db) {
+    let mut conn = match store::open_live(&db) {
         Ok(c) => c,
         Err(_) => {
             return Freshness {
@@ -382,7 +432,19 @@ pub fn evaluate(home: &Path, name: &str, root: &Path) -> Freshness {
             };
         }
     };
-    let snapshot = match store::latest_snapshot(&conn) {
+    // One read transaction across snapshot read and verdict inputs: the
+    // verdict always describes exactly the revision it names.
+    let tx = match conn.transaction() {
+        Ok(tx) => tx,
+        Err(_) => {
+            return Freshness {
+                status: "unknown".to_string(),
+                reasons: vec!["db-unreadable".to_string()],
+                snapshot: None,
+            };
+        }
+    };
+    let snapshot = match store::latest_snapshot(&tx) {
         Ok(Some(s)) => s,
         _ => {
             return Freshness {
@@ -402,11 +464,30 @@ pub fn evaluate(home: &Path, name: &str, root: &Path) -> Freshness {
             };
         }
     };
+    let (status, reasons) = evaluate_snapshot(&tx, name, &canon_root, &snapshot);
+    let _ = tx.commit();
+    Freshness {
+        status,
+        reasons,
+        snapshot: Some(snapshot),
+    }
+}
+
+/// Compare one snapshot row against live state on an already-open
+/// connection. Callers hold a read transaction across this plus their fact
+/// reads so verdict and results always describe one revision.
+pub fn evaluate_snapshot(
+    conn: &rusqlite::Connection,
+    name: &str,
+    canon_root: &Path,
+    snapshot: &store::Snapshot,
+) -> (String, Vec<String>) {
+    let _ = name;
     let mut reasons = Vec::new();
     if canon_root.to_string_lossy() != snapshot.root {
         reasons.push("root-moved".to_string());
     }
-    let live = git::fingerprint(&canon_root);
+    let live = git::fingerprint(canon_root);
     if live.dirty || snapshot.dirty {
         reasons.push("dirty".to_string());
     }
@@ -425,19 +506,15 @@ pub fn evaluate(home: &Path, name: &str, root: &Path) -> Freshness {
     if snapshot.grammar_versions != store::grammar_versions() {
         reasons.push("grammar-changed".to_string());
     }
-    if snapshot.config_fingerprint != config_fingerprint(&canon_root) {
+    if snapshot.config_fingerprint != config_fingerprint(canon_root) {
         reasons.push("config-changed".to_string());
     }
-    match content_diff(&conn, snapshot.id, &canon_root) {
+    match content_diff(conn, snapshot.id, canon_root) {
         Ok(mut diff) => reasons.append(&mut diff),
         Err(_) => reasons.push("content-unverifiable".to_string()),
     }
     let status = if reasons.is_empty() { "fresh" } else { "stale" };
-    Freshness {
-        status: status.to_string(),
-        reasons,
-        snapshot: Some(snapshot),
-    }
+    (status.to_string(), reasons)
 }
 
 #[cfg(test)]
@@ -470,6 +547,44 @@ mod tests {
             fresh.status, "fresh",
             "skips must not self-invalidate: {:?}",
             fresh.reasons
+        );
+    }
+
+    #[test]
+    fn verify_snapshot_content_detects_drift() {
+        use super::verify_snapshot_content;
+        let home = tmpdir("idx-verify-home");
+        let repo = plain_repo("idx-verify");
+        build_full(&home, "r", &repo).unwrap();
+        let db = store::db_path(&home, "r");
+        let conn = store::open_live(&db).unwrap();
+        let snap = store::latest_snapshot(&conn).unwrap().unwrap();
+        let canon = repo.canonicalize().unwrap();
+        assert!(verify_snapshot_content(&conn, snap.id, &canon).unwrap());
+        std::fs::write(repo.join("a.py"), b"def f():\n    return changed()\n").unwrap();
+        assert!(!verify_snapshot_content(&conn, snap.id, &canon).unwrap());
+    }
+
+    #[test]
+    fn snapshot_nonces_are_unique_across_rebuilds() {
+        let home = tmpdir("idx-nonce-home");
+        let repo = plain_repo("idx-nonce");
+        build_full(&home, "r", &repo).unwrap();
+        let db = store::db_path(&home, "r");
+        let first = store::latest_snapshot(&store::open_live(&db).unwrap())
+            .unwrap()
+            .unwrap()
+            .nonce;
+        assert!(!first.is_empty());
+        std::fs::write(repo.join("b.py"), b"def g():\n    pass\n").unwrap();
+        build_full(&home, "r", &repo).unwrap();
+        let second = store::latest_snapshot(&store::open_live(&db).unwrap())
+            .unwrap()
+            .unwrap()
+            .nonce;
+        assert_ne!(
+            first, second,
+            "rebuilds must mint fresh revision identities"
         );
     }
 
@@ -656,6 +771,7 @@ mod tests {
             pre_fingerprint: "same".to_string(),
             post_fingerprint: "same".to_string(),
             status_at_write: "fresh".to_string(),
+            nonce: store::new_nonce(),
         }
     }
 }
