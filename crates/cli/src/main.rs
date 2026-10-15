@@ -16,6 +16,7 @@ mod json;
 mod paths;
 mod registry;
 mod scan;
+mod semantic;
 mod store;
 mod syntax;
 
