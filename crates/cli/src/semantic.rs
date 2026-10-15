@@ -4,7 +4,7 @@
 //! shape, and the static capability registry. No provider-specific logic
 //! lives anywhere else.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::json::escape;
 use crate::paths;
@@ -228,22 +228,68 @@ pub fn resolve(provider: &str) -> Result<&'static Capability, String> {
         .ok_or_else(|| format!("unsupported semantic provider: '{provider}'"))
 }
 
+/// Decode a `file://` URI (or bare path) to a local `PathBuf`: optional
+/// scheme strip, percent-decoding, and the Windows drive-slash fix
+/// (`/c:/x` is not drive-qualified — servers and producers normalize drive
+/// letters, proven by rust-analyzer and scip-typescript Tier B). Containment
+/// checks stay with the callers.
+pub fn uri_path(uri: &str) -> Result<PathBuf, String> {
+    let s = uri.strip_prefix("file://").unwrap_or(uri);
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            if i + 2 >= bytes.len() {
+                return Err("bad percent-encoding in URI".to_string());
+            }
+            let hex = std::str::from_utf8(&bytes[i + 1..i + 3])
+                .map_err(|_| "bad percent-encoding in URI".to_string())?;
+            out.push(
+                u8::from_str_radix(hex, 16)
+                    .map_err(|_| "bad percent-encoding in URI".to_string())?,
+            );
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    let decoded = String::from_utf8(out).map_err(|_| "non-UTF8 URI".to_string())?;
+    let bytes = decoded.as_bytes();
+    if bytes.len() > 3 && bytes[0] == b'/' && bytes[1].is_ascii_alphabetic() && bytes[2] == b':' {
+        return Ok(PathBuf::from(&decoded[1..]));
+    }
+    Ok(PathBuf::from(decoded))
+}
+
 /// Single shared document-path validator for both providers. Enforces the
 /// SCIP `relative_path` rules lexically (relative, `/` separators, no
 /// empty/`.`/`..` components) then proves containment + existence through
 /// `paths::contains` (canonicalizes, so symlink escapes fail). Returns the
 /// normalized `/`-separated relative path.
+///
+/// Observed producer deviation (scip-typescript 0.4.0 on Windows, Tier B):
+/// `\` separators instead of the spec-mandated `/`. They are normalized
+/// before validation — an identity-preserving mapping — while `..`, drive
+/// qualification, and escapes are still rejected afterwards.
 pub fn validate_doc_path(root: &Path, rel: &str) -> Result<String, String> {
     if rel.is_empty() {
         return Err("empty document path".to_string());
     }
-    if rel.starts_with('/') || rel.contains('\\') || rel.contains('\0') {
+    let rel = rel.replace('\\', "/");
+    if rel.starts_with('/') || rel.contains('\0') {
         return Err(format!("document path not relative/portable: '{rel}'"));
     }
     let mut parts = Vec::new();
     for part in rel.split('/') {
         if part.is_empty() || part == "." || part == ".." {
             return Err(format!("non-canonical document path: '{rel}'"));
+        }
+        // Drive-qualified absolutes smuggled past the leading-slash check.
+        if part.len() == 2 && part.as_bytes()[1] == b':' && part.as_bytes()[0].is_ascii_alphabetic()
+        {
+            return Err(format!("absolute document path: '{rel}'"));
         }
         parts.push(part);
     }
@@ -335,12 +381,17 @@ pub fn verify_live(import: &crate::store::SemanticImport, live: &LiveState) -> V
 mod tests {
     use super::*;
     use crate::testutil::tmpdir;
+    use std::path::PathBuf;
 
     #[test]
     fn doc_path_rejects_traversal_and_absolutes() {
         let dir = tmpdir("sem-path");
         std::fs::write(dir.join("ok.py"), "x").unwrap();
+        std::fs::create_dir_all(dir.join("win")).unwrap();
+        std::fs::write(dir.join("win").join("d.py"), "x").unwrap();
         assert!(validate_doc_path(&dir, "ok.py").is_ok());
+        // Producer backslash deviation normalizes to the same identity.
+        assert_eq!(validate_doc_path(&dir, "win\\d.py").unwrap(), "win/d.py");
         for bad in [
             "",
             "/abs.py",
@@ -348,7 +399,8 @@ mod tests {
             "a/../../evil.py",
             "a//b.py",
             "a/./b.py",
-            "a\\b.py",
+            "C:/evil.py",
+            "C:\\evil.py",
             "sub/",
         ] {
             assert!(validate_doc_path(&dir, bad).is_err(), "must reject {bad:?}");
@@ -380,6 +432,23 @@ mod tests {
         assert!(validate_range(4, 0, 3, 9).is_err());
         assert!(validate_range(3, 5, 3, 5).is_ok());
         assert!(validate_range(1, 0, 9, 0).is_ok());
+    }
+
+    #[test]
+    fn uri_path_decodes_scheme_percent_and_drive_slash() {
+        assert_eq!(
+            uri_path("file:///C:/r/a%20b.py").unwrap(),
+            PathBuf::from("C:/r/a b.py")
+        );
+        assert_eq!(
+            uri_path("file:///c:/r/a.py").unwrap(),
+            PathBuf::from("c:/r/a.py")
+        );
+        assert_eq!(
+            uri_path("/home/u/a.py").unwrap(),
+            PathBuf::from("/home/u/a.py")
+        );
+        assert!(uri_path("file:///bad%.py").is_err());
     }
 
     #[test]

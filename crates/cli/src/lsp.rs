@@ -134,6 +134,20 @@ enum Incoming {
     Broken(String),
 }
 
+/// LSP error code servers use for "state changed under you, retry".
+/// rust-analyzer answers it while a freshly opened file is still loading:
+/// retryable like an empty answer, never evidence, never silently fatal.
+const RETRYABLE_CODE: &str = "\"code\":-32801";
+
+/// True when a request error only reports unreadiness (empty answer or a
+/// retryable code) rather than a real failure.
+fn is_unready(result: &Result<Value, String>) -> bool {
+    match result {
+        Ok(v) => v.is_null() || v.as_array().is_some_and(Vec::is_empty),
+        Err(e) => e.contains(RETRYABLE_CODE),
+    }
+}
+
 /// Convert an LSP (line, character) pair to a byte offset within one line
 /// under the negotiated encoding. Never rounds, never clamps.
 pub fn lsp_pos_to_bytes(line: &str, character: usize, encoding: &str) -> Result<usize, String> {
@@ -191,31 +205,10 @@ fn id_key(id: &Value) -> String {
 /// Parse a `file://` URI into a repo-contained path. Anything else —
 /// `untitled:`, traversal, missing file — is rejected with a reason.
 pub fn uri_to_path(root: &Path, uri: &str) -> Result<PathBuf, String> {
-    let path_part = uri
-        .strip_prefix("file://")
-        .ok_or_else(|| format!("non-file URI: '{uri}'"))?;
-    let bytes = path_part.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' {
-            if i + 2 >= bytes.len() {
-                return Err("bad percent-encoding in URI".to_string());
-            }
-            let hex = std::str::from_utf8(&bytes[i + 1..i + 3])
-                .map_err(|_| "bad percent-encoding in URI".to_string())?;
-            out.push(
-                u8::from_str_radix(hex, 16)
-                    .map_err(|_| "bad percent-encoding in URI".to_string())?,
-            );
-            i += 3;
-        } else {
-            out.push(bytes[i]);
-            i += 1;
-        }
+    if !uri.starts_with("file://") {
+        return Err(format!("non-file URI: '{uri}'"));
     }
-    let decoded = String::from_utf8(out).map_err(|_| "non-UTF8 URI".to_string())?;
-    let candidate = PathBuf::from(decoded);
+    let candidate = semantic::uri_path(uri)?;
     let canonical_root = root
         .canonicalize()
         .map_err(|e| format!("repository root unavailable: {e}"))?;
@@ -225,8 +218,24 @@ pub fn uri_to_path(root: &Path, uri: &str) -> Result<PathBuf, String> {
     Ok(candidate)
 }
 
+/// Build a `file://` URI for a local path. Strips Windows extended-length
+/// (`\\?\`) and UNC (`\\?\UNC\`) prefixes first: servers reject URIs built
+/// from them (proven by rust-analyzer Tier B: "url is not a file").
 fn file_uri(path: &Path) -> String {
-    format!("file://{}", path.to_string_lossy().replace('\\', "/"))
+    let text = path.to_string_lossy().replace('\\', "/");
+    let text = text
+        .strip_prefix("//?/UNC/")
+        .map(|rest| format!("//{rest}"))
+        .unwrap_or(text);
+    let text = text.strip_prefix("//?/").unwrap_or(&text).to_string();
+    if text.starts_with("//") {
+        format!("file:{text}")
+    } else {
+        format!(
+            "file:///{text}",
+            text = text.strip_prefix('/').unwrap_or(&text)
+        )
+    }
 }
 
 /// A live, opted-in language server subprocess. One reader thread pumps
@@ -246,6 +255,7 @@ pub struct Session {
     canonical_root: PathBuf,
     opened: std::collections::HashSet<String>,
     refs_supported: bool,
+    diagnostic_provider: bool,
     server_version: String,
     pub position_encoding: String,
     pub diagnostics: Vec<String>,
@@ -336,6 +346,7 @@ pub fn spawn(spec: ServerSpec) -> Result<Session, String> {
         canonical_root,
         opened: std::collections::HashSet::new(),
         refs_supported: false,
+        diagnostic_provider: false,
         server_version: String::new(),
         position_encoding: "utf-16".to_string(),
         diagnostics: Vec::new(),
@@ -432,6 +443,9 @@ impl Session {
             match self.inbox.recv_timeout(deadline) {
                 Ok(Incoming::Response { id: got, body }) => {
                     if got == want {
+                        if std::env::var("RILTRA_LSP_DEBUG").is_ok() {
+                            eprintln!("LSP <- {body}");
+                        }
                         if let Some(err) = body.get("error") {
                             return Err(format!("server error: {err}"));
                         }
@@ -508,9 +522,19 @@ impl Session {
             .get("capabilities")
             .ok_or_else(|| self.fail("initialize: no capabilities".to_string()))?;
         // Advertised-capability honesty: only what the server declares.
+        // rust-analyzer reports its encoding as `positionEncoding`
+        // (singular); accept that alias too, never assume.
         self.refs_supported = caps
             .get("referencesProvider")
             .is_some_and(|v| v.as_bool().unwrap_or(true) && !v.is_null());
+        self.diagnostic_provider = caps.get("diagnosticProvider").is_some();
+        if let Some(enc) = result
+            .pointer("/capabilities/positionEncodingKind")
+            .or_else(|| result.pointer("/capabilities/positionEncoding"))
+            .and_then(Value::as_str)
+        {
+            self.position_encoding = enc.to_string();
+        }
         if let Some(enc) = result
             .pointer("/capabilities/positionEncodingKind")
             .and_then(Value::as_str)
@@ -542,15 +566,72 @@ impl Session {
         let text =
             std::fs::read_to_string(&disk).map_err(|e| format!("cannot read '{rel}': {e}"))?;
         if self.opened.insert(validated.clone()) {
+            // Real languageId: servers index "plaintext" as nothing (proven
+            // by an empty rust-analyzer answer in Tier B).
+            let language_id = match crate::syntax::classify(&disk) {
+                crate::syntax::FileKind::Supported(lang) => match lang {
+                    crate::syntax::Language::Tsx => "typescriptreact",
+                    other => crate::syntax::language_name(other),
+                },
+                _ => "plaintext",
+            };
             self.send_value(&serde_json::json!({
                 "jsonrpc": "2.0", "method": "textDocument/didOpen",
                 "params": {"textDocument": {
-                    "uri": file_uri(&disk), "languageId": "plaintext",
+                    "uri": file_uri(&disk), "languageId": language_id,
                     "version": 1, "text": text
                 }}
             }))?;
+            self.await_analysis(&validated)?;
         }
         Ok((disk, text))
+    }
+
+    /// Warmup: when the server advertises push diagnostics, wait (bounded)
+    /// for the first `publishDiagnostics` of the opened file before any
+    /// position query. Pull-model servers never push: callers additionally
+    /// retry empty answers (see `definition`). Servers without the
+    /// capability skip the wait entirely.
+    fn await_analysis(&mut self, rel: &str) -> Result<(), String> {
+        if !self.diagnostic_provider {
+            return Ok(());
+        }
+        let deadline = std::time::Instant::now() + self.timeout.min(Duration::from_secs(15));
+        loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                self.diagnostics
+                    .push("analysis wait timed out; answers may be empty".to_string());
+                return Ok(());
+            }
+            match self.inbox.recv_timeout(left.min(Duration::from_secs(2))) {
+                Ok(Incoming::Notify { method, params }) => {
+                    if method == "textDocument/publishDiagnostics" {
+                        self.note_notification(&method, &params);
+                        let uri = params.get("uri").and_then(Value::as_str).unwrap_or("");
+                        if let Ok(path) = uri_to_path(&self.root, uri) {
+                            let mut check = self.root.clone();
+                            for part in rel.split('/') {
+                                check.push(part);
+                            }
+                            if path == check {
+                                return Ok(());
+                            }
+                        }
+                    } else {
+                        self.note_notification(&method, &params);
+                    }
+                }
+                Ok(Incoming::Response { id, .. }) => {
+                    self.diagnostics
+                        .push(format!("stray response id {id} during warmup"));
+                }
+                Ok(Incoming::Broken(e)) => {
+                    return Err(self.fail(format!("server broken: {e}{}", self.stderr_tail())));
+                }
+                Err(_) => continue,
+            }
+        }
     }
 
     fn locations_to_evidence(
@@ -635,15 +716,32 @@ impl Session {
     }
 
     /// Go to definition at a 1-based (line, col). Single hop, no traversal.
+    /// Cold servers answer empty while loading: empty answers are retried
+    /// on a bounded schedule (immediate + 2s x5); a still-empty answer is
+    /// reported as-is with the retry count, never upgraded to evidence.
     pub fn definition(&mut self, rel: &str, line1: u32, col1: u32) -> Result<LspEvidence, String> {
         let (disk, _) = self.ensure_open(rel)?;
-        let result = self.request(
-            "textDocument/definition",
-            serde_json::json!({"textDocument": {"uri": file_uri(&disk)},
-                "position": {"line": line1.saturating_sub(1), "character": col1.saturating_sub(1)}}),
-        )?;
+        let mut facts = Vec::new();
+        let mut tries = 0;
+        for attempt in 0..6 {
+            tries = attempt;
+            let result = self.request(
+                "textDocument/definition",
+                serde_json::json!({"textDocument": {"uri": file_uri(&disk)},
+                    "position": {"line": line1.saturating_sub(1), "character": col1.saturating_sub(1)}}),
+            );
+            if !is_unready(&result) || attempt == 5 {
+                facts = self.locations_to_evidence(&result?, true)?;
+                break;
+            }
+            std::thread::sleep(Duration::from_secs(2));
+        }
+        if tries > 0 && !facts.is_empty() {
+            self.diagnostics
+                .push(format!("definition converged after {tries} retries"));
+        }
         Ok(LspEvidence {
-            facts: self.locations_to_evidence(&result, true)?,
+            facts,
             server_version: self.server_version.clone(),
             position_encoding: self.position_encoding.clone(),
             diagnostics: self.diagnostics.clone(),
@@ -657,14 +755,22 @@ impl Session {
             return Err("unsupported: server lacks referencesProvider".to_string());
         }
         let (disk, _) = self.ensure_open(rel)?;
-        let result = self.request(
-            "textDocument/references",
-            serde_json::json!({"textDocument": {"uri": file_uri(&disk)},
-                "position": {"line": line1.saturating_sub(1), "character": col1.saturating_sub(1)},
-                "context": {"includeDeclaration": true}}),
-        )?;
+        let mut facts = Vec::new();
+        for attempt in 0..6 {
+            let result = self.request(
+                "textDocument/references",
+                serde_json::json!({"textDocument": {"uri": file_uri(&disk)},
+                    "position": {"line": line1.saturating_sub(1), "character": col1.saturating_sub(1)},
+                    "context": {"includeDeclaration": true}}),
+            );
+            if !is_unready(&result) || attempt == 5 {
+                facts = self.locations_to_evidence(&result?, false)?;
+                break;
+            }
+            std::thread::sleep(Duration::from_secs(2));
+        }
         Ok(LspEvidence {
-            facts: self.locations_to_evidence(&result, false)?,
+            facts,
             server_version: self.server_version.clone(),
             position_encoding: self.position_encoding.clone(),
             diagnostics: self.diagnostics.clone(),
@@ -775,6 +881,13 @@ mod tests {
         std::fs::write(dir.join("main.rs"), "fn main() {}\n").unwrap();
         let slash = dir.to_string_lossy().replace('\\', "/");
         assert!(uri_to_path(&dir, &format!("file://{slash}/main.rs")).is_ok());
+        // Lowercase drive letter (rust-analyzer normalization): same file.
+        let lower = slash
+            .chars()
+            .enumerate()
+            .map(|(i, c)| if i == 0 { c.to_ascii_lowercase() } else { c })
+            .collect::<String>();
+        assert!(uri_to_path(&dir, &format!("file:///{lower}/main.rs")).is_ok());
         assert!(uri_to_path(&dir, "untitled:Untitled-1").is_err());
         assert!(uri_to_path(&dir, &format!("file://{slash}/../evil.rs")).is_err());
         assert!(uri_to_path(&dir, &format!("file://{slash}/nope.rs")).is_err());

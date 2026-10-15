@@ -224,18 +224,24 @@ fn skip_bytes(stream: &mut CodedInputStream, n: u32) -> Result<(), String> {
         .map_err(|e| format!("scip skip error: {e}"))
 }
 
-/// Character-offset basis of one document's ranges. Rejects Unspecified:
-/// guessing the producer's string width corrupts every span on the page.
+/// Character-offset basis of one document's ranges. A specified encoding is
+/// honored exactly; Unspecified is rejected. Guessing the producer's string
+/// width corrupts every span on the page.
 fn char_encoding(doc: &Document) -> Result<CharEncoding, String> {
     match doc.position_encoding.enum_value() {
         Ok(PositionEncoding::UTF8CodeUnitOffsetFromLineStart) => Ok(CharEncoding::Utf8),
         Ok(PositionEncoding::UTF16CodeUnitOffsetFromLineStart) => Ok(CharEncoding::Utf16),
         Ok(PositionEncoding::UTF32CodeUnitOffsetFromLineStart) => Ok(CharEncoding::Utf32),
-        _ => Err(format!(
-            "unsupported position encoding in '{}'",
-            doc.relative_path
-        )),
+        _ => Err("unspecified position encoding".to_string()),
     }
+}
+
+/// Unspecified-encoding fallback marker: accept ONLY on lines that are
+/// ASCII, where UTF-8/16/32 offsets are provably identical (no assumption
+/// made). Real producers omit the field (scip-typescript 0.4.0, Tier B):
+/// ASCII lines import exactly, non-ASCII lines skip with a reason.
+fn ascii_line(line: &str) -> bool {
+    line.is_ascii()
 }
 
 #[derive(Clone, Copy)]
@@ -325,31 +331,10 @@ fn decode_text(raw: &[u8], enc: TextEncoding, rel: &str) -> Result<Vec<u8>, Stri
     }
 }
 
-/// Parse `Metadata.project_root`: optional `file://` prefix + percent
-/// decoding. Must canonicalize-equal the registered repo root.
+/// Parse `Metadata.project_root` through the shared URI decoder.
+/// Must canonicalize-equal the registered repo root (checked by caller).
 fn parse_project_root(s: &str) -> Result<PathBuf, String> {
-    let s = s.strip_prefix("file://").unwrap_or(s);
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' {
-            if i + 2 >= bytes.len() {
-                return Err("bad percent-encoding in project_root".to_string());
-            }
-            let hex = std::str::from_utf8(&bytes[i + 1..i + 3])
-                .map_err(|_| "bad percent-encoding in project_root".to_string())?;
-            let v = u8::from_str_radix(hex, 16)
-                .map_err(|_| "bad percent-encoding in project_root".to_string())?;
-            out.push(v);
-            i += 3;
-        } else {
-            out.push(bytes[i]);
-            i += 1;
-        }
-    }
-    let decoded = String::from_utf8(out).map_err(|_| "non-UTF8 project_root".to_string())?;
-    Ok(PathBuf::from(decoded))
+    crate::semantic::uri_path(s)
 }
 
 /// Split a symbol URI on single spaces; double spaces are escaped literals.
@@ -550,13 +535,6 @@ enum DocOutcome {
 
 fn process_document(state: &mut ImportState, doc: Document) -> Result<DocOutcome, String> {
     let rel = semantic::validate_doc_path(&state.repo_root, &doc.relative_path)?;
-    let enc = match char_encoding(&doc) {
-        Ok(enc) => enc,
-        Err(e) => {
-            state.skip(format!("{rel}: {e}"));
-            return Ok(DocOutcome::Skipped);
-        }
-    };
     // Conflict check first: contradictory identity fails the whole import.
     let mut symbols: BTreeMap<&str, &SymbolInformation> = BTreeMap::new();
     for info in &doc.symbols {
@@ -603,6 +581,10 @@ fn process_document(state: &mut ImportState, doc: Document) -> Result<DocOutcome
     };
     let text = String::from_utf8(decoded).map_err(|_| format!("{rel}: not UTF-8"))?;
     let lines: Vec<&str> = text.split('\n').collect();
+    let (enc, unspecified) = match char_encoding(&doc) {
+        Ok(enc) => (enc, false),
+        Err(_) => (CharEncoding::Utf8, true),
+    };
     let mut line_starts = Vec::with_capacity(lines.len());
     let mut offset = 0usize;
     for line in &lines {
@@ -630,6 +612,10 @@ fn process_document(state: &mut ImportState, doc: Document) -> Result<DocOutcome
         let end_line = lines[el as usize]
             .strip_suffix('\r')
             .unwrap_or(lines[el as usize]);
+        if unspecified && !(ascii_line(start_line) && ascii_line(end_line)) {
+            state.skip(format!("{rel}: unspecified encoding on non-ASCII line"));
+            continue;
+        }
         let (byte_start, byte_end) = match (
             byte_offset(start_line, sc, enc),
             byte_offset(end_line, ec, enc),
@@ -1219,6 +1205,50 @@ mod tests {
             }
         }
         out
+    }
+
+    #[test]
+    fn unspecified_encoding_ascii_exact_nonscii_skipped() {
+        // Producer omits position_encoding (scip-typescript behavior):
+        // ASCII lines import exactly; non-ASCII lines skip, never guess.
+        let ascii = "foo();\n";
+        let mixed = "// caf\u{e9}\nfoo();\n";
+        let s = setup(&[("src/a.ts", ascii), ("src/b.ts", mixed)], &[]);
+        let sym_a = format!("{SCHEME_PKG} src/a.ts/foo().");
+        let sym_b = format!("{SCHEME_PKG} src/b.ts/foo().");
+        let mut da = Document::new();
+        da.relative_path = "src/a.ts".to_string();
+        da.occurrences = vec![single_line(&sym_a, 0x1, 0, 0, 3)];
+        da.symbols = vec![symbol_info(&sym_a, "foo")];
+        let mut db = Document::new();
+        db.relative_path = "src/b.ts".to_string();
+        db.occurrences = vec![single_line(&sym_b, 0x1, 0, 3, 7)]; // on the é line
+        db.symbols = vec![symbol_info(&sym_b, "foo")];
+        // No position_encoding set on either document: Unspecified.
+        let bytes = encode_index(&s.dir, vec![da, db], vec![]);
+        let path = write_scip(&s.dir, "index.scip", &bytes);
+        let out = import_file(
+            &s.conn,
+            s.snapshot_id,
+            &s.dir,
+            &path,
+            &ImportLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(out.documents, 2);
+        assert_eq!(out.definitions, 1);
+        assert!(
+            crate::store::semantic_facts_for(&s.conn, s.snapshot_id, &sym_a)
+                .unwrap()
+                .len()
+                == 1
+        );
+        assert!(
+            crate::store::semantic_facts_for(&s.conn, s.snapshot_id, &sym_b)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(out.skipped.iter().any(|r| r.contains("non-ASCII")));
     }
 
     #[test]
