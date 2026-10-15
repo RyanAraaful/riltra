@@ -288,6 +288,50 @@ pub fn fallback_report(provider: &str, reason: &str) -> String {
     )
 }
 
+/// Live source state for `verify_live`. Nonce proves rebuild identity;
+/// `content_identity` proves the bytes; git/config fields prove the rest.
+/// Compared independently: equal fingerprints never excuse different bytes.
+pub struct LiveState {
+    pub head: String,
+    pub branch: String,
+    pub dirty: bool,
+    pub untracked: u32,
+    pub config_fingerprint: String,
+    pub snapshot_nonce: String,
+    pub content_identity: String,
+}
+
+/// Canonical revision string. One builder used at import binding AND query
+/// time: the comparison is exact, never field-by-field drift.
+pub fn revision_string(live: &LiveState) -> String {
+    format!(
+        "head={}|branch={}|dirty={}|untracked={}|cfg={}|nonce={}",
+        live.head,
+        live.branch,
+        live.dirty,
+        live.untracked,
+        live.config_fingerprint,
+        live.snapshot_nonce
+    )
+}
+
+/// The ONE freshness rule for semantic facts (M5). Import-granular and
+/// conservative: an unchanged file digest never implies the relationships
+/// are still valid, so ANY drift in content or revision marks the whole
+/// import `Stale` (still served with explicit marking, never as `Current`).
+/// `Current` is unreachable in M5: no independent producer-to-source proof
+/// exists, so a fully matching import is `Unverified`, and `--source-digest`
+/// claims are recorded, never trusted.
+pub fn verify_live(import: &crate::store::SemanticImport, live: &LiveState) -> Verification {
+    if import.content_identity != live.content_identity {
+        return Verification::Stale;
+    }
+    if import.source_revision != revision_string(live) {
+        return Verification::Stale;
+    }
+    Verification::Unverified
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -355,6 +399,56 @@ mod tests {
         let lsp = resolve("lsp-subprocess").unwrap();
         assert!(lsp.definitions && lsp.references);
         assert!(resolve("scip-typescript").is_err());
+    }
+
+    fn live_fixture() -> (crate::store::SemanticImport, LiveState) {
+        let live = LiveState {
+            head: "abc".to_string(),
+            branch: "main".to_string(),
+            dirty: false,
+            untracked: 0,
+            config_fingerprint: "cfg".to_string(),
+            snapshot_nonce: "n1".to_string(),
+            content_identity: "ci".to_string(),
+        };
+        let import = crate::store::SemanticImport {
+            snapshot_id: 1,
+            provider_name: "scip-import".to_string(),
+            provider_version: "v".to_string(),
+            capability: "definitions,references".to_string(),
+            project_root: "r".to_string(),
+            text_encoding: "UTF8".to_string(),
+            artifact_id: "a".to_string(),
+            source_revision: revision_string(&live),
+            claimed_source_digest: "user-claim".to_string(),
+            content_identity: "ci".to_string(),
+            external_symbols: "[]".to_string(),
+            verification: "Unverified".to_string(),
+        };
+        (import, live)
+    }
+
+    #[test]
+    fn verify_live_matrix() {
+        let (import, live) = live_fixture();
+        // Fully matching attested import: still Unverified (claim ≠ proof).
+        assert_eq!(verify_live(&import, &live), Verification::Unverified);
+        // Same git fingerprint, different bytes: Stale (nonce ≠ content).
+        let mut moved = live_fixture().1;
+        moved.content_identity = "ci2".to_string();
+        assert_eq!(verify_live(&import, &moved), Verification::Stale);
+        // Same bytes, rebuilt nonce without rebind: Stale.
+        let mut rebuilt = live_fixture().1;
+        rebuilt.snapshot_nonce = "n2".to_string();
+        assert_eq!(verify_live(&import, &rebuilt), Verification::Stale);
+        // Dependency/config drift with identical bytes: Stale.
+        let mut depdrift = live_fixture().1;
+        depdrift.config_fingerprint = "cfg2".to_string();
+        assert_eq!(verify_live(&import, &depdrift), Verification::Stale);
+        // Dirty flag drift: Stale.
+        let mut dirty = live_fixture().1;
+        dirty.dirty = true;
+        assert_eq!(verify_live(&import, &dirty), Verification::Stale);
     }
 
     #[test]
