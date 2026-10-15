@@ -295,23 +295,30 @@ fn cli_import_is_atomic_and_binds_live_snapshot() {
     let (_dir, scip) = ab_repo(&h);
     let before = do_index(&h);
     let snap_before = num(&before, "snapshot");
-    // Malformed input: truncated payload → exit 3, nothing committed.
-    let bad = h.join("bad.scip");
-    let mut payload = std::fs::read(&scip).unwrap();
-    payload.truncate(payload.len() / 2);
-    std::fs::write(&bad, &payload).unwrap();
-    let (code, _, _) = run(
-        &h,
-        &[
-            "semantic",
-            "import",
-            "--repo",
-            "sem",
-            "--scip",
-            &bad.to_string_lossy(),
-        ],
-    );
-    assert_eq!(code, 3);
+    // Malformed inputs: each must exit 3 with nothing committed. Cuts are
+    // alignment-proof (a proportional cut once landed on a field boundary
+    // under macOS TMPDIR lengths and parsed as a shorter valid index):
+    // 10 bytes cuts inside metadata; len-1 always corrupts the final field
+    // (protobuf has no terminator or padding).
+    let full = std::fs::read(&scip).unwrap();
+    for cut in [10usize, full.len() - 1] {
+        let mut payload = full.clone();
+        payload.truncate(cut.max(1));
+        let bad = h.join("bad.scip");
+        std::fs::write(&bad, &payload).unwrap();
+        let (code, _, _) = run(
+            &h,
+            &[
+                "semantic",
+                "import",
+                "--repo",
+                "sem",
+                "--scip",
+                &bad.to_string_lossy(),
+            ],
+        );
+        assert_eq!(code, 3, "cut at {cut} must fail");
+    }
     let (code, out, _) = run(&h, &["semantic", "status", "--repo", "sem"]);
     assert_eq!(code, 0);
     assert!(out.contains("\"imports\":[]"), "no import committed: {out}");
