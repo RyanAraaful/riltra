@@ -1,10 +1,15 @@
 # M5 validation
 
-## Gates (HEAD at close-out)
+## Gates (HEAD `2c8abdb` at close-out)
 
 - `cargo fmt --all -- --check`, `cargo check --locked`,
   `cargo clippy --all-targets -- -D warnings`, `cargo test --locked`:
-  green locally (156 + 16 + 21 + 8 + 12 = 213 tests).
+  green locally (162 + 16 + 21 + 15 + 12 = 226 tests).
+- CI run #26 (commit `2c8abdb`): Windows, Ubuntu, and macOS all green —
+  every step success (fmt, clippy, check, test, help/version/status
+  smoke). Earlier macOS-only failure (run #23, truncation fixture landing
+  on a field boundary under macOS TMPDIR lengths) fixed by alignment-proof
+  cuts, verified green on rerun.
 - Core-only passes with zero external providers (LSP live test skips
   silently without `RILTRA_TEST_LSP`; mock-server tests spawn a local
   binary, no network).
@@ -153,6 +158,46 @@ bounded reap on every failure path, URI containment on every location,
   semantic graph, traversal/callers (M6), streaming field-visitor beyond
   document granularity (current: per-document streaming with byte/record/
   nesting budgets + abort-before-EOF proof).
+
+## Final fix-pass (`47b9980`, `fa4c83f`, `2c8abdb`)
+
+- Audit review (5 findings): single read transactions over
+  snapshot/facts/imports/nonce/verdict in `semantic_query`/`status`
+  (WAL-pinned by regression); M3–M4 freshness gate on every semantic
+  answer (edit-without-reindex and dirty worktrees read `Stale`);
+  `import_id`-scoped def/ref resolution (same URI across imports never
+  merges); NULL-fact carry via raw digest re-verification with explicit
+  drop + per-(import,path) copy dedupe; raw-file UTF-16 offsets
+  (BOM/surrogates/LE/BE) and half-open end-exclusive containment.
+- Audit review (2 findings): per-import semantic digest check for files
+  the M4 evaluator cannot see (edited unindexed file flips to `Stale`,
+  import-granular); one shared bounded reader (`semantic::confined_read`:
+  canonical containment + 1 MB cap + race-safe `take`) for the SCIP
+  importer, the NULL carry, and the freshness check.
+- Truncation-fixture alignment flake (macOS-only CI failure): replaced
+  with alignment-proof cuts.
+- Post-M5 maintenance: per-`import_id` verdict memoization inside one
+  query (fresh map per request, no cross-request cache; guards and
+  `Unverified`/`Stale` behavior byte-identical, pinned by
+  `import_verdict_memoizes_one_resolution_per_import` plus unchanged CLI
+  outputs). Measured impact: none claimed — the repeated work it removes
+  (one import-row lookup + full covered-file walk per extra fact of the
+  same import) only materializes on multi-fact matches, and no benchmark
+  isolates it; the change is strictly fewer redundant reads, never
+  different answers.
+
+## Symlink testing, stated precisely
+
+- Real canonical-symlink-escape coverage executes on unix CI runners
+  (`cli_null_doc_turned_escape_symlink_drops_safely` creates a true
+  symlink without privilege; the M4 symlink tests use the same pattern).
+- On Windows CI and unprivileged dev machines the symlink cannot be
+  created, so the test falls back to a hardlink to an outside file. That
+  proves canonical-outside-root rejection through the same `contains()`
+  mechanism — it does NOT prove symlink-escape handling, and the two are
+  not claimed equivalent. The import-time symlink rejection
+  (`validate_doc_path`) has the same unix-only execution boundary,
+  documented since M4.
 
 ## M5/M6 boundary
 

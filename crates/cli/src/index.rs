@@ -985,6 +985,41 @@ fn hit_from_fact(fact: &store::SemanticFact, verification: &str) -> SemanticHit 
     }
 }
 
+/// Per-import verdict memo: (verification, provider_name, provider_version).
+/// One query resolves each import once no matter how many of its facts
+/// match; the map is created fresh per query — never shared across requests,
+/// so no cross-request cache can go stale. Guards are identical to the
+/// unmemoized path: same binding check, same drift check, same values.
+fn import_verdict(
+    tx: &rusqlite::Connection,
+    snapshot: &store::Snapshot,
+    live: &crate::semantic::LiveState,
+    source_fresh: bool,
+    canon: &Path,
+    import_id: i64,
+    memo: &mut BTreeMap<i64, (String, String, String)>,
+) -> Result<(String, String, String), String> {
+    if let Some(hit) = memo.get(&import_id) {
+        return Ok(hit.clone());
+    }
+    let import = store::semantic_import_by_id(tx, import_id)?
+        .ok_or_else(|| "import vanished".to_string())?;
+    let bound = crate::semantic::verify_live(&import.1, live);
+    let drifted = import_source_changed(tx, snapshot.id, import_id, canon)?;
+    let verification = if source_fresh && !drifted {
+        bound
+    } else {
+        crate::semantic::Verification::Stale
+    };
+    let verdict = (
+        verification.as_str().to_string(),
+        import.1.provider_name.clone(),
+        import.1.provider_version.clone(),
+    );
+    memo.insert(import_id, verdict.clone());
+    Ok(verdict)
+}
+
 /// Single-hop semantic query over stored SCIP facts. Go to Definition
 /// resolves the enclosing occurrence to its symbol identity and returns the
 /// Definition-role rows; `--refs` returns the reference-role rows sharing
@@ -1036,6 +1071,7 @@ pub fn semantic_query(
     let mut definitions = Vec::new();
     let mut references = Vec::new();
     let mut verification = "Unverified".to_string();
+    let mut memo = BTreeMap::new();
     for fact in store::semantic_facts_for(&tx, snapshot.id, &uri)? {
         if local && fact.rel_path != validated {
             continue;
@@ -1045,16 +1081,16 @@ pub fn semantic_query(
         if fact.import_id != anchor.import_id {
             continue;
         }
-        let import = store::semantic_import_by_id(&tx, fact.import_id)?
-            .ok_or_else(|| "import vanished".to_string())?;
-        let bound = crate::semantic::verify_live(&import.1, &live);
-        let drifted = import_source_changed(&tx, snapshot.id, fact.import_id, &canon)?;
-        let v = if source_fresh && !drifted {
-            bound
-        } else {
-            crate::semantic::Verification::Stale
-        };
-        verification = v.as_str().to_string();
+        let (vstr, _, _) = import_verdict(
+            &tx,
+            &snapshot,
+            &live,
+            source_fresh,
+            &canon,
+            fact.import_id,
+            &mut memo,
+        )?;
+        verification = vstr.clone();
         if fact.roles & 0x1 != 0 {
             if !query.refs {
                 definitions.push(hit_from_fact(&fact, &verification));
@@ -1063,9 +1099,15 @@ pub fn semantic_query(
             references.push(hit_from_fact(&fact, &verification));
         }
     }
-    let (provider_name, provider_version) = store::semantic_import_by_id(&tx, anchor.import_id)?
-        .map(|(_, import)| (import.provider_name, import.provider_version))
-        .unwrap_or(("scip-import".to_string(), String::new()));
+    let (_, provider_name, provider_version) = import_verdict(
+        &tx,
+        &snapshot,
+        &live,
+        source_fresh,
+        &canon,
+        anchor.import_id,
+        &mut memo,
+    )?;
     Ok(SemanticQueryOut {
         definitions,
         references,
@@ -2334,5 +2376,70 @@ mod tests {
             status_at_write: "fresh".to_string(),
             nonce: store::new_nonce(),
         }
+    }
+
+    /// The memo resolves each import once per query: repeated calls with one
+    /// import_id share a single map entry (the disk walk behind it runs on
+    /// the miss path only), a second import gets its own, and every verdict
+    /// equals the unmemoized rule. Guards are not weakened: values come from
+    /// the same binding + drift checks the loop used before.
+    #[test]
+    fn import_verdict_memoizes_one_resolution_per_import() {
+        use std::collections::BTreeMap;
+        let dir = tmpdir("idx-memo");
+        std::fs::write(dir.join("a.py"), b"x\n").unwrap();
+        let conn = store::open_memory().unwrap();
+        let snap = store::insert_snapshot(&conn, &fabricated_snapshot("r", &dir)).unwrap();
+        store::insert_file(
+            &conn,
+            snap,
+            &store::FileRow {
+                path: "a.py".to_string(),
+                language: "python".to_string(),
+                bytes: 2,
+                digest: store::content_digest(b"x\n"),
+                errors: 0,
+            },
+        )
+        .unwrap();
+        let live = crate::semantic::LiveState {
+            head: "-".to_string(),
+            branch: "-".to_string(),
+            dirty: false,
+            untracked: 0,
+            config_fingerprint: config_fingerprint(&dir),
+            snapshot_nonce: store::latest_snapshot(&conn).unwrap().unwrap().nonce,
+            content_identity: store::content_identity(&conn, snap).unwrap(),
+        };
+        let mk_import = || store::SemanticImport {
+            snapshot_id: snap,
+            provider_name: "scip-import".to_string(),
+            provider_version: "v".to_string(),
+            capability: "definitions,references".to_string(),
+            project_root: dir.to_string_lossy().to_string(),
+            text_encoding: "UTF8".to_string(),
+            artifact_id: "a".to_string(),
+            source_revision: crate::semantic::revision_string(&live),
+            claimed_source_digest: String::new(),
+            content_identity: live.content_identity.clone(),
+            external_symbols: "[]".to_string(),
+            verification: "Unverified".to_string(),
+        };
+        let snapshot = store::latest_snapshot(&conn).unwrap().unwrap();
+        let imp1 = store::insert_semantic_import(&conn, &mk_import()).unwrap();
+        let imp2 = store::insert_semantic_import(&conn, &mk_import()).unwrap();
+        let mut memo = BTreeMap::new();
+        let first =
+            super::import_verdict(&conn, &snapshot, &live, true, &dir, imp1, &mut memo).unwrap();
+        assert_eq!(first.0, "Unverified");
+        assert_eq!(memo.len(), 1);
+        let second =
+            super::import_verdict(&conn, &snapshot, &live, true, &dir, imp1, &mut memo).unwrap();
+        assert_eq!(first, second, "same import reuses one verdict");
+        assert_eq!(memo.len(), 1, "no recomputation for the same import");
+        let third =
+            super::import_verdict(&conn, &snapshot, &live, true, &dir, imp2, &mut memo).unwrap();
+        assert_eq!(third.0, "Unverified");
+        assert_eq!(memo.len(), 2, "distinct imports resolve distinctly");
     }
 }
