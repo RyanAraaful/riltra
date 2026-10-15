@@ -13,6 +13,7 @@ mod git;
 mod ignore;
 mod index;
 mod json;
+mod lsp;
 mod paths;
 mod registry;
 mod scan;
