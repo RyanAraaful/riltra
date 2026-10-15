@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use rusqlite::{params, Connection};
 
 /// Current schema version (`PRAGMA user_version`).
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 /// Parser/extraction version. Bump whenever `syntax.rs` extraction changes;
 /// freshness treats a mismatch as stale (never silently current).
 pub const PARSER_VERSION: u32 = 1;
@@ -141,11 +141,33 @@ END;
 CREATE TRIGGER IF NOT EXISTS symbols_ad AFTER DELETE ON symbols BEGIN
   INSERT INTO symbols_fts(symbols_fts, rowid, name) VALUES ('delete', old.id, old.name);
 END;
+CREATE TABLE IF NOT EXISTS semantic_imports (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, snapshot_id INTEGER NOT NULL,
+  provider_name TEXT NOT NULL, provider_version TEXT NOT NULL,
+  capability TEXT NOT NULL, project_root TEXT NOT NULL,
+  text_encoding TEXT NOT NULL, artifact_id TEXT NOT NULL,
+  source_revision TEXT NOT NULL, claimed_source_digest TEXT NOT NULL DEFAULT '',
+  content_identity TEXT NOT NULL DEFAULT '',
+  external_symbols TEXT NOT NULL DEFAULT '[]', verification TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS semantic_facts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, snapshot_id INTEGER NOT NULL,
+  import_id INTEGER NOT NULL, file_id INT NULL, rel_path TEXT NOT NULL,
+  file_digest TEXT NOT NULL, symbol_uri TEXT NULL, display_name TEXT NULL,
+  roles INTEGER NOT NULL, start_line INTEGER NOT NULL,
+  start_col INTEGER NOT NULL, end_line INTEGER NOT NULL,
+  end_col INTEGER NOT NULL, byte_start INTEGER NOT NULL,
+  byte_end INTEGER NOT NULL, precision TEXT NOT NULL,
+  relationships TEXT NOT NULL DEFAULT '[]', external INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_semfacts_lookup ON semantic_facts(snapshot_id, symbol_uri);
+CREATE INDEX IF NOT EXISTS idx_semfacts_span ON semantic_facts(snapshot_id, rel_path, start_line);
 ";
 
-/// Bring any database to the current schema. Empty files are built at
-/// current; v1 files gain the `nonce` column with per-row backfill; newer
-/// versions are rejected, never guessed.
+/// Bring any database to the current schema in ONE explicit transaction:
+/// empty files are built at current, v1 gains nonce backfill, v2 gains the
+/// semantic tables. Any failure rolls back: version marker and readable
+/// data stay exactly as before. Newer versions are rejected, never guessed.
 pub fn migrate(conn: &Connection) -> Result<(), String> {
     let version: u32 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
@@ -155,18 +177,32 @@ pub fn migrate(conn: &Connection) -> Result<(), String> {
             "database schema v{version} is newer than supported v{SCHEMA_VERSION}"
         ));
     }
-    conn.execute_batch(SCHEMA_SQL)
-        .map_err(|e| format!("schema migration failed: {e}"))?;
-    if version == 1 {
-        conn.execute_batch(
-            "ALTER TABLE snapshots ADD COLUMN nonce TEXT NOT NULL DEFAULT '';
-             UPDATE snapshots SET nonce = 'v1-legacy-' || id WHERE nonce = '';",
-        )
-        .map_err(|e| format!("schema migration v1->v2 failed: {e}"))?;
+    if version == SCHEMA_VERSION {
+        return Ok(());
     }
-    conn.execute("PRAGMA user_version = 2", [])
+    conn.execute_batch("BEGIN IMMEDIATE;")
         .map_err(|e| e.to_string())?;
-    Ok(())
+    let applied = (|| -> Result<(), String> {
+        conn.execute_batch(SCHEMA_SQL)
+            .map_err(|e| format!("schema migration failed: {e}"))?;
+        if version == 1 {
+            conn.execute_batch(
+                "ALTER TABLE snapshots ADD COLUMN nonce TEXT NOT NULL DEFAULT '';
+                 UPDATE snapshots SET nonce = 'v1-legacy-' || id WHERE nonce = '';",
+            )
+            .map_err(|e| format!("schema migration v1->v2 failed: {e}"))?;
+        }
+        conn.execute("PRAGMA user_version = 3", [])
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    })();
+    match applied {
+        Ok(()) => conn.execute_batch("COMMIT;").map_err(|e| e.to_string()),
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK;");
+            Err(e)
+        }
+    }
 }
 
 /// True when the bundled SQLite was compiled with FTS5. Pinned by test on
@@ -255,6 +291,213 @@ pub struct CallRow {
     pub provider: String,
     pub grammar: String,
     pub language: String,
+}
+
+/// One semantic provider import bound to a single snapshot. `artifact_id`
+/// identifies the producer bytes; `source_revision` + `content_identity`
+/// record which source state it was proven against; `claimed_source_digest`
+/// is a user-supplied claim, never proof. See `semantic::verify_live`.
+// Tasks 4/7 construct this; allow until then (staged plan, not dead design).
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct SemanticImport {
+    pub snapshot_id: i64,
+    pub provider_name: String,
+    pub provider_version: String,
+    pub capability: String,
+    pub project_root: String,
+    pub text_encoding: String,
+    pub artifact_id: String,
+    pub source_revision: String,
+    pub claimed_source_digest: String,
+    pub content_identity: String,
+    pub external_symbols: String,
+    pub verification: String,
+}
+
+/// One stored semantic occurrence. `roles` is the full provider role bitset
+/// verbatim (SCIP `0x1`..`0x40`); definition/reference filtering is a
+/// query-time bitmask. `symbol_uri` is `None` for LSP results (no identity
+/// is ever fabricated). `file_id` is `None` when the document has no row in
+/// the syntax snapshot; `rel_path` + `file_digest` always locate the fact.
+// Tasks 4/7 construct this; allow until then (staged plan, not dead design).
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct SemanticFact {
+    pub snapshot_id: i64,
+    pub import_id: i64,
+    pub file_id: Option<i64>,
+    pub rel_path: String,
+    pub file_digest: String,
+    pub symbol_uri: Option<String>,
+    pub display_name: Option<String>,
+    pub roles: u32,
+    pub start_line: u32,
+    pub start_col: u32,
+    pub end_line: u32,
+    pub end_col: u32,
+    pub byte_start: usize,
+    pub byte_end: usize,
+    pub precision: String,
+    pub relationships: String,
+    pub external: bool,
+}
+
+#[allow(dead_code)]
+pub fn insert_semantic_import(conn: &Connection, import: &SemanticImport) -> Result<i64, String> {
+    conn.execute(
+        "INSERT INTO semantic_imports (snapshot_id, provider_name, provider_version, capability, project_root, text_encoding, artifact_id, source_revision, claimed_source_digest, content_identity, external_symbols, verification) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+        params![
+            import.snapshot_id,
+            import.provider_name,
+            import.provider_version,
+            import.capability,
+            import.project_root,
+            import.text_encoding,
+            import.artifact_id,
+            import.source_revision,
+            import.claimed_source_digest,
+            import.content_identity,
+            import.external_symbols,
+            import.verification,
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(conn.last_insert_rowid())
+}
+
+#[allow(dead_code)]
+pub fn insert_semantic_facts(conn: &Connection, facts: &[SemanticFact]) -> Result<(), String> {
+    for fact in facts {
+        conn.execute(
+            "INSERT INTO semantic_facts (snapshot_id, import_id, file_id, rel_path, file_digest, symbol_uri, display_name, roles, start_line, start_col, end_line, end_col, byte_start, byte_end, precision, relationships, external) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+            params![
+                fact.snapshot_id,
+                fact.import_id,
+                fact.file_id,
+                fact.rel_path,
+                fact.file_digest,
+                fact.symbol_uri,
+                fact.display_name,
+                fact.roles as i64,
+                fact.start_line as i64,
+                fact.start_col as i64,
+                fact.end_line as i64,
+                fact.end_col as i64,
+                fact.byte_start as i64,
+                fact.byte_end as i64,
+                fact.precision,
+                fact.relationships,
+                i64::from(fact.external),
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[allow(dead_code)]
+fn semantic_fact_from_row(snapshot_id: i64, row: &rusqlite::Row) -> rusqlite::Result<SemanticFact> {
+    Ok(SemanticFact {
+        snapshot_id,
+        import_id: row.get(0)?,
+        file_id: row.get::<_, Option<i64>>(1)?,
+        rel_path: row.get(2)?,
+        file_digest: row.get(3)?,
+        symbol_uri: row.get(4)?,
+        display_name: row.get(5)?,
+        roles: row.get::<_, i64>(6)? as u32,
+        start_line: row.get::<_, i64>(7)? as u32,
+        start_col: row.get::<_, i64>(8)? as u32,
+        end_line: row.get::<_, i64>(9)? as u32,
+        end_col: row.get::<_, i64>(10)? as u32,
+        byte_start: row.get::<_, i64>(11)? as usize,
+        byte_end: row.get::<_, i64>(12)? as usize,
+        precision: row.get(13)?,
+        relationships: row.get(14)?,
+        external: row.get::<_, i64>(15)? != 0,
+    })
+}
+
+/// All stored facts for one symbol in one snapshot, ordered by path/line.
+#[allow(dead_code)]
+pub fn semantic_facts_for(
+    conn: &Connection,
+    snapshot_id: i64,
+    symbol_uri: &str,
+) -> Result<Vec<SemanticFact>, String> {
+    let mut statement = conn
+        .prepare("SELECT import_id, file_id, rel_path, file_digest, symbol_uri, display_name, roles, start_line, start_col, end_line, end_col, byte_start, byte_end, precision, relationships, external FROM semantic_facts WHERE snapshot_id = ?1 AND symbol_uri = ?2 ORDER BY rel_path, start_line")
+        .map_err(|e| e.to_string())?;
+    let rows = statement
+        .query_map(params![snapshot_id, symbol_uri], |row| {
+            semantic_fact_from_row(snapshot_id, row)
+        })
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())
+}
+
+/// Raw `meta` access. Absent keys read as `None`, never as invented values.
+#[allow(dead_code)]
+pub fn meta_get(conn: &Connection, key: &str) -> Result<Option<String>, String> {
+    let mut statement = conn
+        .prepare("SELECT value FROM meta WHERE key = ?1")
+        .map_err(|e| e.to_string())?;
+    let mut rows = statement.query([key]).map_err(|e| e.to_string())?;
+    match rows.next().map_err(|e| e.to_string())? {
+        Some(row) => Ok(Some(
+            row.get(0).map_err(|e: rusqlite::Error| e.to_string())?,
+        )),
+        None => Ok(None),
+    }
+}
+
+#[allow(dead_code)]
+pub fn meta_set(conn: &Connection, key: &str, value: &str) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO meta (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![key, value],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Writer-coordination counter: bumped in-txn on every committed semantic
+/// import. Builds record it at staging start; promote aborts when it moved.
+/// Missing key means zero imports ever committed.
+#[allow(dead_code)]
+pub fn semantic_generation(conn: &Connection) -> Result<i64, String> {
+    match meta_get(conn, "semantic_generation")? {
+        Some(v) => v
+            .parse::<i64>()
+            .map_err(|e| format!("bad semantic_generation: {e}")),
+        None => Ok(0),
+    }
+}
+
+/// Content identity of one snapshot: digest over sorted `(path, digest)`
+/// pairs. Snapshot nonces prove rebuild identity; this proves the bytes.
+/// Compared independently of git HEAD/dirty/untracked (Task 6 rule).
+#[allow(dead_code)]
+pub fn content_identity(conn: &Connection, snapshot_id: i64) -> Result<String, String> {
+    let mut statement = conn
+        .prepare("SELECT path, digest FROM files WHERE snapshot_id = ?1 ORDER BY path")
+        .map_err(|e| e.to_string())?;
+    let rows = statement
+        .query_map([snapshot_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|e| e.to_string())?;
+    let mut material = Vec::new();
+    for row in rows {
+        let (path, digest) = row.map_err(|e| e.to_string())?;
+        material.extend_from_slice(path.as_bytes());
+        material.push(0);
+        material.extend_from_slice(digest.as_bytes());
+        material.push(b'\n');
+    }
+    Ok(content_digest(&material))
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -758,10 +1001,12 @@ pub fn search_symbols(
 #[cfg(test)]
 mod tests {
     use super::{
-        content_digest, db_path, files_of, finish_snapshot, fts_available, grammar_versions,
-        insert_call, insert_file, insert_import, insert_snapshot, insert_symbol, is_readable_db,
-        latest_snapshot, migrate, open_live, open_memory, promote_staging, search_symbols,
-        staging_path, FileRow, Snapshot, SymbolRow, SCHEMA_VERSION,
+        content_digest, content_identity, db_path, files_of, finish_snapshot, fts_available,
+        grammar_versions, insert_call, insert_file, insert_import, insert_semantic_facts,
+        insert_semantic_import, insert_snapshot, insert_symbol, is_readable_db, latest_snapshot,
+        meta_get, meta_set, migrate, open_live, open_memory, promote_staging, search_symbols,
+        semantic_facts_for, semantic_generation, staging_path, FileRow, SemanticFact,
+        SemanticImport, Snapshot, SymbolRow, SCHEMA_VERSION,
     };
     use crate::testutil::tmpdir;
     use std::path::Path;
@@ -801,6 +1046,248 @@ mod tests {
             grammar: "python:0.25.0".to_string(),
             language: "python".to_string(),
         }
+    }
+
+    fn sample_semantic_import(snapshot_id: i64) -> SemanticImport {
+        SemanticImport {
+            snapshot_id,
+            provider_name: "scip-import".to_string(),
+            provider_version: "0.1-test".to_string(),
+            capability: "definitions,references".to_string(),
+            project_root: "C:\\demo".to_string(),
+            text_encoding: "UTF8".to_string(),
+            artifact_id: "artifact-1".to_string(),
+            source_revision: "head=abc".to_string(),
+            claimed_source_digest: "".to_string(),
+            content_identity: "ci-1".to_string(),
+            external_symbols: "[]".to_string(),
+            verification: "Unverified".to_string(),
+        }
+    }
+
+    fn sample_semantic_fact(
+        snapshot_id: i64,
+        import_id: i64,
+        symbol: Option<&str>,
+    ) -> SemanticFact {
+        SemanticFact {
+            snapshot_id,
+            import_id,
+            file_id: None,
+            rel_path: "a.py".to_string(),
+            file_digest: "d1".to_string(),
+            symbol_uri: symbol.map(str::to_string),
+            display_name: Some("a".to_string()),
+            roles: 0x1,
+            start_line: 1,
+            start_col: 0,
+            end_line: 1,
+            end_col: 5,
+            byte_start: 0,
+            byte_end: 5,
+            precision: "Exact".to_string(),
+            relationships: "[]".to_string(),
+            external: false,
+        }
+    }
+
+    /// Minimal v2 DDL (snapshots carry nonce, no semantic tables) for a
+    /// frozen-shape migration fixture. Deliberately handwritten, never
+    /// `SCHEMA_SQL`, so schema drift breaks this loudly.
+    const V2_TABLES: &str = "
+        CREATE TABLE snapshots (id INTEGER PRIMARY KEY AUTOINCREMENT,
+          repo TEXT NOT NULL, root TEXT NOT NULL, created_unix INTEGER NOT NULL,
+          head TEXT, branch TEXT, dirty INTEGER NOT NULL, untracked INTEGER NOT NULL,
+          parser_version INTEGER NOT NULL, grammar_versions TEXT NOT NULL,
+          config_fingerprint TEXT NOT NULL, pre_fingerprint TEXT NOT NULL,
+          post_fingerprint TEXT NOT NULL, status_at_write TEXT NOT NULL,
+          nonce TEXT NOT NULL DEFAULT '');
+        CREATE TABLE files (id INTEGER PRIMARY KEY AUTOINCREMENT,
+          snapshot_id INTEGER NOT NULL, path TEXT NOT NULL, language TEXT NOT NULL,
+          bytes INTEGER NOT NULL, digest TEXT NOT NULL, errors INTEGER NOT NULL);
+        CREATE TABLE symbols (id INTEGER PRIMARY KEY AUTOINCREMENT,
+          snapshot_id INTEGER NOT NULL, file_id INTEGER NOT NULL, kind TEXT NOT NULL,
+          name TEXT, start_line INTEGER NOT NULL, start_col INTEGER NOT NULL,
+          end_line INTEGER NOT NULL, end_col INTEGER NOT NULL,
+          byte_start INTEGER NOT NULL, byte_end INTEGER NOT NULL,
+          provider TEXT NOT NULL, grammar TEXT NOT NULL, language TEXT NOT NULL);
+        CREATE TABLE imports (id INTEGER PRIMARY KEY AUTOINCREMENT,
+          snapshot_id INTEGER NOT NULL, file_id INTEGER NOT NULL, text TEXT,
+          start_line INTEGER NOT NULL, start_col INTEGER NOT NULL,
+          end_line INTEGER NOT NULL, end_col INTEGER NOT NULL,
+          byte_start INTEGER NOT NULL, byte_end INTEGER NOT NULL,
+          provider TEXT NOT NULL, grammar TEXT NOT NULL, language TEXT NOT NULL);
+        CREATE TABLE calls (id INTEGER PRIMARY KEY AUTOINCREMENT,
+          snapshot_id INTEGER NOT NULL, file_id INTEGER NOT NULL, name TEXT,
+          start_line INTEGER NOT NULL, start_col INTEGER NOT NULL,
+          end_line INTEGER NOT NULL, end_col INTEGER NOT NULL,
+          byte_start INTEGER NOT NULL, byte_end INTEGER NOT NULL,
+          unresolved INTEGER NOT NULL, provider TEXT NOT NULL,
+          grammar TEXT NOT NULL, language TEXT NOT NULL);
+        CREATE VIRTUAL TABLE symbols_fts USING fts5(
+          name, content='symbols', content_rowid='id', tokenize='unicode61');
+        CREATE TRIGGER symbols_ai AFTER INSERT ON symbols BEGIN
+          INSERT INTO symbols_fts(rowid, name) VALUES (new.id, new.name);
+        END;
+        CREATE TRIGGER symbols_ad AFTER DELETE ON symbols BEGIN
+          INSERT INTO symbols_fts(symbols_fts, rowid, name)
+          VALUES ('delete', old.id, old.name);
+        END;";
+
+    #[test]
+    fn v2_db_migrates_to_v3_with_data_intact() {
+        let dir = tmpdir("store-v2-m3");
+        let path = dir.join("v2.db");
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                &format!("{V2_TABLES} PRAGMA user_version = 2;
+                INSERT INTO snapshots (repo, root, created_unix, dirty, untracked, parser_version, grammar_versions, config_fingerprint, pre_fingerprint, post_fingerprint, status_at_write, nonce)
+                VALUES ('r', 'C:\\r', 1, 0, 0, 1, 'g', 'c', 'p', 'p', 'fresh', 'nonce-v2');
+                INSERT INTO files (snapshot_id, path, language, bytes, digest, errors)
+                VALUES (1, 'a.py', 'python', 7, 'd', 0);
+                INSERT INTO symbols (snapshot_id, file_id, kind, name, start_line, start_col, end_line, end_col, byte_start, byte_end, provider, grammar, language)
+                VALUES (1, 1, 'function', 'keep_me', 1, 0, 1, 7, 0, 7, 'syntax', 'python:0.25.0', 'python');"),
+            )
+            .unwrap();
+        }
+        let conn = open_live(&path).unwrap();
+        let version: u32 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 3);
+        let snap = latest_snapshot(&conn).unwrap().unwrap();
+        assert_eq!(snap.nonce, "nonce-v2");
+        let (_, hits) = search_symbols(&conn, snap.id, "keep_me", 10, 0).unwrap();
+        assert_eq!(hits.len(), 1, "v2 facts must survive migration");
+        for t in ["semantic_imports", "semantic_facts"] {
+            let n: i64 = conn
+                .query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                    [t],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1, "missing v3 table {t}");
+        }
+    }
+
+    #[test]
+    fn v1_db_migrates_to_v3() {
+        let dir = tmpdir("store-v1-m3");
+        let path = dir.join("old.db");
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE snapshots (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 repo TEXT NOT NULL, root TEXT NOT NULL, created_unix INTEGER NOT NULL,
+                 head TEXT, branch TEXT, dirty INTEGER NOT NULL, untracked INTEGER NOT NULL,
+                 parser_version INTEGER NOT NULL, grammar_versions TEXT NOT NULL,
+                 config_fingerprint TEXT NOT NULL, pre_fingerprint TEXT NOT NULL,
+                 post_fingerprint TEXT NOT NULL, status_at_write TEXT NOT NULL);
+                 INSERT INTO snapshots (repo, root, created_unix, head, branch, dirty, untracked, parser_version, grammar_versions, config_fingerprint, pre_fingerprint, post_fingerprint, status_at_write)
+                 VALUES ('r', 'C:\\r', 1, 'abc', 'main', 0, 0, 1, 'g', 'c', 'p', 'p', 'fresh');
+                 PRAGMA user_version = 1;",
+            )
+            .unwrap();
+        }
+        let conn = open_live(&path).unwrap();
+        let version: u32 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 3);
+        let snap = latest_snapshot(&conn).unwrap().unwrap();
+        assert_eq!(snap.nonce, "v1-legacy-1");
+        let n: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='semantic_facts'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn migration_failure_rolls_back() {
+        // A VIEW squatting a v3 table name makes the migration fail midway;
+        // the explicit transaction must leave user_version and v2 reads intact.
+        let dir = tmpdir("store-migfail");
+        let path = dir.join("f.db");
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                &format!("{V2_TABLES}
+                CREATE VIEW semantic_facts AS SELECT 1 AS x;
+                INSERT INTO snapshots (repo, root, created_unix, dirty, untracked, parser_version, grammar_versions, config_fingerprint, pre_fingerprint, post_fingerprint, status_at_write, nonce)
+                VALUES ('r', 'C:\\r', 1, 0, 0, 1, 'g', 'c', 'p', 'p', 'fresh', 'n');
+                PRAGMA user_version = 2;"),
+            )
+            .unwrap();
+        }
+        assert!(open_live(&path).is_err(), "migration must fail");
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        let version: u32 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 2, "failed migration must not bump version");
+        let snap = latest_snapshot(&conn).unwrap().unwrap();
+        assert_eq!(snap.nonce, "n", "v2 data must stay readable");
+    }
+
+    #[test]
+    fn semantic_roundtrip_is_snapshot_scoped() {
+        let conn = open_memory().unwrap();
+        let s1 = insert_snapshot(&conn, &sample_snapshot()).unwrap();
+        let mut other = sample_snapshot();
+        other.nonce = "test-nonce-2".to_string();
+        let s2 = insert_snapshot(&conn, &other).unwrap();
+        let imp = insert_semantic_import(&conn, &sample_semantic_import(s1)).unwrap();
+        let mut fact = sample_semantic_fact(s1, imp, Some("scip-test . . a#"));
+        insert_semantic_facts(&conn, &[fact.clone()]).unwrap();
+        fact.snapshot_id = s2;
+        fact.import_id = imp;
+        insert_semantic_facts(&conn, &[fact]).unwrap();
+        let got = semantic_facts_for(&conn, s1, "scip-test . . a#").unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].snapshot_id, s1);
+        assert_eq!(got[0].roles, 0x1);
+        assert!(semantic_facts_for(&conn, s1, "scip-test . . missing#")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn semantic_generation_bumps_in_txn_and_content_identity_is_ordered() {
+        let conn = open_memory().unwrap();
+        assert_eq!(semantic_generation(&conn).unwrap(), 0);
+        meta_set(&conn, "semantic_generation", "41").unwrap();
+        assert_eq!(
+            meta_get(&conn, "semantic_generation").unwrap(),
+            Some("41".to_string())
+        );
+        assert_eq!(meta_get(&conn, "nope").unwrap(), None);
+        let s = insert_snapshot(&conn, &sample_snapshot()).unwrap();
+        assert_eq!(content_identity(&conn, s).unwrap(), content_digest(b""));
+        for (path, digest) in [("b.py", "d2"), ("a.py", "d1")] {
+            insert_file(
+                &conn,
+                s,
+                &FileRow {
+                    path: path.to_string(),
+                    language: "python".to_string(),
+                    bytes: 3,
+                    digest: digest.to_string(),
+                    errors: 0,
+                },
+            )
+            .unwrap();
+        }
+        // Sorted by path regardless of insert order: stable identity.
+        assert_eq!(
+            content_identity(&conn, s).unwrap(),
+            content_digest(b"a.py\0d1\nb.py\0d2\n")
+        );
     }
 
     #[test]
