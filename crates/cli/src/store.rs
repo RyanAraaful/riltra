@@ -884,15 +884,20 @@ pub struct CarriedTotals {
 /// (live) database into the staging snapshot. A fact is copied only when
 /// the new snapshot holds a `files` row with the SAME path AND digest —
 /// the triple-predicate discipline of `copy_file_row`, applied by join.
-/// Import rows are always rebound to the new snapshot (new `snapshot_id`
-/// and fresh `source_revision`) with the ORIGINAL `content_identity` kept:
-/// carry preserves locatability only — `verify_live` still reports `Stale`
-/// at query time whenever the bytes moved. Never upgrades verification.
+/// Facts with `file_id IS NULL` (unindexed documents) have no row to join:
+/// they carry only when `disk_digest` reproduces their stored digest from
+/// raw source bytes, and stay NULL (never fabricated, never linked).
+/// Anything else drops explicitly. Import rows are always rebound to the
+/// new snapshot (new `snapshot_id` and fresh `source_revision`) with the
+/// ORIGINAL `content_identity` kept: carry preserves locatability only —
+/// `verify_live` still reports `Stale` at query time whenever the bytes
+/// moved. Never upgrades verification.
 pub fn carry_semantic_facts(
     staging: &Connection,
     new_snapshot_id: i64,
     old_snapshot_id: i64,
     new_source_revision: &str,
+    disk_digest: &dyn Fn(&str) -> Option<String>,
 ) -> Result<CarriedTotals, String> {
     let mut statement = staging
         .prepare("SELECT id, provider_name, provider_version, capability, project_root, text_encoding, artifact_id, source_revision, claimed_source_digest, content_identity, external_symbols, verification FROM src.semantic_imports WHERE snapshot_id = ?1 ORDER BY id")
@@ -964,10 +969,64 @@ pub fn carry_semantic_facts(
         )
         .map_err(|e| e.to_string())?;
     let facts = staging.changes();
+    // Phase 2: NULL facts the join could not reach (no syntax row on either
+    // side). Each must re-prove its stored digest against raw source bytes;
+    // unmatched or unreadable files drop with the fact, explicitly.
+    let mut null_facts: Vec<(i64, String, String)> = Vec::new();
+    {
+        let mut statement = staging
+            .prepare("SELECT f.import_id, f.rel_path, f.file_digest FROM src.semantic_facts AS f WHERE f.snapshot_id = ?1 AND f.file_id IS NULL AND NOT EXISTS (SELECT 1 FROM files AS nf WHERE nf.snapshot_id = ?2 AND nf.path = f.rel_path AND nf.digest = f.file_digest)")
+            .map_err(|e| e.to_string())?;
+        let rows = statement
+            .query_map(params![old_snapshot_id, new_snapshot_id], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        for row in rows {
+            null_facts.push(row.map_err(|e| e.to_string())?);
+        }
+    }
+    let mut null_carried = 0u64;
+    let mut seen_keys = std::collections::BTreeSet::new();
+    for (old_import_id, rel_path, file_digest) in &null_facts {
+        // One copy per (import, path): the INSERT below copies every NULL
+        // fact of that key at once, so repeated keys must not re-run it.
+        if !seen_keys.insert((*old_import_id, rel_path.clone())) {
+            continue;
+        }
+        match disk_digest(rel_path) {
+            Some(digest) if digest == *file_digest => {
+                let new_import_id: i64 = staging
+                    .query_row(
+                        "SELECT new_id FROM sem_import_map WHERE old_id = ?1",
+                        [old_import_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(|e| e.to_string())?;
+                staging
+                    .execute(
+                        "INSERT INTO semantic_facts (snapshot_id, import_id, file_id, rel_path, file_digest, symbol_uri, display_name, roles, start_line, start_col, end_line, end_col, byte_start, byte_end, precision, relationships, external)
+                         SELECT ?1, ?2, NULL, f.rel_path, f.file_digest, f.symbol_uri, f.display_name, f.roles, f.start_line, f.start_col, f.end_line, f.end_col, f.byte_start, f.byte_end, f.precision, f.relationships, f.external
+                         FROM src.semantic_facts AS f WHERE f.snapshot_id = ?3 AND f.import_id = ?4 AND f.rel_path = ?5 AND f.file_id IS NULL",
+                        params![new_snapshot_id, new_import_id, old_snapshot_id, old_import_id, rel_path],
+                    )
+                    .map_err(|e| e.to_string())?;
+                null_carried += staging.changes();
+            }
+            _ => {}
+        }
+    }
     staging
         .execute_batch("DROP TABLE sem_import_map")
         .map_err(|e| e.to_string())?;
-    Ok(CarriedTotals { imports, facts })
+    Ok(CarriedTotals {
+        imports,
+        facts: facts + null_carried,
+    })
 }
 
 pub fn insert_file(conn: &Connection, snapshot_id: i64, file: &FileRow) -> Result<i64, String> {
@@ -2019,6 +2078,16 @@ mod tests {
             1,
             "reader keeps its snapshot"
         );
+        // The read-transaction property query paths rely on: snapshot row,
+        // facts, imports, and generation are mutually consistent mid-commit.
+        let seen = latest_snapshot(&tx).unwrap().unwrap();
+        assert_eq!(seen.nonce, "test-nonce-1");
+        assert_eq!(
+            semantic_facts_for(&tx, snap, "scip-test . . a#")
+                .unwrap()
+                .len(),
+            0
+        );
         drop(tx);
         assert_eq!(semantic_generation(&writer).unwrap(), 7);
     }
@@ -2131,7 +2200,7 @@ mod tests {
             )
             .unwrap();
         }
-        let carried = carry_semantic_facts(&staging, ns, old, "rev-new").unwrap();
+        let carried = carry_semantic_facts(&staging, ns, old, "rev-new", &|_| None).unwrap();
         assert_eq!(carried.imports, 1);
         assert_eq!(carried.facts, 1, "only the digest-verified file carries");
         let kept = semantic_facts_for(&staging, ns, "s").unwrap();
@@ -2149,6 +2218,54 @@ mod tests {
         assert_eq!(row.0, ns);
         assert_eq!(row.1, "rev-new");
         assert_eq!(row.2, "ci-1");
+        detach_src(&staging).unwrap();
+    }
+
+    #[test]
+    fn carry_null_facts_verify_against_disk_or_drop() {
+        // file_id NULL facts have no syntax row to join: the carry-over
+        // verifies them against raw source digests (stubbed here, wired to
+        // disk by the build). Matching bytes carry with file_id still NULL;
+        // changed bytes drop explicitly — never silently, never linked.
+        let dir = tmpdir("store-carry-null");
+        let live_path = dir.join("live.db");
+        let live = open_live(&live_path).unwrap();
+        let old = insert_snapshot(&live, &sample_snapshot()).unwrap();
+        let imp = insert_semantic_import(&live, &sample_semantic_import(old)).unwrap();
+        for (rel, digest) in [("keep.other", "dk"), ("drop.other", "dd")] {
+            let mut fact = sample_semantic_fact(old, imp, Some("s-null"));
+            fact.rel_path = rel.to_string();
+            fact.file_digest = digest.to_string();
+            fact.file_id = None;
+            insert_semantic_facts(&live, &[fact]).unwrap();
+        }
+        // Second occurrence in the same unindexed file: the copy must run
+        // once per (import, path), never once per fact row.
+        let mut extra = sample_semantic_fact(old, imp, Some("s-null-2"));
+        extra.rel_path = "keep.other".to_string();
+        extra.file_digest = "dk".to_string();
+        extra.file_id = None;
+        insert_semantic_facts(&live, &[extra]).unwrap();
+        let staging_path = dir.join("staging.db");
+        let staging = open_live(&staging_path).unwrap();
+        attach_src(&staging, &live_path).unwrap();
+        let mut moved = sample_snapshot();
+        moved.nonce = "nonce-new".to_string();
+        let ns = insert_snapshot(&staging, &moved).unwrap();
+        // No syntax rows at all: only the disk verifier can save keep.other.
+        let carried = carry_semantic_facts(&staging, ns, old, "rev-new", &|rel| {
+            (rel == "keep.other").then(|| "dk".to_string())
+        })
+        .unwrap();
+        assert_eq!(carried.imports, 1);
+        assert_eq!(carried.facts, 2, "disk-verified NULL facts carry, no dupes");
+        let kept = semantic_facts_for(&staging, ns, "s-null").unwrap();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].rel_path, "keep.other");
+        assert_eq!(kept[0].file_id, None, "no fabricated syntax identity");
+        assert_eq!(kept[0].file_digest, "dk");
+        let kept2 = semantic_facts_for(&staging, ns, "s-null-2").unwrap();
+        assert_eq!(kept2.len(), 1);
         detach_src(&staging).unwrap();
     }
 

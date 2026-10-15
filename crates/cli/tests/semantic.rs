@@ -180,8 +180,17 @@ fn tool_info(name: &str, version: &str) -> Vec<u8> {
 /// Full Index payload: metadata (tool, project_root) + documents.
 /// `externals` are SymbolInformation messages for field 3.
 fn index_bytes(root: &std::path::Path, docs: &[Vec<u8>], externals: &[Vec<u8>]) -> Vec<u8> {
+    index_bytes_with_tool(root, "scip-test-cli", docs, externals)
+}
+
+fn index_bytes_with_tool(
+    root: &std::path::Path,
+    tool: &str,
+    docs: &[Vec<u8>],
+    externals: &[Vec<u8>],
+) -> Vec<u8> {
     let mut md = Vec::new();
-    len_field(2, &tool_info("scip-test-cli", "1.0"), &mut md);
+    len_field(2, &tool_info(tool, "1.0"), &mut md);
     str_field(
         3,
         &format!("file://{}", root.to_string_lossy().replace('\\', "/")),
@@ -384,6 +393,297 @@ fn cli_query_resolves_cross_file_def_ref() {
         ],
     );
     assert_eq!(code, 3);
+}
+
+#[test]
+fn cli_end_boundary_is_exclusive() {
+    // Half-open spans: a position exactly on the end boundary is NOT
+    // inside the occurrence. Def covers (0,16)-(0,19); col 20 (1-based) is
+    // the end edge and must resolve to nothing.
+    let h = home("endboundary");
+    let (_dir, scip) = ab_repo(&h);
+    do_index(&h);
+    let (code, _, err) = run(
+        &h,
+        &["semantic", "import", "--repo", "sem", "--scip", &scip],
+    );
+    assert_eq!(code, 0, "{err}");
+    let (code, _, _) = run(
+        &h,
+        &[
+            "semantic", "query", "--repo", "sem", "--path", "src/a.ts", "--line", "1", "--col",
+            "20",
+        ],
+    );
+    assert_eq!(code, 3, "end boundary must not match");
+    // One column inside still resolves (start edge inclusive).
+    let (code, out, err) = run(
+        &h,
+        &[
+            "semantic", "query", "--repo", "sem", "--path", "src/a.ts", "--line", "1", "--col",
+            "19",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("src/a.ts"), "{out}");
+}
+
+#[test]
+fn cli_source_edit_before_reindex_reports_stale() {
+    // Source moved after the snapshot (no rebuild): status and query must
+    // report Stale from live source freshness, not Unverified from the
+    // still-matching database rows.
+    let h = home("editstale");
+    let (dir, scip) = ab_repo(&h);
+    do_index(&h);
+    let (code, _, err) = run(
+        &h,
+        &["semantic", "import", "--repo", "sem", "--scip", &scip],
+    );
+    assert_eq!(code, 0, "{err}");
+    std::fs::write(
+        dir.join("src/b.ts"),
+        "import \"./a\";\nfoo();\n// edited, not reindexed\n",
+    )
+    .unwrap();
+    let (code, out, _) = run(&h, &["semantic", "status", "--repo", "sem"]);
+    assert_eq!(code, 0);
+    assert!(
+        out.contains("\"verification\":\"Stale\""),
+        "edited source must read Stale: {out}"
+    );
+    let (code, out, _) = run(
+        &h,
+        &[
+            "semantic", "query", "--repo", "sem", "--path", "src/a.ts", "--line", "1", "--col",
+            "17",
+        ],
+    );
+    assert_eq!(code, 0);
+    assert!(out.contains("\"verification\":\"Stale\""), "{out}");
+}
+
+fn git(dir: &Path, args: &[&str]) {
+    assert!(
+        Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .status()
+            .expect("run git")
+            .success(),
+        "git {args:?} failed"
+    );
+}
+
+#[test]
+fn cli_dirty_git_worktree_reports_stale() {
+    if !Command::new("git")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+    {
+        eprintln!("skip: git unavailable");
+        return;
+    }
+    // Committed git state, then an uncommitted edit (no rebuild): the dirty
+    // flag is a source move the snapshot no longer describes → Stale.
+    let h = home("dirtygit");
+    let dir = repo_with(
+        &h,
+        "sem",
+        &[("src/a.ts", "export function foo() {}\nfoo();\n")],
+    );
+    git(&dir, &["init", "-b", "main", "."]);
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-m", "init"]);
+    let a = document(
+        "src/a.ts",
+        &[occurrence(FOO, 0x1, 0, 16, 19)],
+        &[symbol_info(FOO, "foo")],
+        false,
+    );
+    let payload = index_bytes(&dir, &[a], &[]);
+    let scip = dir.join("index.scip");
+    std::fs::write(&scip, &payload).unwrap();
+    // index.scip itself is untracked; commit it so only the deliberate edit
+    // drives the verdict.
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-m", "scip"]);
+    do_index(&h);
+    let (code, out, err) = run(
+        &h,
+        &[
+            "semantic",
+            "import",
+            "--repo",
+            "sem",
+            "--scip",
+            &scip.to_string_lossy(),
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        out.contains("\"verification\":\"Unverified\""),
+        "clean tree binds: {out}"
+    );
+    std::fs::write(
+        dir.join("src/a.ts"),
+        "export function foo() {}\nfoo();\n// dirty\n",
+    )
+    .unwrap();
+    let (code, out, _) = run(&h, &["semantic", "status", "--repo", "sem"]);
+    assert_eq!(code, 0);
+    assert!(
+        out.contains("\"verification\":\"Stale\""),
+        "dirty tree: {out}"
+    );
+}
+
+#[test]
+fn cli_imports_with_same_uri_do_not_merge() {
+    // Two producers, identical symbol URI, different evidence: def/ref
+    // resolution stays within the anchor's own import (import_id scope).
+    let h = home("twoproviders");
+    let dir = repo_with(
+        &h,
+        "sem",
+        &[("src/a.ts", "export function foo() {}\nfoo();\n")],
+    );
+    let uri = "scip-test test test-pkg 1.0.0 src/a.ts/foo().";
+    let doc_a = document(
+        "src/a.ts",
+        &[occurrence(uri, 0x1, 0, 16, 19)],
+        &[symbol_info(uri, "foo")],
+        false,
+    );
+    // Second producer: same URI, but only a reference elsewhere.
+    let doc_b = document(
+        "src/a.ts",
+        &[occurrence(uri, 0x0, 1, 0, 3)],
+        &[symbol_info(uri, "foo")],
+        false,
+    );
+    do_index(&h);
+    for (tool, docs) in [("tool-a", vec![doc_a]), ("tool-b", vec![doc_b])] {
+        let payload = index_bytes_with_tool(&dir, tool, &docs, &[]);
+        let path = dir.join(format!("{tool}.scip"));
+        std::fs::write(&path, &payload).unwrap();
+        let (code, _, err) = run(
+            &h,
+            &[
+                "semantic",
+                "import",
+                "--repo",
+                "sem",
+                "--scip",
+                &path.to_string_lossy(),
+            ],
+        );
+        assert_eq!(code, 0, "{err}");
+    }
+    // Anchor in tool-b (the reference at line 2): its own import holds no
+    // definition, so definitions must be empty — tool-a's def must not
+    // leak across the import boundary.
+    let (code, out, err) = run(
+        &h,
+        &[
+            "semantic", "query", "--repo", "sem", "--path", "src/a.ts", "--line", "2", "--col", "2",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        out.contains("\"definitions\":[]"),
+        "no cross-import merge: {out}"
+    );
+    // Anchor in tool-a (the definition): --refs must not see tool-b's ref.
+    let (code, out, err) = run(
+        &h,
+        &[
+            "semantic", "query", "--repo", "sem", "--path", "src/a.ts", "--line", "1", "--col",
+            "17", "--refs",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        out.contains("\"references\":[]"),
+        "no cross-import merge: {out}"
+    );
+}
+
+#[test]
+fn cli_null_file_id_survives_noop_and_drops_on_change() {
+    // Unindexed (unsupported-extension) documents store facts with
+    // file_id NULL. A no-op rebuild must carry them via raw digest
+    // verification; changing the file must drop them explicitly.
+    let h = home("nullcarry");
+    let dir = repo_with(&h, "sem", &[("notes.other", "data for notes\n")]);
+    let uri = "scip-test test test-pkg 1.0.0 notes.other/thing`.";
+    let doc = document(
+        "notes.other",
+        &[occurrence(uri, 0x1, 0, 0, 4)],
+        &[symbol_info(uri, "thing")],
+        false,
+    );
+    let payload = index_bytes(&dir, &[doc], &[]);
+    let scip = dir.join("index.scip");
+    std::fs::write(&scip, &payload).unwrap();
+    do_index(&h);
+    let (code, _, err) = run(
+        &h,
+        &[
+            "semantic",
+            "import",
+            "--repo",
+            "sem",
+            "--scip",
+            &scip.to_string_lossy(),
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    do_index(&h); // no-op rebuild
+    let (code, out, err) = run(
+        &h,
+        &[
+            "semantic",
+            "query",
+            "--repo",
+            "sem",
+            "--path",
+            "notes.other",
+            "--line",
+            "1",
+            "--col",
+            "2",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("notes.other"), "NULL fact carried: {out}");
+    // Change the file: the unverifiable fact must drop, import goes Stale.
+    std::fs::write(dir.join("notes.other"), "changed data\n").unwrap();
+    do_index(&h);
+    let (code, _, _) = run(
+        &h,
+        &[
+            "semantic",
+            "query",
+            "--repo",
+            "sem",
+            "--path",
+            "notes.other",
+            "--line",
+            "1",
+            "--col",
+            "2",
+        ],
+    );
+    assert_eq!(code, 3, "changed unindexed fact must drop");
 }
 
 #[test]

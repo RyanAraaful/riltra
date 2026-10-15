@@ -273,6 +273,15 @@ fn carry_semantic(
         snapshot_id,
         old_id,
         &crate::semantic::revision_string(&live),
+        &|rel| {
+            let mut disk_path = meta.canon_root.clone();
+            for part in rel.split('/') {
+                disk_path.push(part);
+            }
+            std::fs::read(&disk_path)
+                .ok()
+                .map(|bytes| store::content_digest(&bytes))
+        },
     )
 }
 /// Full rebuild into staging, then atomic promotion. Facts stream from the
@@ -788,6 +797,14 @@ pub fn semantic_import(
         }
         let row = store::semantic_import_by_id(&conn, out.import_id)?
             .ok_or_else(|| "import vanished".to_string())?;
+        // Same source-freshness gate as query/status: a source that already
+        // moved (dirty worktree included) reports Stale, never Unverified.
+        let (source_status, _) = evaluate_snapshot(&conn, name, &canon, &latest);
+        let verification = if source_status == "fresh" {
+            row.1.verification.clone()
+        } else {
+            "Stale".to_string()
+        };
         Ok(SemanticImportOutcome {
             snapshot_id: latest.id,
             import_id: out.import_id,
@@ -797,7 +814,7 @@ pub fn semantic_import(
             definitions: out.definitions,
             references: out.references,
             skipped: out.skipped,
-            verification: row.1.verification.clone(),
+            verification,
         })
     })();
     match outcome {
@@ -834,17 +851,30 @@ pub fn semantic_status(
     root: &Path,
 ) -> Result<(Option<store::Snapshot>, Vec<SemanticStatusRow>), String> {
     let canon = canonical_repo_root(root)?;
-    let _ = canon;
     let db = store::db_path(home, name);
-    let conn = store::open_live(&db)?;
-    let latest = store::latest_snapshot(&conn)?;
+    let mut conn = store::open_live(&db)?;
+    // One read transaction across snapshot, facts, imports, nonce, and the
+    // freshness verdict: every answer describes exactly one revision, even
+    // if a rebuild or import commits mid-query (WAL snapshot isolation).
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let latest = store::latest_snapshot(&tx)?;
     let Some(snapshot) = latest else {
         return Ok((None, Vec::new()));
     };
-    let live = live_state_for(&conn, &snapshot)?;
+    // Source freshness from the M3-M4 evaluator on the same transaction:
+    // a source that moved after the snapshot (no rebuild yet) downgrades
+    // every import to Stale instead of serving old rows as matching.
+    let (source_status, _) = evaluate_snapshot(&tx, name, &canon, &snapshot);
+    let source_fresh = source_status == "fresh";
+    let live = live_state_for(&tx, &snapshot)?;
     let mut rows = Vec::new();
-    for (id, import) in store::semantic_imports_for(&conn, snapshot.id)? {
-        let verification = crate::semantic::verify_live(&import, &live);
+    for (id, import) in store::semantic_imports_for(&tx, snapshot.id)? {
+        let bound = crate::semantic::verify_live(&import, &live);
+        let verification = if source_fresh {
+            bound
+        } else {
+            crate::semantic::Verification::Stale
+        };
         // Provider names in the database must resolve against the static
         // capability registry: an unknown name is reported, never trusted.
         let limitation = match crate::semantic::resolve(&import.provider_name) {
@@ -933,18 +963,25 @@ pub fn semantic_query(
     let canon = canonical_repo_root(root)?;
     let validated = crate::semantic::validate_doc_path(&canon, query.rel)?;
     let db = store::db_path(home, name);
-    let conn = store::open_live(&db)?;
-    let snapshot = store::latest_snapshot(&conn)?
+    let mut conn = store::open_live(&db)?;
+    // One read transaction across snapshot, facts, imports, nonce, and the
+    // freshness verdict (same discipline as `evaluate`): no concurrent
+    // rebuild or import can mix revisions inside one answer.
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let snapshot = store::latest_snapshot(&tx)?
         .ok_or_else(|| "no snapshot: index the repository first".to_string())?;
-    let live = live_state_for(&conn, &snapshot)?;
+    let (source_status, _) = evaluate_snapshot(&tx, name, &canon, &snapshot);
+    let source_fresh = source_status == "fresh";
+    let live = live_state_for(&tx, &snapshot)?;
     let line0 = query.line1.saturating_sub(1);
     let col0 = query.col1.saturating_sub(1);
-    let facts = store::semantic_facts_at(&conn, snapshot.id, &validated)?;
+    let facts = store::semantic_facts_at(&tx, snapshot.id, &validated)?;
     // Narrowest enclosing occurrence wins (nested spans resolve inward).
+    // Half-open [start, end): the end edge itself is outside the symbol.
     let mut anchor: Option<&store::SemanticFact> = None;
     for fact in &facts {
         let inside = (fact.start_line, fact.start_col) <= (line0, col0)
-            && (line0, col0) <= (fact.end_line, fact.end_col);
+            && (line0, col0) < (fact.end_line, fact.end_col);
         if !inside {
             continue;
         }
@@ -963,13 +1000,23 @@ pub fn semantic_query(
     let mut definitions = Vec::new();
     let mut references = Vec::new();
     let mut verification = "Unverified".to_string();
-    for fact in store::semantic_facts_for(&conn, snapshot.id, &uri)? {
+    for fact in store::semantic_facts_for(&tx, snapshot.id, &uri)? {
         if local && fact.rel_path != validated {
             continue;
         }
-        let import = store::semantic_import_by_id(&conn, fact.import_id)?
+        // Identity scope includes the producing import: the same URI from
+        // another import is different evidence, never merged.
+        if fact.import_id != anchor.import_id {
+            continue;
+        }
+        let import = store::semantic_import_by_id(&tx, fact.import_id)?
             .ok_or_else(|| "import vanished".to_string())?;
-        let v = crate::semantic::verify_live(&import.1, &live);
+        let bound = crate::semantic::verify_live(&import.1, &live);
+        let v = if source_fresh {
+            bound
+        } else {
+            crate::semantic::Verification::Stale
+        };
         verification = v.as_str().to_string();
         if fact.roles & 0x1 != 0 {
             if !query.refs {
@@ -979,7 +1026,7 @@ pub fn semantic_query(
             references.push(hit_from_fact(&fact, &verification));
         }
     }
-    let (provider_name, provider_version) = store::semantic_import_by_id(&conn, anchor.import_id)?
+    let (provider_name, provider_version) = store::semantic_import_by_id(&tx, anchor.import_id)?
         .map(|(_, import)| (import.provider_name, import.provider_version))
         .unwrap_or(("scip-import".to_string(), String::new()));
     Ok(SemanticQueryOut {

@@ -296,17 +296,32 @@ fn byte_offset(line: &str, char_off: usize, enc: CharEncoding) -> Result<usize, 
     }
 }
 
+/// Decoded source with an optional raw-offset map. UTF-8 files map
+/// identically (no table); UTF-16 maps every decoded byte to the raw byte
+/// index of its character's first unit, so spans index the RAW file —
+/// BOM, surrogates, and LE/BE included. Only char-boundary offsets are
+/// ever translated (guaranteed by `byte_offset`).
+struct DecodedSource {
+    text: String,
+    raw_map: Option<Vec<usize>>,
+}
+
 /// Decode on-disk bytes per the index `text_document_encoding`. UTF-16
-/// requires a BOM (LE `FF FE` / BE `FE FF`); BOM-less UTF-16 is rejected
-/// rather than guessed LE. Returns UTF-8 bytes for span mapping; digests
-/// always cover the RAW bytes (matching the syntax snapshot).
-fn decode_text(raw: &[u8], enc: TextEncoding, rel: &str) -> Result<Vec<u8>, String> {
+/// requires a BOM (LE `FF FE` / BE `FE FF`); BOM-less or odd-length input
+/// is rejected rather than guessed. Digests always cover the RAW bytes
+/// (matching the syntax snapshot).
+fn decode_source(raw: &[u8], enc: TextEncoding, rel: &str) -> Result<DecodedSource, String> {
     match enc {
-        TextEncoding::UTF8 => Ok(raw.to_vec()),
+        TextEncoding::UTF8 => String::from_utf8(raw.to_vec())
+            .map(|text| DecodedSource {
+                text,
+                raw_map: None,
+            })
+            .map_err(|_| format!("{rel}: not UTF-8")),
         TextEncoding::UTF16 => {
-            let (words, swap) = match raw {
-                [0xFF, 0xFE, rest @ ..] => (rest, false),
-                [0xFE, 0xFF, rest @ ..] => (rest, true),
+            let (words, swap, bom) = match raw {
+                [0xFF, 0xFE, rest @ ..] => (rest, false, 2usize),
+                [0xFE, 0xFF, rest @ ..] => (rest, true, 2usize),
                 _ => return Err(format!("UTF-16 without BOM in '{rel}'")),
             };
             if words.len() % 2 != 0 {
@@ -323,9 +338,39 @@ fn decode_text(raw: &[u8], enc: TextEncoding, rel: &str) -> Result<Vec<u8>, Stri
                     }
                 })
                 .collect();
-            String::from_utf16(&units)
-                .map(|s| s.into_bytes())
-                .map_err(|_| format!("invalid UTF-16 in '{rel}'"))
+            let mut text = String::new();
+            let mut raw_map = Vec::new();
+            let mut i = 0;
+            while i < units.len() {
+                let raw_start = bom + i * 2;
+                let first = units[i];
+                let ch = if (0xD800..0xDC00).contains(&first) {
+                    let second = *units
+                        .get(i + 1)
+                        .ok_or_else(|| format!("dangling surrogate in '{rel}'"))?;
+                    if !(0xDC00..0xE000).contains(&second) {
+                        return Err(format!("dangling surrogate in '{rel}'"));
+                    }
+                    i += 2;
+                    char::from_u32(
+                        0x10000 + (u32::from(first - 0xD800) << 10) + u32::from(second - 0xDC00),
+                    )
+                    .ok_or_else(|| format!("invalid UTF-16 in '{rel}'"))?
+                } else if (0xDC00..0xE000).contains(&first) {
+                    return Err(format!("dangling surrogate in '{rel}'"));
+                } else {
+                    i += 1;
+                    char::from_u32(u32::from(first))
+                        .ok_or_else(|| format!("invalid UTF-16 in '{rel}'"))?
+                };
+                let decoded_start = text.len();
+                text.push(ch);
+                raw_map.extend(std::iter::repeat_n(raw_start, text.len() - decoded_start));
+            }
+            Ok(DecodedSource {
+                text,
+                raw_map: Some(raw_map),
+            })
         }
         _ => Err(format!("unsupported text encoding in '{rel}'")),
     }
@@ -563,7 +608,7 @@ fn process_document(state: &mut ImportState, doc: Document) -> Result<DocOutcome
             return Ok(DocOutcome::Skipped);
         }
     };
-    let decoded = match decode_text(&raw, state.text_encoding, &rel) {
+    let decoded = match decode_source(&raw, state.text_encoding, &rel) {
         Ok(decoded) => decoded,
         Err(e) => {
             state.skip(format!("{rel}: {e}"));
@@ -579,16 +624,28 @@ fn process_document(state: &mut ImportState, doc: Document) -> Result<DocOutcome
             return Ok(DocOutcome::Skipped);
         }
     };
-    let text = String::from_utf8(decoded).map_err(|_| format!("{rel}: not UTF-8"))?;
-    let lines: Vec<&str> = text.split('\n').collect();
+    let lines: Vec<&str> = decoded.text.split('\n').collect();
     let (enc, unspecified) = match char_encoding(&doc) {
         Ok(enc) => (enc, false),
         Err(_) => (CharEncoding::Utf8, true),
     };
+    // Translate decoded-text offsets to raw-file offsets. UTF-8 maps
+    // identically; UTF-16 walks the boundary table (BOM/surrogates shift
+    // every span past them). The table covers exactly the decoded bytes;
+    // offset == len means end-of-text and maps to end-of-raw.
+    let to_raw = |off: usize| -> usize {
+        match &decoded.raw_map {
+            Some(map) if off < map.len() => map[off],
+            Some(_) => raw.len(),
+            None => off,
+        }
+    };
     let mut line_starts = Vec::with_capacity(lines.len());
+    let mut decoded_starts = Vec::with_capacity(lines.len());
     let mut offset = 0usize;
     for line in &lines {
-        line_starts.push(offset);
+        line_starts.push(to_raw(offset));
+        decoded_starts.push(offset);
         offset += line.len() + 1;
     }
     let mut facts = Vec::new();
@@ -620,7 +677,10 @@ fn process_document(state: &mut ImportState, doc: Document) -> Result<DocOutcome
             byte_offset(start_line, sc, enc),
             byte_offset(end_line, ec, enc),
         ) {
-            (Ok(a), Ok(b)) => (line_starts[sl as usize] + a, line_starts[el as usize] + b),
+            (Ok(a), Ok(b)) => (
+                to_raw(decoded_starts[sl as usize] + a),
+                to_raw(decoded_starts[el as usize] + b),
+            ),
             _ => {
                 state.skip(format!("{rel}: bad character offset"));
                 continue;
@@ -1361,8 +1421,89 @@ mod tests {
         assert_eq!(out.definitions, 1);
         let facts = crate::store::semantic_facts_for(&s.conn, s.snapshot_id, &sym).unwrap();
         assert_eq!(facts.len(), 1);
+        // Raw-file consistency: digest covers raw bytes (BOM included) and
+        // spans index raw offsets (decoded "foo" at 0..3 lives at raw 2..8).
         assert_eq!(facts[0].file_digest, content_digest(&raw));
-        assert_eq!((facts[0].byte_start, facts[0].byte_end), (0, 3));
+        assert_eq!((facts[0].byte_start, facts[0].byte_end), (2, 8));
+    }
+
+    /// Byte offsets index the RAW file, not the decoded text. UTF-16LE with
+    /// BOM + a surrogate pair: decoded math and raw math must be told
+    /// apart, or every span past the BOM/emoji is wrong on disk.
+    #[test]
+    fn utf16_raw_offsets_include_bom_and_surrogates() {
+        // "a🚀c": raw = BOM(2) + a(2) + rocket-pair(4) + c(2); decoded c = 5.
+        let text = "a\u{1F680}c\n";
+        let mut raw = vec![0xFFu8, 0xFE];
+        for u in text.encode_utf16() {
+            raw.extend(&u.to_le_bytes());
+        }
+        let s = setup(&[], &[("src/e.ts", &raw)]);
+        let mut doc = Document::new();
+        doc.relative_path = "src/e.ts".to_string();
+        doc.position_encoding =
+            EnumOrUnknown::new(PositionEncoding::UTF16CodeUnitOffsetFromLineStart);
+        let sym = format!("{SCHEME_PKG} src/e.ts/c().");
+        // c at UTF-16 units 3..4 (a=1, rocket=2).
+        doc.occurrences = vec![single_line(&sym, 0x1, 0, 3, 4)];
+        doc.symbols = vec![symbol_info(&sym, "c")];
+        let mut index = Index::new();
+        let mut md = metadata_for(&s.dir);
+        md.text_document_encoding = EnumOrUnknown::new(TextEncoding::UTF16);
+        index.metadata = protobuf::MessageField::some(md);
+        index.documents = vec![doc];
+        let path = write_scip(&s.dir, "index.scip", &index.write_to_bytes().unwrap());
+        let out = import_file(
+            &s.conn,
+            s.snapshot_id,
+            &s.dir,
+            &path,
+            &ImportLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(out.definitions, 1);
+        let facts = crate::store::semantic_facts_for(&s.conn, s.snapshot_id, &sym).unwrap();
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].file_digest, content_digest(&raw));
+        assert_eq!(
+            (facts[0].byte_start, facts[0].byte_end),
+            (8, 10),
+            "raw offsets, not decoded (5..6)"
+        );
+    }
+
+    #[test]
+    fn utf16be_raw_offsets_match() {
+        let text = "ab\n";
+        let mut raw = vec![0xFEu8, 0xFF];
+        for u in text.encode_utf16() {
+            raw.extend(&u.to_be_bytes());
+        }
+        let s = setup(&[], &[("src/b.ts", &raw)]);
+        let mut doc = Document::new();
+        doc.relative_path = "src/b.ts".to_string();
+        doc.position_encoding =
+            EnumOrUnknown::new(PositionEncoding::UTF16CodeUnitOffsetFromLineStart);
+        let sym = format!("{SCHEME_PKG} src/b.ts/ab().");
+        doc.occurrences = vec![single_line(&sym, 0x1, 0, 0, 2)];
+        doc.symbols = vec![symbol_info(&sym, "ab")];
+        let mut index = Index::new();
+        let mut md = metadata_for(&s.dir);
+        md.text_document_encoding = EnumOrUnknown::new(TextEncoding::UTF16);
+        index.metadata = protobuf::MessageField::some(md);
+        index.documents = vec![doc];
+        let path = write_scip(&s.dir, "index.scip", &index.write_to_bytes().unwrap());
+        import_file(
+            &s.conn,
+            s.snapshot_id,
+            &s.dir,
+            &path,
+            &ImportLimits::default(),
+        )
+        .unwrap();
+        let facts = crate::store::semantic_facts_for(&s.conn, s.snapshot_id, &sym).unwrap();
+        assert_eq!(facts.len(), 1);
+        assert_eq!((facts[0].byte_start, facts[0].byte_end), (2, 6));
     }
 
     #[test]
