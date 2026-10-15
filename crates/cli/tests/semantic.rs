@@ -686,6 +686,110 @@ fn cli_null_file_id_survives_noop_and_drops_on_change() {
     assert_eq!(code, 3, "changed unindexed fact must drop");
 }
 
+fn null_repo(h: &Path) -> (PathBuf, String) {
+    let dir = repo_with(h, "sem", &[("notes.other", "data for notes\n")]);
+    let uri = "scip-test test test-pkg 1.0.0 notes.other/thing`.";
+    let doc = document(
+        "notes.other",
+        &[occurrence(uri, 0x1, 0, 0, 4)],
+        &[symbol_info(uri, "thing")],
+        false,
+    );
+    let payload = index_bytes(&dir, &[doc], &[]);
+    let scip = dir.join("index.scip");
+    std::fs::write(&scip, &payload).unwrap();
+    (dir, scip.to_string_lossy().to_string())
+}
+
+fn null_query(h: &Path) -> (i32, String, String) {
+    run(
+        h,
+        &[
+            "semantic",
+            "query",
+            "--repo",
+            "sem",
+            "--path",
+            "notes.other",
+            "--line",
+            "1",
+            "--col",
+            "2",
+        ],
+    )
+}
+
+#[test]
+fn cli_null_fact_edit_before_reindex_reports_stale() {
+    // file_id NULL evidence edited before any rebuild: M4 freshness sees
+    // no files row and stays silent, so the semantic digest check must flip
+    // the import to Stale instead of serving Unverified.
+    let h = home("nullstale");
+    let (_dir, scip) = null_repo(&h);
+    do_index(&h);
+    let (code, _, err) = run(
+        &h,
+        &["semantic", "import", "--repo", "sem", "--scip", &scip],
+    );
+    assert_eq!(code, 0, "{err}");
+    let (code, out, _) = run(&h, &["semantic", "status", "--repo", "sem"]);
+    assert_eq!(code, 0);
+    assert!(
+        out.contains("\"verification\":\"Unverified\""),
+        "bound: {out}"
+    );
+    std::fs::write(h.join("sem").join("notes.other"), "edited, not reindexed\n").unwrap();
+    let (code, out, _) = run(&h, &["semantic", "status", "--repo", "sem"]);
+    assert_eq!(code, 0);
+    assert!(
+        out.contains("\"verification\":\"Stale\""),
+        "edited NULL file: {out}"
+    );
+    let (code, out, _) = null_query(&h);
+    assert_eq!(code, 0);
+    assert!(out.contains("\"verification\":\"Stale\""), "{out}");
+}
+
+#[test]
+fn cli_null_doc_turned_escape_symlink_drops_safely() {
+    // An unindexed file replaced by a symlink escaping the repo between
+    // import and rebuild: carry-over must confine the read (no outside
+    // bytes in, no crash), dropping the fact. Needs symlink privilege;
+    // otherwise the scenario cannot exist here — same pattern as M4.
+    let h = home("nullsymlink");
+    let (dir, scip) = null_repo(&h);
+    let outside = h.join("outside.txt");
+    std::fs::write(&outside, "secret\n").unwrap();
+    do_index(&h);
+    let (code, _, err) = run(
+        &h,
+        &["semantic", "import", "--repo", "sem", "--scip", &scip],
+    );
+    assert_eq!(code, 0, "{err}");
+    let target = dir.join("notes.other");
+    std::fs::remove_file(&target).unwrap();
+    #[cfg(unix)]
+    let made = std::os::unix::fs::symlink(&outside, &target).is_ok();
+    #[cfg(windows)]
+    let made = if std::os::windows::fs::symlink_file(&outside, &target).is_ok() {
+        true
+    } else {
+        // Same canonical-escape mechanism via hardlink when symlink
+        // privilege is absent: the read confinement cannot tell them apart.
+        std::fs::hard_link(&outside, &target).is_ok()
+    };
+    if !made {
+        eprintln!("skip: OS refused symlinks here");
+        return;
+    }
+    let (code, out, err) = run(&h, &["index", "--repo", "sem"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("\"mode\":\"incremental\""), "{out}");
+    let (code, _, _) = null_query(&h);
+    assert_eq!(code, 3, "escaped fact must drop, never leak outside bytes");
+    assert_eq!(std::fs::read_to_string(&outside).unwrap(), "secret\n");
+}
+
 #[test]
 fn cli_provider_unavailable_falls_back_with_syntax_intact() {
     let h = home("fallback");

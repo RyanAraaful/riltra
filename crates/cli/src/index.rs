@@ -747,6 +747,38 @@ fn canonical_repo_root(root: &Path) -> Result<PathBuf, String> {
         .map_err(|e| format!("cannot resolve root: {e}"))
 }
 
+/// Per-import semantic source check: every file an import's facts cover
+/// must still digest-match raw source bytes. M4 freshness only sees files
+/// with syntax rows, so unindexed (`file_id IS NULL`) documents need this
+/// own check — otherwise an edited unindexed file keeps reading Unverified.
+/// Missing/unreadable/oversize/escaping files count as changed (Stale),
+/// never as matching. Keeps import-granular invalidation: one import's
+/// drift never taints another's. No new evaluator: digests + the shared
+/// confined reader only.
+fn import_source_changed(
+    conn: &rusqlite::Connection,
+    snapshot_id: i64,
+    import_id: i64,
+    canon_root: &Path,
+) -> Result<bool, String> {
+    let mut statement = conn
+        .prepare("SELECT DISTINCT rel_path, file_digest FROM semantic_facts WHERE snapshot_id = ?1 AND import_id = ?2")
+        .map_err(|e| e.to_string())?;
+    let rows = statement
+        .query_map(params![snapshot_id, import_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|e| e.to_string())?;
+    for row in rows {
+        let (rel, digest) = row.map_err(|e| e.to_string())?;
+        match crate::semantic::confined_read(canon_root, &rel, crate::scan::MAX_FILE_BYTES) {
+            Ok(bytes) if store::content_digest(&bytes) == digest => {}
+            _ => return Ok(true),
+        }
+    }
+    Ok(false)
+}
+
 pub struct SemanticImportOutcome {
     pub snapshot_id: i64,
     pub import_id: i64,
@@ -800,7 +832,8 @@ pub fn semantic_import(
         // Same source-freshness gate as query/status: a source that already
         // moved (dirty worktree included) reports Stale, never Unverified.
         let (source_status, _) = evaluate_snapshot(&conn, name, &canon, &latest);
-        let verification = if source_status == "fresh" {
+        let drifted = import_source_changed(&conn, latest.id, out.import_id, &canon)?;
+        let verification = if source_status == "fresh" && !drifted {
             row.1.verification.clone()
         } else {
             "Stale".to_string()
@@ -870,7 +903,10 @@ pub fn semantic_status(
     let mut rows = Vec::new();
     for (id, import) in store::semantic_imports_for(&tx, snapshot.id)? {
         let bound = crate::semantic::verify_live(&import, &live);
-        let verification = if source_fresh {
+        // Import-granular drift: this import's own covered files moved, even
+        // where the snapshot-wide freshness is blind (unindexed documents).
+        let drifted = import_source_changed(&tx, snapshot.id, id, &canon)?;
+        let verification = if source_fresh && !drifted {
             bound
         } else {
             crate::semantic::Verification::Stale
@@ -1012,7 +1048,8 @@ pub fn semantic_query(
         let import = store::semantic_import_by_id(&tx, fact.import_id)?
             .ok_or_else(|| "import vanished".to_string())?;
         let bound = crate::semantic::verify_live(&import.1, &live);
-        let v = if source_fresh {
+        let drifted = import_source_changed(&tx, snapshot.id, fact.import_id, &canon)?;
+        let v = if source_fresh && !drifted {
             bound
         } else {
             crate::semantic::Verification::Stale

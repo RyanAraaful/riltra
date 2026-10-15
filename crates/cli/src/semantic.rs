@@ -263,6 +263,49 @@ pub fn uri_path(uri: &str) -> Result<PathBuf, String> {
     Ok(PathBuf::from(decoded))
 }
 
+/// Read one repo file with both guards the syntax path enforces: path
+/// confinement (canonical containment — symlink escapes fail) and a byte
+/// budget (same cap as syntax ingest, so a huge file can neither blow RAM
+/// nor sneak past). Used by the SCIP importer, the NULL-fact carry-over,
+/// and the semantic freshness check. Missing/unreadable/oversize/escaping
+/// files are errors with reasons; callers map them to skip or Stale.
+pub fn confined_read(root: &Path, rel: &str, cap_bytes: u64) -> Result<Vec<u8>, String> {
+    let mut candidate = root.to_path_buf();
+    for part in rel.split('/') {
+        if part.is_empty() || part == "." || part == ".." {
+            return Err(format!("non-canonical document path: '{rel}'"));
+        }
+        candidate.push(part);
+    }
+    let canonical_root = root
+        .canonicalize()
+        .map_err(|e| format!("repository root unavailable: {e}"))?;
+    if !crate::paths::contains(&canonical_root, &candidate) {
+        return Err(format!("document path escapes repository: '{rel}'"));
+    }
+    let len = candidate
+        .metadata()
+        .map_err(|e| format!("cannot stat '{rel}': {e}"))?
+        .len();
+    if len > cap_bytes {
+        return Err(format!("'{rel}' too large ({len} bytes > {cap_bytes})"));
+    }
+    // take(cap+1): the metadata check races file growth; the bounded read
+    // cannot be outrun.
+    let mut file =
+        std::fs::File::open(&candidate).map_err(|e| format!("cannot read '{rel}': {e}"))?;
+    let mut bytes = Vec::new();
+    use std::io::Read as _;
+    file.by_ref()
+        .take(cap_bytes + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("cannot read '{rel}': {e}"))?;
+    if bytes.len() as u64 > cap_bytes {
+        return Err(format!("'{rel}' too large (> {cap_bytes} bytes)"));
+    }
+    Ok(bytes)
+}
+
 /// Single shared document-path validator for both providers. Enforces the
 /// SCIP `relative_path` rules lexically (relative, `/` separators, no
 /// empty/`.`/`..` components) then proves containment + existence through
@@ -549,5 +592,17 @@ mod tests {
         );
         assert_eq!(a.location, b.location);
         assert!(a.symbol.is_none() && b.symbol.is_none());
+    }
+
+    #[test]
+    fn confined_read_guards_size_and_containment() {
+        let dir = tmpdir("sem-confined");
+        std::fs::write(dir.join("ok.txt"), b"hello").unwrap();
+        // Oversize content without a gigabyte fixture: cap below file size.
+        std::fs::write(dir.join("big.txt"), vec![b'x'; 100]).unwrap();
+        assert_eq!(confined_read(&dir, "ok.txt", 1024).unwrap(), b"hello");
+        assert!(confined_read(&dir, "missing.txt", 1024).is_err());
+        assert!(confined_read(&dir, "big.txt", 64).is_err());
+        assert!(confined_read(&dir, "../escape.txt", 1024).is_err());
     }
 }

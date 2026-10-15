@@ -597,17 +597,14 @@ fn process_document(state: &mut ImportState, doc: Document) -> Result<DocOutcome
         }
         symbols.insert(info.symbol.as_str(), info);
     }
-    let mut disk_path = state.repo_root.clone();
-    for part in rel.split('/') {
-        disk_path.push(part);
-    }
-    let raw = match std::fs::read(&disk_path) {
-        Ok(raw) => raw,
-        Err(e) => {
-            state.skip(format!("{rel}: unreadable ({e})"));
-            return Ok(DocOutcome::Skipped);
-        }
-    };
+    let raw =
+        match crate::semantic::confined_read(&state.repo_root, &rel, crate::scan::MAX_FILE_BYTES) {
+            Ok(raw) => raw,
+            Err(e) => {
+                state.skip(format!("{rel}: {e}"));
+                return Ok(DocOutcome::Skipped);
+            }
+        };
     let decoded = match decode_source(&raw, state.text_encoding, &rel) {
         Ok(decoded) => decoded,
         Err(e) => {
@@ -1504,6 +1501,54 @@ mod tests {
         let facts = crate::store::semantic_facts_for(&s.conn, s.snapshot_id, &sym).unwrap();
         assert_eq!(facts.len(), 1);
         assert_eq!((facts[0].byte_start, facts[0].byte_end), (2, 6));
+    }
+
+    /// A huge source file with a tiny SCIP payload: the document skips on
+    /// the size guard before its bytes ever enter RAM. Same cap as syntax.
+    #[test]
+    fn huge_source_file_skips_document_within_budget() {
+        use crate::scan::MAX_FILE_BYTES;
+        let s = setup(&[], &[]);
+        let big = vec![b'x'; MAX_FILE_BYTES as usize + 1];
+        std::fs::write(s.dir.join("big.ts"), &big).unwrap();
+        insert_file(
+            &s.conn,
+            s.snapshot_id,
+            &FileRow {
+                path: "big.ts".to_string(),
+                language: "typescript".to_string(),
+                bytes: big.len() as u64,
+                digest: content_digest(&big),
+                errors: 0,
+            },
+        )
+        .unwrap();
+        let sym = format!("{SCHEME_PKG} big.ts/x.");
+        let mut doc = utf8_doc("big.ts");
+        doc.occurrences = vec![single_line(&sym, 0x1, 0, 0, 1)];
+        doc.symbols = vec![symbol_info(&sym, "x")];
+        let bytes = encode_index(&s.dir, vec![doc], vec![]);
+        let path = write_scip(&s.dir, "index.scip", &bytes);
+        let out = import_file(
+            &s.conn,
+            s.snapshot_id,
+            &s.dir,
+            &path,
+            &ImportLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(out.definitions, 0);
+        assert_eq!(out.documents, 0);
+        assert!(
+            out.skipped.iter().any(|r| r.contains("too large")),
+            "size reason recorded: {:?}",
+            out.skipped
+        );
+        assert!(
+            crate::store::semantic_facts_for(&s.conn, s.snapshot_id, &sym)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
