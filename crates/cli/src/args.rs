@@ -36,6 +36,29 @@ pub enum Command {
         limit: Option<String>,
         offset: Option<String>,
     },
+    Semantic {
+        op: SemanticOp,
+    },
+}
+
+#[derive(Debug, PartialEq)]
+pub enum SemanticOp {
+    Import {
+        repo: String,
+        scip: String,
+        claim: Option<String>,
+    },
+    Status {
+        repo: String,
+    },
+    Query {
+        repo: String,
+        path: String,
+        line: String,
+        col: String,
+        refs: bool,
+        lsp_server: Option<String>,
+    },
 }
 
 /// Parse full argv (including argv[0]-style first token). `Err` is the usage
@@ -174,6 +197,89 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                 _ => Err(crate::usage()),
             }
         }
+        "semantic" => match args.get(1).map(String::as_str) {
+            Some("import") => {
+                let mut repo = None;
+                let mut scip = None;
+                let mut claim = None;
+                let mut i = 2;
+                while i < args.len() {
+                    if let Some(v) = take_value(args, &mut i, "--repo") {
+                        repo = Some(v);
+                    } else if let Some(v) = take_value(args, &mut i, "--scip") {
+                        scip = Some(v);
+                    } else if let Some(v) = take_value(args, &mut i, "--source-digest") {
+                        claim = Some(v);
+                    } else {
+                        return Err(crate::usage());
+                    }
+                }
+                match (repo, scip) {
+                    (Some(repo), Some(scip)) => Ok(Command::Semantic {
+                        op: SemanticOp::Import { repo, scip, claim },
+                    }),
+                    _ => Err(crate::usage()),
+                }
+            }
+            Some("status") => {
+                let mut repo = None;
+                let mut i = 2;
+                while i < args.len() {
+                    if let Some(v) = take_value(args, &mut i, "--repo") {
+                        repo = Some(v);
+                    } else {
+                        return Err(crate::usage());
+                    }
+                }
+                match repo {
+                    Some(repo) => Ok(Command::Semantic {
+                        op: SemanticOp::Status { repo },
+                    }),
+                    None => Err(crate::usage()),
+                }
+            }
+            Some("query") => {
+                let mut repo = None;
+                let mut path = None;
+                let mut line = None;
+                let mut col = None;
+                let mut refs = false;
+                let mut lsp_server = None;
+                let mut i = 2;
+                while i < args.len() {
+                    if let Some(v) = take_value(args, &mut i, "--repo") {
+                        repo = Some(v);
+                    } else if let Some(v) = take_value(args, &mut i, "--path") {
+                        path = Some(v);
+                    } else if let Some(v) = take_value(args, &mut i, "--line") {
+                        line = Some(v);
+                    } else if let Some(v) = take_value(args, &mut i, "--col") {
+                        col = Some(v);
+                    } else if args[i] == "--refs" {
+                        refs = true;
+                        i += 1;
+                    } else if let Some(v) = take_value(args, &mut i, "--lsp-server") {
+                        lsp_server = Some(v);
+                    } else {
+                        return Err(crate::usage());
+                    }
+                }
+                match (repo, path, line, col) {
+                    (Some(repo), Some(path), Some(line), Some(col)) => Ok(Command::Semantic {
+                        op: SemanticOp::Query {
+                            repo,
+                            path,
+                            line,
+                            col,
+                            refs,
+                            lsp_server,
+                        },
+                    }),
+                    _ => Err(crate::usage()),
+                }
+            }
+            _ => Err(crate::usage()),
+        },
         _ => Err(crate::usage()),
     }
 }
@@ -199,7 +305,7 @@ fn take_value(args: &[String], i: &mut usize, flag: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse, Command};
+    use super::{parse, Command, SemanticOp};
 
     fn p(args: &[&str]) -> Result<Command, String> {
         parse(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>())
@@ -267,6 +373,82 @@ mod tests {
         ));
         assert!(p(&["scan"]).is_err());
         assert!(p(&["scan", "--path", "a.py"]).is_err());
+    }
+
+    #[test]
+    fn parses_semantic_commands() {
+        assert!(matches!(
+            p(&["semantic", "import", "--repo", "r", "--scip", "i.scip"]),
+            Ok(Command::Semantic {
+                op: SemanticOp::Import { claim: None, .. }
+            })
+        ));
+        assert!(matches!(
+            p(&[
+                "semantic",
+                "import",
+                "--repo",
+                "r",
+                "--scip",
+                "i.scip",
+                "--source-digest",
+                "ab"
+            ]),
+            Ok(Command::Semantic {
+                op: SemanticOp::Import { claim: Some(_), .. }
+            })
+        ));
+        assert!(matches!(
+            p(&["semantic", "status", "--repo", "r"]),
+            Ok(Command::Semantic {
+                op: SemanticOp::Status { .. }
+            })
+        ));
+        assert!(matches!(
+            p(
+                &[
+                    "semantic", "query", "--repo", "r", "--path", "a.py", "--line", "3", "--col",
+                    "5"
+                ]
+            ),
+            Ok(Command::Semantic {
+                op: SemanticOp::Query {
+                    refs: false,
+                    lsp_server: None,
+                    ..
+                }
+            })
+        ));
+        assert!(matches!(
+            p(&[
+                "semantic", "query", "--repo", "r", "--path", "a.py", "--line", "3", "--col", "5",
+                "--refs"
+            ]),
+            Ok(Command::Semantic {
+                op: SemanticOp::Query { refs: true, .. }
+            })
+        ));
+        // M6 boundary: no traversal flags exist; unknown flags are usage errors.
+        assert!(p(&[
+            "semantic",
+            "query",
+            "--repo",
+            "r",
+            "--path",
+            "a.py",
+            "--line",
+            "3",
+            "--col",
+            "5",
+            "--refs",
+            "--refs-depth",
+            "2"
+        ])
+        .is_err());
+        assert!(p(&["semantic", "import", "--repo", "r"]).is_err());
+        assert!(p(&["semantic", "query", "--repo", "r", "--path", "a.py"]).is_err());
+        assert!(p(&["semantic", "frobnicate", "--repo", "r"]).is_err());
+        assert!(p(&["semantic"]).is_err());
     }
 
     #[test]

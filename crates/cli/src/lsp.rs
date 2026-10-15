@@ -5,9 +5,6 @@
 //! executable path only, bounded messages/timeouts, stderr kept off the
 //! protocol stream, kill + reap on every failure path.
 
-// Allow dead code until Task 7 wires the CLI (staged plan, then remove).
-#![allow(dead_code)]
-
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -51,22 +48,11 @@ impl ServerSpec {
 pub struct LspEvidence {
     pub facts: Vec<Evidence>,
     pub server_version: String,
+    /// Negotiated `positionEncodingKind` ("utf-16" unless the server picks
+    /// otherwise). Read by Tier B validation; queries already carry bytes.
+    #[allow(dead_code)]
     pub position_encoding: String,
     pub diagnostics: Vec<String>,
-}
-
-/// Digest binding server identity to a repo revision (one third of the
-/// Task 6 tripartite binding; a claim, never proof by itself).
-pub fn source_binding(server: &ServerSpec, head: &str) -> String {
-    let mut material = Vec::new();
-    material.extend_from_slice(server.exe.as_bytes());
-    material.push(0);
-    for arg in &server.args {
-        material.extend_from_slice(arg.as_bytes());
-        material.push(0);
-    }
-    material.extend_from_slice(head.as_bytes());
-    crate::store::content_digest(&material)
 }
 
 /// Encode one JSON-RPC message with Content-Length framing.
@@ -256,7 +242,6 @@ pub struct Session {
     sent: usize,
     max_messages: usize,
     timeout: Duration,
-    max_msg_bytes: usize,
     root: PathBuf,
     canonical_root: PathBuf,
     opened: std::collections::HashSet<String>,
@@ -326,11 +311,7 @@ pub fn spawn(spec: ServerSpec) -> Result<Session, String> {
             loop {
                 match read_message(&mut stdout, max_msg_bytes) {
                     Ok(body) => {
-                        let item = classify(&body);
-                        if tx.send(item).is_err() {
-                            break;
-                        }
-                        if matches_body_end(&body) {
+                        if tx.send(classify(&body)).is_err() {
                             break;
                         }
                     }
@@ -351,7 +332,6 @@ pub fn spawn(spec: ServerSpec) -> Result<Session, String> {
         sent: 0,
         max_messages: spec.max_messages,
         timeout: spec.timeout,
-        max_msg_bytes: spec.max_msg_bytes,
         root: spec.root.clone(),
         canonical_root,
         opened: std::collections::HashSet::new(),
@@ -387,10 +367,6 @@ fn classify(body: &Value) -> Incoming {
             .to_string(),
         params: body.get("params").cloned().unwrap_or(Value::Null),
     }
-}
-
-fn matches_body_end(_body: &Value) -> bool {
-    false
 }
 
 impl Session {

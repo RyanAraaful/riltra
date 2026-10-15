@@ -3,12 +3,6 @@
 //! adapter produces, one path+range validator, one provenance/diagnostics
 //! shape, and the static capability registry. No provider-specific logic
 //! lives anywhere else.
-//!
-//! Staged plan: Tasks 4-7 are the first non-test consumers. Remove this
-//! allow in the Task 7 commit once the module is wired into dispatch.
-
-// Allow dead code until Task 7 wires consumers (staged plan, then remove).
-#![allow(dead_code)]
 
 use std::path::Path;
 
@@ -18,6 +12,8 @@ use crate::paths;
 /// Precision of one evidence item: compiler-backed exact or heuristic.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Precision {
+    // Kept for contract stability; never constructed in M5 (see verify_live).
+    #[allow(dead_code)]
     Exact,
     Heuristic,
 }
@@ -36,6 +32,8 @@ impl Precision {
 /// exists, so imports land `Unverified` and drift flips them to `Stale`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Verification {
+    // Kept for contract stability; unreachable in M5 (see verify_live).
+    #[allow(dead_code)]
     Current,
     Unverified,
     Stale,
@@ -196,8 +194,9 @@ impl Evidence {
 }
 
 /// Actual capabilities of one provider. Static table, not configuration:
-///
 /// capabilities describe what the adapter implements, not wishes.
+/// Fields are read by the registry tests; dispatch consults `resolve`.
+#[allow(dead_code)]
 pub struct Capability {
     pub name: &'static str,
     pub definitions: bool,

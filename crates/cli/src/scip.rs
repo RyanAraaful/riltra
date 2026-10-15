@@ -12,9 +12,6 @@
 //! (see `src/main.rs` there: `Codegen::new().pure().out_dir(..)`).
 //! Regenerate only when the pinned proto changes; never at build time.
 
-// Allow dead code until Task 7 wires the CLI (staged plan, then remove).
-#![allow(dead_code)]
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -68,6 +65,8 @@ pub struct ImportOutcome {
 }
 
 /// Streaming statistics for the mid-stream-abort proof test.
+/// Read by tests; the production path reports counts via ImportOutcome.
+#[allow(dead_code)]
 pub struct StreamStats {
     pub documents: usize,
     pub occurrences: usize,
@@ -534,7 +533,7 @@ fn evidence_to_fact(
         byte_start: span.byte_start,
         byte_end: span.byte_end,
         // M5 honesty rule: never Exact without producer attestation.
-        precision: "Heuristic".to_string(),
+        precision: semantic::Precision::Heuristic.as_str().to_string(),
         relationships: relationships_json(&evidence.relationships),
         external: evidence.external.is_some(),
     }
@@ -642,6 +641,10 @@ fn process_document(state: &mut ImportState, doc: Document) -> Result<DocOutcome
             }
         };
         if byte_start > byte_end {
+            state.skip(format!("{rel}: disordered range"));
+            continue;
+        }
+        if crate::semantic::validate_range(sl, sc as u32, el, ec as u32).is_err() {
             state.skip(format!("{rel}: disordered range"));
             continue;
         }

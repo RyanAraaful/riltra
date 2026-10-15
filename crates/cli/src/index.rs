@@ -11,7 +11,7 @@ use crate::git;
 use crate::scan::{self, PlanAction};
 use crate::store;
 use crate::syntax::{grammar_version, language_name, parse_source};
-use rusqlite::OptionalExtension;
+use rusqlite::{params, OptionalExtension};
 
 pub const DEFAULT_SEARCH_LIMIT: usize = 50;
 pub const MAX_SEARCH_LIMIT: usize = 1000;
@@ -105,6 +105,7 @@ struct StagingMeta {
     git_state: git::GitInfo,
     cfg: String,
     pre: String,
+    base: store::PromoteBase,
 }
 
 fn prepare_staging(
@@ -128,6 +129,21 @@ fn prepare_staging(
     let git_state = git::fingerprint(&canon_root);
     let cfg = config_fingerprint(&canon_root);
     let pre = input_fingerprint(&canon_root);
+    // Writer-coordination base: the live revision this staging build starts
+    // from. Promotion aborts unless it still matches (semantic-changed).
+    let base = if db.is_file() {
+        store::open_live(&db)
+            .and_then(|live| store::live_base(&live))
+            .unwrap_or(store::PromoteBase {
+                nonce: String::new(),
+                generation: 0,
+            })
+    } else {
+        store::PromoteBase {
+            nonce: String::new(),
+            generation: 0,
+        }
+    };
     let conn = store::open_live(&staging)?;
     Ok((
         conn,
@@ -138,6 +154,7 @@ fn prepare_staging(
             git_state,
             cfg,
             pre,
+            base,
         },
     ))
 }
@@ -175,7 +192,7 @@ fn finish_snapshot_tx(
 /// cleanup. Split from the first half so callers drop the staging
 /// connection first — on Windows an open handle blocks file removal, which
 /// left corrupt staging leftovers behind (regression-tested).
-fn promote_live(db: &Path, staging: &Path) -> Result<u64, String> {
+fn promote_live(db: &Path, staging: &Path, base: &store::PromoteBase) -> Result<u64, String> {
     let t_promote = Instant::now();
     let live = match store::open_live(db) {
         Ok(live) => live,
@@ -188,15 +205,15 @@ fn promote_live(db: &Path, staging: &Path) -> Result<u64, String> {
         }
         Err(e) => return Err(e),
     };
-    store::promote_staging(&live, staging)?;
+    store::promote_staging(&live, staging, base)?;
     drop(live);
     let _ = std::fs::remove_file(staging);
     Ok(t_promote.elapsed().as_millis() as u64)
 }
 
-/// One fresh snapshot row from build metadata. Both pipelines insert the
-/// same shape; only the surrounding flow differs.
-fn new_snapshot_row(name: &str, meta: &StagingMeta) -> store::Snapshot {
+/// One fresh snapshot row from build metadata. The nonce is minted by the
+/// caller so the carry-over binding can name the new revision up front.
+fn new_snapshot_row(name: &str, meta: &StagingMeta, nonce: &str) -> store::Snapshot {
     store::Snapshot {
         id: 0,
         repo: name.to_string(),
@@ -212,10 +229,52 @@ fn new_snapshot_row(name: &str, meta: &StagingMeta) -> store::Snapshot {
         pre_fingerprint: meta.pre.clone(),
         post_fingerprint: String::new(),
         status_at_write: "stale".to_string(),
-        nonce: store::new_nonce(),
+        nonce: nonce.to_string(),
     }
 }
 
+/// Carry live semantic imports into the staging snapshot (both pipelines).
+/// `src` must already be attached to the live database. Facts carry only
+/// through digest-verified file rows; import rows rebind to the new snapshot
+/// while keeping their original content identity (locatability, never proof).
+/// No live snapshot at all (cold start): nothing to carry.
+fn carry_semantic(
+    tx: &rusqlite::Transaction<'_>,
+    snapshot_id: i64,
+    meta: &StagingMeta,
+    nonce: &str,
+) -> Result<store::CarriedTotals, String> {
+    let old_id: Option<i64> = tx
+        .query_row(
+            "SELECT id FROM src.snapshots ORDER BY id DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let Some(old_id) = old_id else {
+        return Ok(store::CarriedTotals {
+            imports: 0,
+            facts: 0,
+        });
+    };
+    let content = store::content_identity(tx, snapshot_id)?;
+    let live = crate::semantic::LiveState {
+        head: meta.git_state.head.clone().unwrap_or("-".to_string()),
+        branch: meta.git_state.branch.clone().unwrap_or("-".to_string()),
+        dirty: meta.git_state.dirty,
+        untracked: meta.git_state.untracked,
+        config_fingerprint: meta.cfg.clone(),
+        snapshot_nonce: nonce.to_string(),
+        content_identity: content,
+    };
+    store::carry_semantic_facts(
+        tx,
+        snapshot_id,
+        old_id,
+        &crate::semantic::revision_string(&live),
+    )
+}
 /// Full rebuild into staging, then atomic promotion. Facts stream from the
 /// internal parser straight into one transaction — the whole repository is
 /// never buffered, and readers never see a half-written snapshot.
@@ -236,8 +295,23 @@ fn build_full_inner(
     fallback_reason: &str,
 ) -> Result<IndexSummary, String> {
     let (mut conn, db, staging, meta) = prepare_staging(home, name, root)?;
+    // ATTACH before the write transaction starts (same rule as the
+    // incremental path: attaching inside one reports the source locked).
+    // A readable live database that refuses the attach aborts the build
+    // rather than silently wiping imports a rebuild cannot re-derive.
+    let mut carried = false;
+    if db.is_file() {
+        if store::attach_src(&conn, &db).is_err() {
+            if store::is_readable_db(&db) {
+                return Err("live index unreadable for semantic carry".to_string());
+            }
+        } else {
+            carried = true;
+        }
+    }
     let tx = conn.transaction().map_err(|e| e.to_string())?;
-    let snapshot_id = store::insert_snapshot(&tx, &new_snapshot_row(name, &meta))?;
+    let nonce = store::new_nonce();
+    let snapshot_id = store::insert_snapshot(&tx, &new_snapshot_row(name, &meta, &nonce))?;
     let t_diff = Instant::now();
     let (plan, _) = scan::plan_walk(&meta.canon_root)?;
     let diff_ms = t_diff.elapsed().as_millis() as u64;
@@ -278,9 +352,15 @@ fn build_full_inner(
     }
     summary.timings_ms.ingest = t_ingest.elapsed().as_millis() as u64;
     summary.reparsed = summary.processed;
+    if carried {
+        carry_semantic(&tx, snapshot_id, &meta, &nonce)?;
+    }
     finish_snapshot_tx(tx, snapshot_id, &mut summary, &meta)?;
+    if carried {
+        store::detach_src(&conn)?;
+    }
     drop(conn);
-    summary.timings_ms.promote = promote_live(&db, &staging)?;
+    summary.timings_ms.promote = promote_live(&db, &staging, &meta.base)?;
     Ok(summary)
 }
 
@@ -517,7 +597,8 @@ fn build_incremental(
         return build_full_inner(home, name, root, "fallback-full", "db-unreadable");
     }
     let tx = conn.transaction().map_err(|e| e.to_string())?;
-    let snapshot_id = store::insert_snapshot(&tx, &new_snapshot_row(name, &meta))?;
+    let nonce = store::new_nonce();
+    let snapshot_id = store::insert_snapshot(&tx, &new_snapshot_row(name, &meta, &nonce))?;
     // Pin the copy to the exact revision classification saw: nonces are
     // never reused across rebuilds, so a mismatch means the live database
     // was replaced under us. Roll back and rebuild fully from source.
@@ -616,10 +697,11 @@ fn build_incremental(
     summary.timings_ms.ingest = t_ingest.elapsed().as_millis() as u64;
     // Detach after commit: detaching inside the write transaction reports
     // the source locked, and the connection is dropped right below anyway.
+    carry_semantic(&tx, snapshot_id, &meta, &nonce)?;
     finish_snapshot_tx(tx, snapshot_id, &mut summary, &meta)?;
     store::detach_src(&conn)?;
     drop(conn);
-    summary.timings_ms.promote = promote_live(&db, &staging)?;
+    summary.timings_ms.promote = promote_live(&db, &staging, &meta.base)?;
     Ok(summary)
 }
 
@@ -634,13 +716,386 @@ fn fallback_full(
     build_full_inner(home, name, root, "fallback-full", reason)
 }
 
+/// Build the live source state for a stored snapshot: git/config fields
+/// from the row, content identity recomputed over its files rows.
+fn live_state_for(
+    conn: &rusqlite::Connection,
+    snapshot: &store::Snapshot,
+) -> Result<crate::semantic::LiveState, String> {
+    Ok(crate::semantic::LiveState {
+        head: snapshot.head.clone().unwrap_or("-".to_string()),
+        branch: snapshot.branch.clone().unwrap_or("-".to_string()),
+        dirty: snapshot.dirty,
+        untracked: snapshot.untracked,
+        config_fingerprint: snapshot.config_fingerprint.clone(),
+        snapshot_nonce: snapshot.nonce.clone(),
+        content_identity: store::content_identity(conn, snapshot.id)?,
+    })
+}
+
+fn canonical_repo_root(root: &Path) -> Result<PathBuf, String> {
+    root.canonicalize()
+        .map_err(|e| format!("cannot resolve root: {e}"))
+}
+
+pub struct SemanticImportOutcome {
+    pub snapshot_id: i64,
+    pub import_id: i64,
+    pub provider_name: String,
+    pub provider_version: String,
+    pub documents: usize,
+    pub definitions: usize,
+    pub references: usize,
+    pub skipped: Vec<String>,
+    pub verification: String,
+}
+
+/// Import one SCIP file against the live latest snapshot. Never triggers a
+/// syntax rebuild: one `BEGIN IMMEDIATE` transaction, rolled back on any
+/// error with the syntax snapshot byte-identical. No new snapshot row is
+/// minted by the import itself.
+pub fn semantic_import(
+    home: &Path,
+    name: &str,
+    root: &Path,
+    scip_path: &Path,
+    claimed: Option<&str>,
+) -> Result<SemanticImportOutcome, String> {
+    let canon = canonical_repo_root(root)?;
+    let db = store::db_path(home, name);
+    let conn = store::open_live(&db)?;
+    conn.execute_batch("BEGIN IMMEDIATE;")
+        .map_err(|e| e.to_string())?;
+    let outcome = (|| -> Result<SemanticImportOutcome, String> {
+        let latest = store::latest_snapshot(&conn)?
+            .ok_or_else(|| "no snapshot: index the repository first".to_string())?;
+        if canon.to_string_lossy() != latest.root {
+            return Err("repository root moved".to_string());
+        }
+        let out = crate::scip::import_file(
+            &conn,
+            latest.id,
+            &canon,
+            scip_path,
+            &crate::scip::ImportLimits::default(),
+        )?;
+        if let Some(claim) = claimed {
+            conn.execute(
+                "UPDATE semantic_imports SET claimed_source_digest = ?1 WHERE id = ?2",
+                params![claim, out.import_id],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        let row = store::semantic_import_by_id(&conn, out.import_id)?
+            .ok_or_else(|| "import vanished".to_string())?;
+        Ok(SemanticImportOutcome {
+            snapshot_id: latest.id,
+            import_id: out.import_id,
+            provider_name: row.1.provider_name.clone(),
+            provider_version: row.1.provider_version.clone(),
+            documents: out.documents,
+            definitions: out.definitions,
+            references: out.references,
+            skipped: out.skipped,
+            verification: row.1.verification.clone(),
+        })
+    })();
+    match outcome {
+        Ok(out) => {
+            conn.execute_batch("COMMIT;").map_err(|e| e.to_string())?;
+            Ok(out)
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK;");
+            Err(e)
+        }
+    }
+}
+
+pub struct SemanticStatusRow {
+    pub import_id: i64,
+    pub provider_name: String,
+    pub provider_version: String,
+    pub capability: String,
+    pub verification: String,
+    pub artifact_id: String,
+    pub claimed_source_digest: String,
+    pub content_match: bool,
+    pub revision_match: bool,
+    pub limitation: String,
+}
+
+/// Per-provider import status against the live latest snapshot, each passed
+/// through `verify_live`. Syntax freshness is reported separately by
+/// `index status`; this answers only the semantic binding question.
+pub fn semantic_status(
+    home: &Path,
+    name: &str,
+    root: &Path,
+) -> Result<(Option<store::Snapshot>, Vec<SemanticStatusRow>), String> {
+    let canon = canonical_repo_root(root)?;
+    let _ = canon;
+    let db = store::db_path(home, name);
+    let conn = store::open_live(&db)?;
+    let latest = store::latest_snapshot(&conn)?;
+    let Some(snapshot) = latest else {
+        return Ok((None, Vec::new()));
+    };
+    let live = live_state_for(&conn, &snapshot)?;
+    let mut rows = Vec::new();
+    for (id, import) in store::semantic_imports_for(&conn, snapshot.id)? {
+        let verification = crate::semantic::verify_live(&import, &live);
+        // Provider names in the database must resolve against the static
+        // capability registry: an unknown name is reported, never trusted.
+        let limitation = match crate::semantic::resolve(&import.provider_name) {
+            Ok(_) => "single-hop def/ref only (M6 owns traversal); Current unreachable without independent producer attestation".to_string(),
+            Err(e) => e,
+        };
+        rows.push(SemanticStatusRow {
+            import_id: id,
+            provider_name: import.provider_name.clone(),
+            provider_version: import.provider_version.clone(),
+            capability: import.capability.clone(),
+            verification: verification.as_str().to_string(),
+            artifact_id: import.artifact_id.clone(),
+            claimed_source_digest: import.claimed_source_digest.clone(),
+            content_match: import.content_identity == live.content_identity,
+            revision_match: import.source_revision == crate::semantic::revision_string(&live),
+            limitation,
+        });
+    }
+    Ok((Some(snapshot), rows))
+}
+
+pub struct SemanticHit {
+    pub symbol_uri: Option<String>,
+    pub display_name: Option<String>,
+    pub path: String,
+    pub start_line: u32,
+    pub start_col: u32,
+    pub end_line: u32,
+    pub end_col: u32,
+    pub byte_start: usize,
+    pub byte_end: usize,
+    pub roles: u32,
+    pub precision: String,
+    pub verification: String,
+}
+
+pub struct SemanticQueryOut {
+    pub definitions: Vec<SemanticHit>,
+    pub references: Vec<SemanticHit>,
+    pub provider_name: String,
+    pub provider_version: String,
+    pub verification: String,
+    pub server_diagnostics: Vec<String>,
+    pub fallback: Option<String>,
+}
+
+/// One positioned lookup: 1-based UI coordinates plus the refs switch.
+/// Bundles the query tail so `semantic_query`/`semantic_query_lsp` stay
+/// under the argument-count lint without losing explicitness.
+pub struct SpanQuery<'a> {
+    pub rel: &'a str,
+    pub line1: u32,
+    pub col1: u32,
+    pub refs: bool,
+}
+
+fn hit_from_fact(fact: &store::SemanticFact, verification: &str) -> SemanticHit {
+    SemanticHit {
+        symbol_uri: fact.symbol_uri.clone(),
+        display_name: fact.display_name.clone(),
+        path: fact.rel_path.clone(),
+        start_line: fact.start_line,
+        start_col: fact.start_col,
+        end_line: fact.end_line,
+        end_col: fact.end_col,
+        byte_start: fact.byte_start,
+        byte_end: fact.byte_end,
+        roles: fact.roles,
+        precision: fact.precision.clone(),
+        verification: verification.to_string(),
+    }
+}
+
+/// Single-hop semantic query over stored SCIP facts. Go to Definition
+/// resolves the enclosing occurrence to its symbol identity and returns the
+/// Definition-role rows; `--refs` returns the reference-role rows sharing
+/// that identity. Local symbols never leave their document. No identity →
+/// explicit unresolved error, never a guess. No traversal (M6 boundary).
+pub fn semantic_query(
+    home: &Path,
+    name: &str,
+    root: &Path,
+    query: &SpanQuery<'_>,
+) -> Result<SemanticQueryOut, String> {
+    let canon = canonical_repo_root(root)?;
+    let validated = crate::semantic::validate_doc_path(&canon, query.rel)?;
+    let db = store::db_path(home, name);
+    let conn = store::open_live(&db)?;
+    let snapshot = store::latest_snapshot(&conn)?
+        .ok_or_else(|| "no snapshot: index the repository first".to_string())?;
+    let live = live_state_for(&conn, &snapshot)?;
+    let line0 = query.line1.saturating_sub(1);
+    let col0 = query.col1.saturating_sub(1);
+    let facts = store::semantic_facts_at(&conn, snapshot.id, &validated)?;
+    // Narrowest enclosing occurrence wins (nested spans resolve inward).
+    let mut anchor: Option<&store::SemanticFact> = None;
+    for fact in &facts {
+        let inside = (fact.start_line, fact.start_col) <= (line0, col0)
+            && (line0, col0) <= (fact.end_line, fact.end_col);
+        if !inside {
+            continue;
+        }
+        let width = fact.byte_end.saturating_sub(fact.byte_start);
+        match &anchor {
+            Some(a) if a.byte_end.saturating_sub(a.byte_start) <= width => {}
+            _ => anchor = Some(fact),
+        }
+    }
+    let anchor = anchor.ok_or_else(|| "no semantic occurrence here".to_string())?;
+    let uri = anchor
+        .symbol_uri
+        .clone()
+        .ok_or_else(|| "occurrence has no symbol identity: unresolved".to_string())?;
+    let local = uri == "local" || uri.starts_with("local ");
+    let mut definitions = Vec::new();
+    let mut references = Vec::new();
+    let mut verification = "Unverified".to_string();
+    for fact in store::semantic_facts_for(&conn, snapshot.id, &uri)? {
+        if local && fact.rel_path != validated {
+            continue;
+        }
+        let import = store::semantic_import_by_id(&conn, fact.import_id)?
+            .ok_or_else(|| "import vanished".to_string())?;
+        let v = crate::semantic::verify_live(&import.1, &live);
+        verification = v.as_str().to_string();
+        if fact.roles & 0x1 != 0 {
+            if !query.refs {
+                definitions.push(hit_from_fact(&fact, &verification));
+            }
+        } else if query.refs {
+            references.push(hit_from_fact(&fact, &verification));
+        }
+    }
+    let (provider_name, provider_version) = store::semantic_import_by_id(&conn, anchor.import_id)?
+        .map(|(_, import)| (import.provider_name, import.provider_version))
+        .unwrap_or(("scip-import".to_string(), String::new()));
+    Ok(SemanticQueryOut {
+        definitions,
+        references,
+        provider_name,
+        provider_version,
+        verification,
+        server_diagnostics: Vec::new(),
+        fallback: None,
+    })
+}
+
+/// Single-hop live LSP query with an explicit server path. Ephemeral
+/// evidence only: nothing is persisted, every answer is `Unverified`.
+/// Any spawn/query failure becomes an explicit fallback payload (exit 0),
+/// never a fabricated relationship.
+pub fn semantic_query_lsp(
+    root: &Path,
+    query: &SpanQuery<'_>,
+    server_exe: &str,
+) -> Result<SemanticQueryOut, String> {
+    let canon = canonical_repo_root(root)?;
+    let validated = crate::semantic::validate_doc_path(&canon, query.rel)?;
+    let spec = crate::lsp::ServerSpec::new(server_exe, &canon)?;
+    let mut session = match crate::lsp::spawn(spec) {
+        Ok(session) => session,
+        Err(e) => {
+            return Ok(SemanticQueryOut {
+                definitions: Vec::new(),
+                references: Vec::new(),
+                provider_name: "lsp-subprocess".to_string(),
+                provider_version: String::new(),
+                verification: "Unverified".to_string(),
+                server_diagnostics: Vec::new(),
+                fallback: Some(e),
+            });
+        }
+    };
+    let answer = if query.refs {
+        session.references(&validated, query.line1, query.col1)
+    } else {
+        session.definition(&validated, query.line1, query.col1)
+    };
+    let answer = match answer {
+        Ok(answer) => answer,
+        Err(e) => {
+            session.shutdown();
+            return Ok(SemanticQueryOut {
+                definitions: Vec::new(),
+                references: Vec::new(),
+                provider_name: "lsp-subprocess".to_string(),
+                provider_version: String::new(),
+                verification: "Unverified".to_string(),
+                server_diagnostics: Vec::new(),
+                fallback: Some(e),
+            });
+        }
+    };
+    let version = answer.server_version.clone();
+    let mut out = SemanticQueryOut {
+        definitions: Vec::new(),
+        references: Vec::new(),
+        provider_name: "lsp-subprocess".to_string(),
+        provider_version: version,
+        verification: "Unverified".to_string(),
+        server_diagnostics: answer.diagnostics.clone(),
+        fallback: None,
+    };
+    for fact in &answer.facts {
+        let span = &fact.location.span;
+        let hit = SemanticHit {
+            symbol_uri: None,
+            display_name: None,
+            path: fact.location.path.clone(),
+            start_line: span.start_line,
+            start_col: span.start_col,
+            end_line: span.end_line,
+            end_col: span.end_col,
+            byte_start: span.byte_start,
+            byte_end: span.byte_end,
+            roles: fact.roles.raw,
+            precision: crate::semantic::Precision::Heuristic.as_str().to_string(),
+            verification: "Unverified".to_string(),
+        };
+        if query.refs {
+            out.references.push(hit);
+        } else {
+            out.definitions.push(hit);
+        }
+    }
+    session.shutdown();
+    Ok(out)
+}
+
 /// Dispatcher: cold start and `--full` go straight to full rebuilds;
 /// otherwise reuse is attempted only when the previous snapshot is provably
 /// compatible (root, parser, grammars, config, HEAD, branch). Dirty
 /// worktrees and untracked-count changes with the same HEAD/branch stay
 /// incremental — per-file digests decide. A stale previous snapshot still
 /// allows reuse: every reused file is independently digest-verified.
+///
+/// A `semantic-changed` promotion abort (a semantic import committed while
+/// staging was in flight) retries the whole build exactly once from a fresh
+/// base, which then includes the import. A second advance errors out rather
+/// than looping.
 pub fn build(home: &Path, name: &str, root: &Path, full: bool) -> Result<IndexSummary, String> {
+    match build_once(home, name, root, full) {
+        Err(e) if e.contains("semantic-changed") => {
+            fallback_full(home, name, root, "semantic-changed")
+        }
+        other => other,
+    }
+}
+
+fn build_once(home: &Path, name: &str, root: &Path, full: bool) -> Result<IndexSummary, String> {
     if full {
         return build_full_inner(home, name, root, "full", "forced-full");
     }

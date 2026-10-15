@@ -37,7 +37,10 @@ const SCOPE: &str = "m1-registry";
 
 pub(crate) fn usage() -> String {
     format!(
-        "Usage:\n  {NAME} [--help] [--version] status\n  {NAME} init --repo <path> [--name <name>]\n  {NAME} repo list\n  {NAME} repo status --repo <name>\n  {NAME} doctor [--repo <name>]\n  {NAME} scan --repo <name> [--path <relpath>]... [--symbol <substr>]\n  {NAME} index --repo <name> [--full]\n  {NAME} index status --repo <name>\n  {NAME} search --repo <name> --symbol <substr> [--limit <n>] [--offset <n>]\n\nCommands:\n  status       Print deterministic bootstrap status as JSON\n  init         Register a local repository root\n  repo list    List registered repositories as JSON\n  repo status  Git/worktree fingerprint of a registered repository\n  doctor       Path-security and repository health checks as JSON\n  scan         Syntax facts (definitions/imports/calls) as JSON\n  index        Build the durable code index for a repository\n  index status Report index freshness (fresh/stale/unknown) as JSON\n  search       Search indexed symbols as JSON\n"
+        "Usage:\n  {NAME} [--help] [--version] status\n  {NAME} init --repo <path> [--name <name>]\n  {NAME} repo list\n  {NAME} repo status --repo <name>\n  {NAME} doctor [--repo <name>]\n  {NAME} scan --repo <name> [--path <relpath>]... [--symbol <substr>]\n  {NAME} index --repo <name> [--full]\n  {NAME} index status --repo <name>\n  {NAME} search --repo <name> --symbol <substr> [--limit <n>] [--offset <n>]
+  {NAME} semantic import --repo <name> --scip <file> [--source-digest <hex>]
+  {NAME} semantic status --repo <name>
+  {NAME} semantic query --repo <name> --path <rel> --line <n> --col <n> [--refs] [--lsp-server <abs-path>]\n\nCommands:\n  status       Print deterministic bootstrap status as JSON\n  init         Register a local repository root\n  repo list    List registered repositories as JSON\n  repo status  Git/worktree fingerprint of a registered repository\n  doctor       Path-security and repository health checks as JSON\n  scan         Syntax facts (definitions/imports/calls) as JSON\n  index        Build the durable code index for a repository\n  index status Report index freshness (fresh/stale/unknown) as JSON\n  search       Search indexed symbols as JSON\n  semantic import Import a SCIP index against the live snapshot as JSON\n  semantic status Per-provider binding verification as JSON\n  semantic query Single-hop definition/reference lookup as JSON\n"
     )
 }
 
@@ -662,6 +665,218 @@ fn dispatch(cmd: Command, out: &mut String, err: &mut String) -> i32 {
             out,
             err,
         ),
+        Command::Semantic { op } => cmd_semantic(op, out, err),
+    }
+}
+
+fn cmd_semantic(op: args::SemanticOp, out: &mut String, err: &mut String) -> i32 {
+    match op {
+        args::SemanticOp::Import { repo, scip, claim } => {
+            cmd_semantic_import(&repo, &scip, claim.as_deref(), out, err)
+        }
+        args::SemanticOp::Status { repo } => cmd_semantic_status(&repo, out, err),
+        args::SemanticOp::Query {
+            repo,
+            path,
+            line,
+            col,
+            refs,
+            lsp_server,
+        } => {
+            let query = QueryArgs {
+                path: &path,
+                line: &line,
+                col: &col,
+                refs,
+                lsp_server: lsp_server.as_deref(),
+            };
+            cmd_semantic_query(&repo, &query, out, err)
+        }
+    }
+}
+
+/// Bundled `semantic query` arguments: one struct instead of an
+/// eight-parameter tail.
+struct QueryArgs<'a> {
+    path: &'a str,
+    line: &'a str,
+    col: &'a str,
+    refs: bool,
+    lsp_server: Option<&'a str>,
+}
+
+fn cmd_semantic_import(
+    name: &str,
+    scip: &str,
+    claim: Option<&str>,
+    out: &mut String,
+    err: &mut String,
+) -> i32 {
+    let home = paths::config_dir();
+    let (root, _) = match resolve_recorded_root(name, err) {
+        Ok(paths) => paths,
+        Err(code) => return code,
+    };
+    match index::semantic_import(&home, name, Path::new(&root), Path::new(scip), claim) {
+        Ok(o) => {
+            let skipped: Vec<String> = o
+                .skipped
+                .iter()
+                .map(|s| format!("\"{}\"", json::escape(s)))
+                .collect();
+            *out = format!(
+                "{{\"repo\":\"{}\",\"snapshot\":{},\"import\":{},\"provider\":\"{}\",\"provider_version\":\"{}\",\"documents\":{},\"definitions\":{},\"references\":{},\"skipped\":[{}],\"verification\":\"{}\",\"fallback_reason\":\"none\"}}\n",
+                json::escape(name),
+                o.snapshot_id,
+                o.import_id,
+                json::escape(&o.provider_name),
+                json::escape(&o.provider_version),
+                o.documents,
+                o.definitions,
+                o.references,
+                skipped.join(","),
+                o.verification
+            );
+            0
+        }
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            3
+        }
+    }
+}
+
+fn cmd_semantic_status(name: &str, out: &mut String, err: &mut String) -> i32 {
+    let home = paths::config_dir();
+    let (root, _) = match resolve_recorded_root(name, err) {
+        Ok(paths) => paths,
+        Err(code) => return code,
+    };
+    match index::semantic_status(&home, name, Path::new(&root)) {
+        Ok((snapshot, rows)) => {
+            let mut items = Vec::new();
+            for row in &rows {
+                items.push(format!(
+                    "{{\"import\":{},\"provider\":\"{}\",\"provider_version\":\"{}\",\"capability\":\"{}\",\"verification\":\"{}\",\"artifact_id\":\"{}\",\"claimed_source_digest\":\"{}\",\"content_identity_match\":{},\"source_revision_match\":{},\"limitation\":\"{}\"}}",
+                    row.import_id,
+                    json::escape(&row.provider_name),
+                    json::escape(&row.provider_version),
+                    json::escape(&row.capability),
+                    row.verification,
+                    json::escape(&row.artifact_id),
+                    json::escape(&row.claimed_source_digest),
+                    row.content_match,
+                    row.revision_match,
+                    json::escape(&row.limitation)
+                ));
+            }
+            *out = format!(
+                "{{\"repo\":\"{}\",\"snapshot\":{},\"imports\":[{}]}}\n",
+                json::escape(name),
+                match &snapshot {
+                    Some(s) => s.id.to_string(),
+                    None => "null".to_string(),
+                },
+                items.join(",")
+            );
+            0
+        }
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            3
+        }
+    }
+}
+
+fn semantic_hit_json(hit: &index::SemanticHit) -> String {
+    format!(
+        "{{\"symbol_uri\":{},\"display_name\":{},\"path\":\"{}\",\"span\":{{\"start_line\":{},\"start_col\":{},\"end_line\":{},\"end_col\":{},\"byte_start\":{},\"byte_end\":{}}},\"roles\":{},\"precision\":\"{}\",\"verification\":\"{}\"}}",
+        match &hit.symbol_uri {
+            Some(u) => format!("\"{}\"", json::escape(u)),
+            None => "null".to_string(),
+        },
+        match &hit.display_name {
+            Some(n) => format!("\"{}\"", json::escape(n)),
+            None => "null".to_string(),
+        },
+        json::escape(&hit.path),
+        hit.start_line,
+        hit.start_col,
+        hit.end_line,
+        hit.end_col,
+        hit.byte_start,
+        hit.byte_end,
+        hit.roles,
+        hit.precision,
+        hit.verification
+    )
+}
+
+fn cmd_semantic_query(
+    name: &str,
+    query: &QueryArgs<'_>,
+    out: &mut String,
+    err: &mut String,
+) -> i32 {
+    let home = paths::config_dir();
+    let (root, _) = match resolve_recorded_root(name, err) {
+        Ok(paths) => paths,
+        Err(code) => return code,
+    };
+    let line_number: u32 = match query.line.parse() {
+        Ok(n) => n,
+        Err(_) => {
+            err.push_str(&format!("error: invalid --line value: '{}'\n", query.line));
+            return 2;
+        }
+    };
+    let col_number: u32 = match query.col.parse() {
+        Ok(n) => n,
+        Err(_) => {
+            err.push_str(&format!("error: invalid --col value: '{}'\n", query.col));
+            return 2;
+        }
+    };
+    let span = index::SpanQuery {
+        rel: query.path,
+        line1: line_number,
+        col1: col_number,
+        refs: query.refs,
+    };
+    let answer = if let Some(exe) = query.lsp_server {
+        index::semantic_query_lsp(Path::new(&root), &span, exe)
+    } else {
+        index::semantic_query(&home, name, Path::new(&root), &span)
+    };
+    match answer {
+        Ok(o) => {
+            let defs: Vec<String> = o.definitions.iter().map(semantic_hit_json).collect();
+            let references: Vec<String> = o.references.iter().map(semantic_hit_json).collect();
+            let diags: Vec<String> = o
+                .server_diagnostics
+                .iter()
+                .map(|d| format!("\"{}\"", json::escape(d)))
+                .collect();
+            *out = format!(
+                "{{\"repo\":\"{}\",\"definitions\":[{}],\"references\":[{}],\"provider\":\"{}\",\"provider_version\":\"{}\",\"verification\":\"{}\",\"server_diagnostics\":[{}],\"fallback\":{}}}\n",
+                json::escape(name),
+                defs.join(","),
+                references.join(","),
+                json::escape(&o.provider_name),
+                json::escape(&o.provider_version),
+                o.verification,
+                diags.join(","),
+                match &o.fallback {
+                    Some(reason) => semantic::fallback_report(&o.provider_name, reason),
+                    None => "null".to_string(),
+                }
+            );
+            0
+        }
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            3
+        }
     }
 }
 

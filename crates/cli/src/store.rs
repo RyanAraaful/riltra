@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 /// Current schema version (`PRAGMA user_version`).
 pub const SCHEMA_VERSION: u32 = 3;
@@ -438,6 +438,95 @@ pub fn semantic_facts_for(
         .map_err(|e| e.to_string())
 }
 
+/// All stored facts for one path in one snapshot, ordered by start position.
+/// The query-time span lookup for Go to Definition / Find References.
+pub fn semantic_facts_at(
+    conn: &Connection,
+    snapshot_id: i64,
+    rel_path: &str,
+) -> Result<Vec<SemanticFact>, String> {
+    let mut statement = conn
+        .prepare("SELECT import_id, file_id, rel_path, file_digest, symbol_uri, display_name, roles, start_line, start_col, end_line, end_col, byte_start, byte_end, precision, relationships, external FROM semantic_facts WHERE snapshot_id = ?1 AND rel_path = ?2 ORDER BY start_line, start_col")
+        .map_err(|e| e.to_string())?;
+    let rows = statement
+        .query_map(params![snapshot_id, rel_path], |row| {
+            semantic_fact_from_row(snapshot_id, row)
+        })
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())
+}
+
+fn semantic_import_from_row(
+    id: i64,
+    snapshot_id: i64,
+    row: &rusqlite::Row,
+    base: usize,
+) -> rusqlite::Result<(i64, SemanticImport)> {
+    Ok((
+        id,
+        SemanticImport {
+            snapshot_id,
+            provider_name: row.get(base)?,
+            provider_version: row.get(base + 1)?,
+            capability: row.get(base + 2)?,
+            project_root: row.get(base + 3)?,
+            text_encoding: row.get(base + 4)?,
+            artifact_id: row.get(base + 5)?,
+            source_revision: row.get(base + 6)?,
+            claimed_source_digest: row.get(base + 7)?,
+            content_identity: row.get(base + 8)?,
+            external_symbols: row.get(base + 9)?,
+            verification: row.get(base + 10)?,
+        },
+    ))
+}
+
+const SEMANTIC_IMPORT_COLS: &str = "id, provider_name, provider_version, capability, project_root, text_encoding, artifact_id, source_revision, claimed_source_digest, content_identity, external_symbols, verification";
+
+/// All imports bound to one snapshot, ordered by id.
+pub fn semantic_imports_for(
+    conn: &Connection,
+    snapshot_id: i64,
+) -> Result<Vec<(i64, SemanticImport)>, String> {
+    let mut statement = conn
+        .prepare(&format!(
+            "SELECT {SEMANTIC_IMPORT_COLS} FROM semantic_imports WHERE snapshot_id = ?1 ORDER BY id"
+        ))
+        .map_err(|e| e.to_string())?;
+    let rows = statement
+        .query_map([snapshot_id], |row| {
+            let id: i64 = row.get(0)?;
+            semantic_import_from_row(id, snapshot_id, row, 1)
+        })
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())
+}
+
+/// One import row by id, any snapshot.
+pub fn semantic_import_by_id(
+    conn: &Connection,
+    import_id: i64,
+) -> Result<Option<(i64, SemanticImport)>, String> {
+    let mut statement = conn
+        .prepare(&format!(
+            "SELECT snapshot_id, {SEMANTIC_IMPORT_COLS} FROM semantic_imports WHERE id = ?1"
+        ))
+        .map_err(|e| e.to_string())?;
+    let mut rows = statement.query([import_id]).map_err(|e| e.to_string())?;
+    match rows.next().map_err(|e| e.to_string())? {
+        Some(row) => {
+            let snapshot_id: i64 = row.get(0).map_err(|e: rusqlite::Error| e.to_string())?;
+            let id: i64 = row.get(1).map_err(|e: rusqlite::Error| e.to_string())?;
+            let pair = semantic_import_from_row(id, snapshot_id, row, 2)
+                .map_err(|e: rusqlite::Error| e.to_string())?;
+            Ok(Some(pair))
+        }
+        None => Ok(None),
+    }
+}
+
 /// Raw `meta` access. Absent keys read as `None`, never as invented values.
 #[allow(dead_code)]
 pub fn meta_get(conn: &Connection, key: &str) -> Result<Option<String>, String> {
@@ -572,31 +661,80 @@ pub fn finish_snapshot(conn: &Connection, id: i64, post: &str, status: &str) -> 
     Ok(())
 }
 
+/// Build-time fingerprint of the live database: latest snapshot nonce plus
+/// the semantic writer-generation counter. Recorded when staging starts;
+/// promotion aborts unless both still match, so a `semantic import` that
+/// commits mid-build is never silently wiped by a stale staging copy.
+/// Extends the M4 nonce-guard pattern — no lock files, no new framework.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PromoteBase {
+    pub nonce: String,
+    pub generation: i64,
+}
+
+/// Read the current live base: latest snapshot nonce (empty when no
+/// snapshot exists yet) plus the semantic generation counter.
+pub fn live_base(conn: &Connection) -> Result<PromoteBase, String> {
+    let nonce: Option<String> = conn
+        .query_row(
+            "SELECT nonce FROM snapshots ORDER BY id DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    Ok(PromoteBase {
+        nonce: nonce.unwrap_or_default(),
+        generation: semantic_generation(conn)?,
+    })
+}
+
 /// Copy one staging snapshot into the live database inside a single
 /// transaction: readers see the old snapshot or the new one, never a mix.
-/// FTS rows follow automatically through the insert/delete triggers. On any
-/// failure the live snapshot is rolled back intact.
-pub fn promote_staging(live: &Connection, staging: &Path) -> Result<(), String> {
+/// FTS rows follow automatically through the insert/delete triggers. The
+/// staging build must have been based on `base`: any live advance (new
+/// snapshot or committed semantic import) aborts with a `semantic-changed`
+/// error and the live database untouched. On any other failure the live
+/// snapshot is rolled back intact.
+pub fn promote_staging(
+    live: &Connection,
+    staging: &Path,
+    base: &PromoteBase,
+) -> Result<(), String> {
     let escaped = staging.to_string_lossy().replace('\'', "''");
     live.execute_batch(&format!("ATTACH DATABASE '{escaped}' AS src"))
         .map_err(|e| format!("cannot attach staging database: {e}"))?;
-    let copied = live.execute_batch(
-        "BEGIN IMMEDIATE;
-         DELETE FROM symbols;
-         DELETE FROM imports;
-         DELETE FROM calls;
-         DELETE FROM files;
-         DELETE FROM snapshots;
-         INSERT INTO snapshots SELECT * FROM src.snapshots;
-         INSERT INTO files SELECT * FROM src.files;
-         INSERT INTO symbols SELECT * FROM src.symbols;
-         INSERT INTO imports SELECT * FROM src.imports;
-         INSERT INTO calls SELECT * FROM src.calls;
-         COMMIT;",
-    );
-    if let Err(e) = copied {
-        let _ = live.execute_batch("ROLLBACK; DETACH DATABASE src;");
-        return Err(format!("promote failed, live snapshot intact: {e}"));
+    let copied = (|| -> Result<(), String> {
+        live.execute_batch("BEGIN IMMEDIATE;")
+            .map_err(|e| e.to_string())?;
+        let current = live_base(live)?;
+        if current != *base {
+            live.execute_batch("ROLLBACK;").map_err(|e| e.to_string())?;
+            return Err("semantic-changed: live database advanced during build".to_string());
+        }
+        live.execute_batch(
+            "DELETE FROM symbols;
+             DELETE FROM imports;
+             DELETE FROM calls;
+             DELETE FROM files;
+             DELETE FROM snapshots;
+             DELETE FROM semantic_facts;
+             DELETE FROM semantic_imports;
+             INSERT INTO snapshots SELECT * FROM src.snapshots;
+             INSERT INTO files SELECT * FROM src.files;
+             INSERT INTO symbols SELECT * FROM src.symbols;
+             INSERT INTO imports SELECT * FROM src.imports;
+             INSERT INTO calls SELECT * FROM src.calls;
+             INSERT INTO semantic_imports SELECT * FROM src.semantic_imports;
+             INSERT INTO semantic_facts SELECT * FROM src.semantic_facts;
+             COMMIT;",
+        )
+        .map_err(|e| format!("promote failed, live snapshot intact: {e}"))?;
+        Ok(())
+    })();
+    if copied.is_err() {
+        let _ = live.execute_batch("DETACH DATABASE src;");
+        return copied;
     }
     live.execute_batch("DETACH DATABASE src")
         .map_err(|e| e.to_string())?;
@@ -732,6 +870,104 @@ pub fn copy_mapped_facts(
         calls: counts[2],
         errors: errors as u32,
     })
+}
+
+/// Totals over carried semantic facts, mirroring `CopiedTotals`.
+/// Reported to Tier B validation; the frozen M4 index JSON is untouched.
+#[allow(dead_code)]
+pub struct CarriedTotals {
+    pub imports: u64,
+    pub facts: u64,
+}
+
+/// Carry semantic imports + per-file-verified facts from the attached `src`
+/// (live) database into the staging snapshot. A fact is copied only when
+/// the new snapshot holds a `files` row with the SAME path AND digest —
+/// the triple-predicate discipline of `copy_file_row`, applied by join.
+/// Import rows are always rebound to the new snapshot (new `snapshot_id`
+/// and fresh `source_revision`) with the ORIGINAL `content_identity` kept:
+/// carry preserves locatability only — `verify_live` still reports `Stale`
+/// at query time whenever the bytes moved. Never upgrades verification.
+pub fn carry_semantic_facts(
+    staging: &Connection,
+    new_snapshot_id: i64,
+    old_snapshot_id: i64,
+    new_source_revision: &str,
+) -> Result<CarriedTotals, String> {
+    let mut statement = staging
+        .prepare("SELECT id, provider_name, provider_version, capability, project_root, text_encoding, artifact_id, source_revision, claimed_source_digest, content_identity, external_symbols, verification FROM src.semantic_imports WHERE snapshot_id = ?1 ORDER BY id")
+        .map_err(|e| e.to_string())?;
+    let old_imports = statement
+        .query_map([old_snapshot_id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, String>(8)?,
+                row.get::<_, String>(9)?,
+                row.get::<_, String>(10)?,
+                row.get::<_, String>(11)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    drop(statement);
+    staging
+        .execute_batch("CREATE TEMP TABLE sem_import_map (old_id INTEGER PRIMARY KEY, new_id INTEGER NOT NULL)")
+        .map_err(|e| e.to_string())?;
+    let mut imports = 0u64;
+    for (
+        old_id,
+        provider_name,
+        provider_version,
+        capability,
+        project_root,
+        text_encoding,
+        artifact_id,
+        _,
+        claimed,
+        content_identity,
+        external_symbols,
+        verification,
+    ) in &old_imports
+    {
+        staging
+            .execute(
+                "INSERT INTO semantic_imports (snapshot_id, provider_name, provider_version, capability, project_root, text_encoding, artifact_id, source_revision, claimed_source_digest, content_identity, external_symbols, verification) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+                params![new_snapshot_id, provider_name, provider_version, capability, project_root, text_encoding, artifact_id, new_source_revision, claimed, content_identity, external_symbols, verification],
+            )
+            .map_err(|e| e.to_string())?;
+        let new_id = staging.last_insert_rowid();
+        staging
+            .execute(
+                "INSERT INTO sem_import_map (old_id, new_id) VALUES (?1, ?2)",
+                params![old_id, new_id],
+            )
+            .map_err(|e| e.to_string())?;
+        imports += 1;
+    }
+    staging
+        .execute(
+            "INSERT INTO semantic_facts (snapshot_id, import_id, file_id, rel_path, file_digest, symbol_uri, display_name, roles, start_line, start_col, end_line, end_col, byte_start, byte_end, precision, relationships, external)
+             SELECT ?1, map.new_id, nf.id, f.rel_path, f.file_digest, f.symbol_uri, f.display_name, f.roles, f.start_line, f.start_col, f.end_line, f.end_col, f.byte_start, f.byte_end, f.precision, f.relationships, f.external
+             FROM src.semantic_facts AS f
+             JOIN sem_import_map AS map ON map.old_id = f.import_id
+             JOIN files AS nf ON nf.snapshot_id = ?1 AND nf.path = f.rel_path AND nf.digest = f.file_digest
+             WHERE f.snapshot_id = ?2",
+            params![new_snapshot_id, old_snapshot_id],
+        )
+        .map_err(|e| e.to_string())?;
+    let facts = staging.changes();
+    staging
+        .execute_batch("DROP TABLE sem_import_map")
+        .map_err(|e| e.to_string())?;
+    Ok(CarriedTotals { imports, facts })
 }
 
 pub fn insert_file(conn: &Connection, snapshot_id: i64, file: &FileRow) -> Result<i64, String> {
@@ -1001,12 +1237,13 @@ pub fn search_symbols(
 #[cfg(test)]
 mod tests {
     use super::{
-        content_digest, content_identity, db_path, files_of, finish_snapshot, fts_available,
-        grammar_versions, insert_call, insert_file, insert_import, insert_semantic_facts,
-        insert_semantic_import, insert_snapshot, insert_symbol, is_readable_db, latest_snapshot,
-        meta_get, meta_set, migrate, open_live, open_memory, promote_staging, search_symbols,
-        semantic_facts_for, semantic_generation, staging_path, FileRow, SemanticFact,
-        SemanticImport, Snapshot, SymbolRow, SCHEMA_VERSION,
+        attach_src, carry_semantic_facts, content_digest, content_identity, db_path, detach_src,
+        files_of, finish_snapshot, fts_available, grammar_versions, insert_call, insert_file,
+        insert_import, insert_semantic_facts, insert_semantic_import, insert_snapshot,
+        insert_symbol, is_readable_db, latest_snapshot, live_base, meta_get, meta_set, migrate,
+        open_live, open_memory, promote_staging, search_symbols, semantic_facts_for,
+        semantic_generation, staging_path, FileRow, SemanticFact, SemanticImport, Snapshot,
+        SymbolRow, SCHEMA_VERSION,
     };
     use crate::testutil::tmpdir;
     use std::path::Path;
@@ -1770,13 +2007,124 @@ mod tests {
         let id = insert_snapshot(&staging_conn, &sample_snapshot()).unwrap();
         finish_snapshot(&staging_conn, id, "post", "fresh").unwrap();
         let live = open_live(&live_path).unwrap();
-        promote_staging(&live, &staging).unwrap();
+        let base = live_base(&live).unwrap();
+        promote_staging(&live, &staging, &base).unwrap();
         let snap = latest_snapshot(&live).unwrap().unwrap();
         assert_eq!(snap.post_fingerprint, "post");
         assert!(
             staging.exists(),
             "staging file itself is left for the caller to clean"
         );
+    }
+
+    #[test]
+    fn promote_aborts_when_live_advanced_semantic_changed() {
+        // Deterministic writer race, both orders, no threads: a staging copy
+        // based on an old generation must abort with the committed import
+        // intact; a staging copy based after the import must succeed.
+        let dir = tmpdir("store-race");
+        let live_path = dir.join("live.db");
+        let live = open_live(&live_path).unwrap();
+        let s1 = insert_snapshot(&live, &sample_snapshot()).unwrap();
+        let base = live_base(&live).unwrap();
+        // Order 1: stage from base, then a semantic import commits on live.
+        let staging_path = dir.join("s1.db");
+        {
+            let staging = open_live(&staging_path).unwrap();
+            let mut moved = sample_snapshot();
+            moved.nonce = "nonce-new".to_string();
+            insert_snapshot(&staging, &moved).unwrap();
+        }
+        let imp = sample_semantic_import(s1);
+        insert_semantic_import(&live, &imp).unwrap();
+        meta_set(&live, "semantic_generation", "1").unwrap();
+        let err = promote_staging(&live, &staging_path, &base).unwrap_err();
+        assert!(err.contains("semantic-changed"), "unexpected: {err}");
+        assert_eq!(semantic_generation(&live).unwrap(), 1);
+        assert_eq!(
+            latest_snapshot(&live).unwrap().unwrap().nonce,
+            "test-nonce-1"
+        );
+        // Order 2: stage from the new base (import included) → succeeds.
+        let staging2_path = dir.join("s2.db");
+        {
+            let staging = open_live(&staging2_path).unwrap();
+            let mut moved = sample_snapshot();
+            moved.nonce = "nonce-new".to_string();
+            let ns = insert_snapshot(&staging, &moved).unwrap();
+            insert_semantic_import(&staging, &sample_semantic_import(ns)).unwrap();
+        }
+        let base2 = live_base(&live).unwrap();
+        promote_staging(&live, &staging2_path, &base2).unwrap();
+        assert_eq!(latest_snapshot(&live).unwrap().unwrap().nonce, "nonce-new");
+    }
+
+    #[test]
+    fn carry_semantic_copies_verified_facts_only() {
+        let dir = tmpdir("store-carry");
+        let live_path = dir.join("live.db");
+        let live = open_live(&live_path).unwrap();
+        let old = insert_snapshot(&live, &sample_snapshot()).unwrap();
+        for (path, digest) in [("keep.py", "d1"), ("drop.py", "d2")] {
+            insert_file(
+                &live,
+                old,
+                &FileRow {
+                    path: path.to_string(),
+                    language: "python".to_string(),
+                    bytes: 1,
+                    digest: digest.to_string(),
+                    errors: 0,
+                },
+            )
+            .unwrap();
+        }
+        let imp = insert_semantic_import(&live, &sample_semantic_import(old)).unwrap();
+        for rel in ["keep.py", "drop.py"] {
+            let mut fact = sample_semantic_fact(old, imp, Some("s"));
+            fact.rel_path = rel.to_string();
+            insert_semantic_facts(&live, &[fact]).unwrap();
+        }
+        // Staging: new snapshot where keep.py verifies, drop.py changed.
+        let staging_path = dir.join("staging.db");
+        let staging = open_live(&staging_path).unwrap();
+        attach_src(&staging, &live_path).unwrap();
+        let mut moved = sample_snapshot();
+        moved.nonce = "nonce-new".to_string();
+        let ns = insert_snapshot(&staging, &moved).unwrap();
+        for (path, digest) in [("keep.py", "d1"), ("drop.py", "dX")] {
+            insert_file(
+                &staging,
+                ns,
+                &FileRow {
+                    path: path.to_string(),
+                    language: "python".to_string(),
+                    bytes: 1,
+                    digest: digest.to_string(),
+                    errors: 0,
+                },
+            )
+            .unwrap();
+        }
+        let carried = carry_semantic_facts(&staging, ns, old, "rev-new").unwrap();
+        assert_eq!(carried.imports, 1);
+        assert_eq!(carried.facts, 1, "only the digest-verified file carries");
+        let kept = semantic_facts_for(&staging, ns, "s").unwrap();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].rel_path, "keep.py");
+        assert!(kept[0].file_id.is_some());
+        // Import rebound to the new snapshot, original identity preserved.
+        let row: (i64, String, String) = staging
+            .query_row(
+                "SELECT snapshot_id, source_revision, content_identity FROM semantic_imports",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(row.0, ns);
+        assert_eq!(row.1, "rev-new");
+        assert_eq!(row.2, "ci-1");
+        detach_src(&staging).unwrap();
     }
 
     #[test]
