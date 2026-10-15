@@ -183,7 +183,9 @@ impl Evidence {
             roles: Roles::from_lsp_kind(false),
             relationships: Vec::new(),
             external: None,
-            precision: Precision::Exact,
+            // M5 honesty rule: no provider output is Exact without
+            // producer attestation (deferred with `Current`).
+            precision: Precision::Heuristic,
             verification: Verification::Unverified,
             provider: ProviderId {
                 name: "lsp-subprocess".to_string(),
