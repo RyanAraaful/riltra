@@ -1242,8 +1242,8 @@ mod tests {
         insert_import, insert_semantic_facts, insert_semantic_import, insert_snapshot,
         insert_symbol, is_readable_db, latest_snapshot, live_base, meta_get, meta_set, migrate,
         open_live, open_memory, promote_staging, search_symbols, semantic_facts_for,
-        semantic_generation, staging_path, FileRow, SemanticFact, SemanticImport, Snapshot,
-        SymbolRow, SCHEMA_VERSION,
+        semantic_generation, semantic_imports_for, staging_path, FileRow, SemanticFact,
+        SemanticImport, Snapshot, SymbolRow, SCHEMA_VERSION,
     };
     use crate::testutil::tmpdir;
     use std::path::Path;
@@ -1996,6 +1996,31 @@ mod tests {
         assert_eq!(snap.post_fingerprint, "post");
         assert_eq!(snap.status_at_write, "fresh");
         assert!(finish_snapshot(&conn, 9999, "x", "y").is_err());
+    }
+
+    #[test]
+    fn wal_reader_stable_across_semantic_commit() {
+        // Deterministic concurrency proof without threads: a reader inside a
+        // read transaction keeps seeing the old semantic generation while a
+        // writer commits an import. Fails without WAL snapshot reads.
+        let dir = tmpdir("store-sem-iso");
+        let path = dir.join("iso.db");
+        let writer = open_live(&path).unwrap();
+        let snap = insert_snapshot(&writer, &sample_snapshot()).unwrap();
+        insert_semantic_import(&writer, &sample_semantic_import(snap)).unwrap();
+        let mut reader = open_live(&path).unwrap();
+        let tx = reader.transaction().unwrap();
+        let before = semantic_generation(&tx).unwrap();
+        meta_set(&writer, "semantic_generation", "7").unwrap();
+        insert_semantic_import(&writer, &sample_semantic_import(snap)).unwrap();
+        assert_eq!(semantic_generation(&tx).unwrap(), before);
+        assert_eq!(
+            semantic_imports_for(&tx, snap).unwrap().len(),
+            1,
+            "reader keeps its snapshot"
+        );
+        drop(tx);
+        assert_eq!(semantic_generation(&writer).unwrap(), 7);
     }
 
     #[test]

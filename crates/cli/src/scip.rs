@@ -925,7 +925,7 @@ pub fn import_file(
 mod tests {
     use super::super::scip_proto::occurrence;
     use super::super::scip_proto::{
-        Document, Index, Metadata, Occurrence, PositionEncoding, SingleLineRange,
+        Document, Index, Metadata, MultiLineRange, Occurrence, PositionEncoding, SingleLineRange,
         SymbolInformation, TextEncoding, ToolInfo,
     };
     use super::*;
@@ -1454,5 +1454,138 @@ mod tests {
         assert!(err.is_err());
         assert!(seen < 200, "must abort mid-stream, saw {seen}/200 docs");
         assert!(!slice.is_empty(), "aborted stream must leave unread tail");
+    }
+
+    fn packed_occurrence(symbol: &str, roles: i32, range: &[i32]) -> Occurrence {
+        let mut occ = Occurrence::new();
+        occ.symbol = symbol.to_string();
+        occ.symbol_roles = roles;
+        occ.range = range.to_vec();
+        occ
+    }
+
+    /// Deprecated packed ranges decode exactly like typed ones; malformed
+    /// shapes skip the occurrence, never the document.
+    #[test]
+    fn packed_range_forms_decode() {
+        let content = "aa\nbb\ncc\n";
+        let s = setup(&[("src/p.ts", content)], &[]);
+        let sym = format!("{SCHEME_PKG} src/p.ts/x.");
+        let mut doc = utf8_doc("src/p.ts");
+        doc.occurrences = vec![
+            packed_occurrence(&sym, 0x1, &[0, 0, 2]), // single-line packed
+            packed_occurrence(&sym, 0x0, &[1, 0, 2, 1]), // two-line packed
+            packed_occurrence(&sym, 0x0, &[9, 9]),    // malformed: skipped
+        ];
+        doc.symbols = vec![symbol_info(&sym, "x")];
+        let bytes = encode_index(&s.dir, vec![doc], vec![]);
+        let path = write_scip(&s.dir, "index.scip", &bytes);
+        let out = import_file(
+            &s.conn,
+            s.snapshot_id,
+            &s.dir,
+            &path,
+            &ImportLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(out.definitions, 1);
+        assert_eq!(out.references, 1);
+        let facts = crate::store::semantic_facts_for(&s.conn, s.snapshot_id, &sym).unwrap();
+        assert_eq!(facts.len(), 2);
+        let single = facts.iter().find(|f| f.roles & 0x1 != 0).unwrap();
+        assert_eq!((single.byte_start, single.byte_end), (0, 2));
+        let multi = facts.iter().find(|f| f.roles & 0x1 == 0).unwrap();
+        assert_eq!((multi.start_line, multi.end_line), (1, 2));
+        assert_eq!((multi.byte_start, multi.byte_end), (3, 7));
+    }
+
+    #[test]
+    fn multiline_typed_and_empty_ranges() {
+        let content = "aa\nbb\n";
+        let s = setup(&[("src/m.ts", content)], &[]);
+        let sym = format!("{SCHEME_PKG} src/m.ts/x.");
+        let mut doc = utf8_doc("src/m.ts");
+        let mut multi = Occurrence::new();
+        multi.symbol = sym.clone();
+        multi.typed_range = Some(occurrence::Typed_range::MultiLineRange(MultiLineRange {
+            start_line: 0,
+            start_character: 1,
+            end_line: 1,
+            end_character: 1,
+            ..Default::default()
+        }));
+        let mut empty = Occurrence::new();
+        empty.symbol = sym.clone();
+        empty.typed_range = Some(occurrence::Typed_range::SingleLineRange(SingleLineRange {
+            line: 1,
+            start_character: 0,
+            end_character: 0,
+            ..Default::default()
+        }));
+        // Multi-line encoding of a single-line span: accepted (spec MUST).
+        let mut compact = Occurrence::new();
+        compact.symbol = sym.clone();
+        compact.typed_range = Some(occurrence::Typed_range::MultiLineRange(MultiLineRange {
+            start_line: 0,
+            start_character: 0,
+            end_line: 0,
+            end_character: 2,
+            ..Default::default()
+        }));
+        doc.occurrences = vec![multi, empty, compact];
+        doc.symbols = vec![symbol_info(&sym, "x")];
+        let bytes = encode_index(&s.dir, vec![doc], vec![]);
+        let path = write_scip(&s.dir, "index.scip", &bytes);
+        import_file(
+            &s.conn,
+            s.snapshot_id,
+            &s.dir,
+            &path,
+            &ImportLimits::default(),
+        )
+        .unwrap();
+        let facts = crate::store::semantic_facts_for(&s.conn, s.snapshot_id, &sym).unwrap();
+        assert_eq!(facts.len(), 3, "empty ranges are allowed occurrences");
+        let empty_fact = facts
+            .iter()
+            .find(|f| f.byte_start == f.byte_end)
+            .expect("empty span stored");
+        assert_eq!((empty_fact.start_line, empty_fact.byte_start), (1, 3));
+    }
+
+    /// Relationships are stored verbatim (including `is_definition`
+    /// overrides and `is_reference` closures) and never traversed here.
+    #[test]
+    fn relationships_stored_verbatim_not_traversed() {
+        let s = setup(&[("src/a.ts", A_TS)], &[]);
+        let mut a = utf8_doc("src/a.ts");
+        a.occurrences = vec![single_line(&foo_symbol(), 0x1, 0, 16, 19)];
+        let mut with_rel = SymbolInformation::new();
+        with_rel.symbol = foo_symbol();
+        with_rel.display_name = "foo".to_string();
+        let mut rel = crate::scip_proto::Relationship::new();
+        rel.symbol = format!("{SCHEME_PKG} src/base.ts/Animal#sound().");
+        rel.is_reference = true;
+        rel.is_implementation = true;
+        with_rel.relationships = vec![rel];
+        a.symbols = vec![with_rel];
+        let bytes = encode_index(&s.dir, vec![a], vec![]);
+        let path = write_scip(&s.dir, "index.scip", &bytes);
+        import_file(
+            &s.conn,
+            s.snapshot_id,
+            &s.dir,
+            &path,
+            &ImportLimits::default(),
+        )
+        .unwrap();
+        let facts =
+            crate::store::semantic_facts_for(&s.conn, s.snapshot_id, &foo_symbol()).unwrap();
+        assert_eq!(facts.len(), 1);
+        assert!(facts[0].relationships.contains("Animal#sound()"));
+        assert!(facts[0].relationships.contains("\"is_reference\":true"));
+        assert!(facts[0]
+            .relationships
+            .contains("\"is_implementation\":true"));
     }
 }

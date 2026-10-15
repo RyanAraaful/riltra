@@ -315,6 +315,11 @@ fn cli_import_is_atomic_and_binds_live_snapshot() {
     let (code, out, _) = run(&h, &["semantic", "status", "--repo", "sem"]);
     assert_eq!(code, 0);
     assert!(out.contains("\"imports\":[]"), "no import committed: {out}");
+    assert_eq!(
+        num(&out, "snapshot"),
+        snap_before,
+        "failed import mints nothing"
+    );
     // Valid import: binds the live snapshot, no new snapshot row minted.
     let (code, out, err) = run(
         &h,
@@ -372,6 +377,68 @@ fn cli_query_resolves_cross_file_def_ref() {
         ],
     );
     assert_eq!(code, 3);
+}
+
+#[test]
+fn cli_provider_unavailable_falls_back_with_syntax_intact() {
+    let h = home("fallback");
+    let (_dir, scip) = ab_repo(&h);
+    do_index(&h);
+    let (code, _, err) = run(
+        &h,
+        &["semantic", "import", "--repo", "sem", "--scip", &scip],
+    );
+    assert_eq!(code, 0, "{err}");
+    // Missing server binary: explicit fallback payload, exit 0 (expected
+    // condition, not a usage error), syntax search untouched.
+    let missing_abs = h.join("no-such-server").to_string_lossy().to_string();
+    let (code, out, err) = run(
+        &h,
+        &[
+            "semantic",
+            "query",
+            "--repo",
+            "sem",
+            "--path",
+            "src/a.ts",
+            "--line",
+            "1",
+            "--col",
+            "17",
+            "--lsp-server",
+            &missing_abs,
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        out.contains("\"status\":\"fallback\""),
+        "fallback reported: {out}"
+    );
+    assert!(out.contains("\"syntax_fallback\":true"));
+    let (code, out, _) = run(&h, &["search", "--repo", "sem", "--symbol", "foo"]);
+    assert_eq!(code, 0);
+    assert!(out.contains("foo"), "syntax search intact: {out}");
+}
+
+#[test]
+fn cli_repo_isolation_holds_for_semantics() {
+    let h = home("isolation");
+    let (_dir, scip) = ab_repo(&h);
+    do_index(&h);
+    let (code, _, err) = run(
+        &h,
+        &["semantic", "import", "--repo", "sem", "--scip", &scip],
+    );
+    assert_eq!(code, 0, "{err}");
+    repo_with(&h, "other", &[("z.py", "x = 1\n")]);
+    let (code, _, err) = run(&h, &["index", "--repo", "other"]);
+    assert_eq!(code, 0, "{err}");
+    let (code, out, _) = run(&h, &["semantic", "status", "--repo", "other"]);
+    assert_eq!(code, 0);
+    assert!(
+        out.contains("\"imports\":[]"),
+        "facts never leak across repos: {out}"
+    );
 }
 
 #[test]
