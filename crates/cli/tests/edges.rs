@@ -12,6 +12,8 @@ static COUNTER: AtomicU64 = AtomicU64::new(20_000);
 
 #[path = "m6_corpus/mod.rs"]
 mod task7;
+#[path = "m6_corpus/upgrade.rs"]
+mod task7_upgrade;
 
 fn home(tag: &str) -> PathBuf {
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);

@@ -1,5 +1,11 @@
 # M6 Task 7 validation — multilingual golden corpus
 
+> Audit correction: checkpoint `7964219` received REVISE for persisted-graph
+> upgrade compatibility. The corrective checkpoint and current 402-test
+> results are in [the correction report](m6-task7-correction-validation.md).
+> The original corpus evidence below remains valid; uncertified old graph
+> queries now fail closed until writer-side revalidation succeeds.
+
 Local Task 7 checkpoint on `m6-task7-multilanguage-corpus`, based on accepted
 Task 6 commit `453a1b6f00d89f24d11e6d2346722047f10b7d1b`. The commit carrying
 this report is the audit unit. No push, Task 8 pilot, external indexer/LSP
@@ -107,8 +113,9 @@ optimization or new cross-request cache was introduced. Parse errors, stale
 bytes, missing files and unsupported encodings can reduce proven coverage;
 they cannot authorize a speculative CALLS edge. The new fail-closed unit test
 checks changed and missing files. Old graph rows produced before this fix
-need semantic reimport or `riltra index --full` to be re-derived; merely
-upgrading the binary does not rewrite stored relationships.
+need semantic reimport or `riltra index --full` to be re-derived. The Task 7
+correction rejects queries until current proof metadata certifies the graph;
+upgrading alone cannot authorize the old stored relationships.
 
 Existing in-memory derivation tests now write their actual source into
 temporary snapshot roots so they exercise real source evidence. Their

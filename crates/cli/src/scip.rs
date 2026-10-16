@@ -992,12 +992,19 @@ pub fn import_file(
         ],
     )
     .map_err(|e| e.to_string())?;
+    let graph_was_proven = store::graph_proof_current(conn, snapshot_id)?;
     let generation = store::semantic_generation(conn)?;
     store::meta_set(conn, "semantic_generation", &(generation + 1).to_string())?;
-    // Graph lifecycle: semantic-backed edges for this import only, in the
-    // same transaction — failure rolls back with the import, never partial.
-    // No syntax reparsing; syntax-only potentials stay until resolved here.
-    crate::edges::upsert_semantic_edges(conn, snapshot_id, import_id)?;
+    // Task7 source-proof validation may reparse digest-matching source during
+    // derivation. Certification shares this transaction with facts and edges;
+    // any failure rolls back all of them, including the generation counter.
+    if graph_was_proven {
+        crate::edges::upsert_semantic_edges(conn, snapshot_id, import_id)?;
+        store::mark_graph_proof(conn, snapshot_id)?;
+    } else {
+        // A single refreshed import cannot certify untouched legacy rows.
+        crate::edges::rederive_after_carry(conn, snapshot_id)?;
+    }
     if state.extra_skips > 0 {
         state.skipped.push(format!("…({} more)", state.extra_skips));
     }

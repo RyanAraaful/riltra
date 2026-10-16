@@ -852,6 +852,43 @@ pub fn semantic_generation(conn: &Connection) -> Result<i64, String> {
     }
 }
 
+// Bump when persisted relationship proof rules change. This is derivation
+// compatibility metadata, independent of the SQLite schema version.
+const GRAPH_PROOF_REVISION: &str = "m6-task7-source-proof-1";
+
+fn graph_proof_token(conn: &Connection, snapshot_id: i64) -> Result<String, String> {
+    let nonce: String = conn
+        .query_row(
+            "SELECT nonce FROM snapshots WHERE id=?1",
+            [snapshot_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(format!(
+        "{GRAPH_PROOF_REVISION}:{nonce}:{}",
+        semantic_generation(conn)?
+    ))
+}
+
+pub fn graph_proof_current(conn: &Connection, snapshot_id: i64) -> Result<bool, String> {
+    Ok(meta_get(conn, "graph_proof")?.as_deref()
+        == Some(graph_proof_token(conn, snapshot_id)?.as_str()))
+}
+
+/// Call only after the entire graph is derived, or after updating an import
+/// whose preexisting graph was already certified, inside the writer txn.
+pub fn mark_graph_proof(conn: &Connection, snapshot_id: i64) -> Result<(), String> {
+    meta_set(conn, "graph_proof", &graph_proof_token(conn, snapshot_id)?)
+}
+
+pub fn require_graph_proof(conn: &Connection, snapshot_id: i64) -> Result<(), String> {
+    if graph_proof_current(conn, snapshot_id)? {
+        Ok(())
+    } else {
+        Err("graph-proof-incompatible: validate stored relationships with semantic import or index --full before graph queries".to_string())
+    }
+}
+
 /// Content identity of one snapshot: digest over sorted `(path, digest)`
 /// pairs. Snapshot nonces prove rebuild identity; this proves the bytes.
 /// Compared independently of git HEAD/dirty/untracked (Task 6 rule).
@@ -1000,7 +1037,7 @@ pub fn promote_staging(
             return Err("semantic-changed: live database advanced during build".to_string());
         }
         live.execute_batch(
-            "DELETE FROM symbols;
+            &format!("DELETE FROM symbols;
              DELETE FROM imports;
              DELETE FROM calls;
              DELETE FROM files;
@@ -1016,12 +1053,19 @@ pub fn promote_staging(
              INSERT INTO semantic_imports SELECT * FROM src.semantic_imports;
              INSERT INTO semantic_facts SELECT * FROM src.semantic_facts;
              INSERT INTO code_edges SELECT * FROM src.code_edges;
-             COMMIT;",
+             DELETE FROM meta WHERE key='graph_proof';
+             INSERT INTO meta(key,value)
+             SELECT 'graph_proof', '{GRAPH_PROOF_REVISION}:' || s.nonce || ':' || COALESCE((SELECT value FROM meta WHERE key='semantic_generation'),'0')
+             FROM src.snapshots s WHERE s.id=(SELECT MAX(id) FROM src.snapshots)
+             AND (SELECT value FROM src.meta WHERE key='graph_proof') =
+                 '{GRAPH_PROOF_REVISION}:' || s.nonce || ':' || COALESCE((SELECT value FROM src.meta WHERE key='semantic_generation'),'0');
+             COMMIT;"),
         )
         .map_err(|e| format!("promote failed, live snapshot intact: {e}"))?;
         Ok(())
     })();
     if copied.is_err() {
+        let _ = live.execute_batch("ROLLBACK;");
         let _ = live.execute_batch("DETACH DATABASE src;");
         return copied;
     }
@@ -1983,6 +2027,67 @@ mod tests {
             status_at_write: "fresh".to_string(),
             nonce: "test-nonce-1".to_string(),
         }
+    }
+
+    #[test]
+    fn task7_promotion_only_transfers_matching_staging_proof() {
+        for state in ["missing", "mismatch", "current"] {
+            let dir = tmpdir(&format!("proof-transfer-{state}"));
+            let live = open_live(&dir.join("live.db")).unwrap();
+            let live_id = insert_snapshot(&live, &sample_snapshot()).unwrap();
+            meta_set(&live, "semantic_generation", "7").unwrap();
+            super::mark_graph_proof(&live, live_id).unwrap();
+            let base = live_base(&live).unwrap();
+            let path = dir.join("stage.db");
+            let staging = open_live(&path).unwrap();
+            let mut snap = sample_snapshot();
+            snap.nonce = "staged-proof-snapshot".to_string();
+            let id = insert_snapshot(&staging, &snap).unwrap();
+            meta_set(&staging, "semantic_generation", "3").unwrap();
+            match state {
+                "current" => super::mark_graph_proof(&staging, id).unwrap(),
+                "mismatch" => meta_set(&staging, "graph_proof", "future:wrong-snapshot:3").unwrap(),
+                _ => {}
+            }
+            drop(staging);
+            promote_staging(&live, &path, &base).unwrap();
+            assert_eq!(semantic_generation(&live).unwrap(), 7);
+            assert_eq!(latest_snapshot(&live).unwrap().unwrap().nonce, snap.nonce);
+            assert_eq!(
+                super::graph_proof_current(&live, id).unwrap(),
+                state == "current"
+            );
+            if state != "current" {
+                assert!(meta_get(&live, "graph_proof").unwrap().is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn task7_failed_proof_promotion_rolls_back_retained_connection() {
+        let dir = tmpdir("proof-rollback");
+        let live = open_live(&dir.join("live.db")).unwrap();
+        let id = insert_snapshot(&live, &sample_snapshot()).unwrap();
+        super::mark_graph_proof(&live, id).unwrap();
+        let base = live_base(&live).unwrap();
+        let before = meta_get(&live, "graph_proof").unwrap();
+        let path = dir.join("stage.db");
+        let staging = open_live(&path).unwrap();
+        let mut next = sample_snapshot();
+        next.nonce = "new-proof-snapshot".to_string();
+        let id = insert_snapshot(&staging, &next).unwrap();
+        super::mark_graph_proof(&staging, id).unwrap();
+        drop(staging);
+        live.execute_batch("CREATE TRIGGER reject_proof BEFORE INSERT ON meta WHEN NEW.key='graph_proof' BEGIN SELECT RAISE(ABORT,'proof fail'); END;").unwrap();
+        assert!(promote_staging(&live, &path, &base)
+            .unwrap_err()
+            .contains("proof fail"));
+        assert!(
+            live.is_autocommit(),
+            "failed proof promotion must finish rollback before returning"
+        );
+        assert_eq!(live_base(&live).unwrap(), base);
+        assert_eq!(meta_get(&live, "graph_proof").unwrap(), before);
     }
 
     fn sample_symbol(file_id: i64, name: &str) -> SymbolRow {

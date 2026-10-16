@@ -1431,6 +1431,7 @@ pub fn rederive_after_carry(
         totals.potential += stats.potential;
         totals.references += stats.references;
     }
+    store::mark_graph_proof(conn, snapshot_id)?;
     Ok(totals)
 }
 

@@ -1825,6 +1825,7 @@ fn edge_query_inner(
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     let snapshot = store::latest_snapshot(&tx)?.ok_or("no snapshot: index the repository first")?;
     pinned();
+    store::require_graph_proof(&tx, snapshot.id)?;
     let (freshness, mut freshness_reasons) = evaluate_snapshot(&tx, name, &canon, &snapshot);
     freshness_reasons.sort();
     freshness_reasons.dedup();
@@ -2070,6 +2071,7 @@ fn graph_query_inner(
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     let snapshot = store::latest_snapshot(&tx)?.ok_or("no snapshot: index the repository first")?;
     pinned();
+    store::require_graph_proof(&tx, snapshot.id)?;
     let anchor = resolve_edge_anchor(
         &tx,
         snapshot.id,
