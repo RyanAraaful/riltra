@@ -21,6 +21,8 @@ pub struct RecordVersion {
     pub created_unix: i64,
     /// Present exactly when the revision carries benchmark measurement.
     pub measurement: Option<BenchmarkData>,
+    /// Stored source bindings captured with this revision (immutable).
+    pub evidence: Vec<CapturedEvidence>,
 }
 
 /// Input for creating a record. There is deliberately no way to express a
@@ -280,13 +282,70 @@ fn req_int_non_negative(value: &JVal, path: &str) -> Result<i64, String> {
     }
 }
 
-/// A validated evidence reference. Digest and Git capture belong to Task 4;
-/// Task 3 validates shape, spans and count only.
+/// A validated evidence reference: repository-relative path plus an optional
+/// half-open raw byte span. Shape, spans and count are validated at parse
+/// time; the store captures digests and Git metadata at write time.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EvidenceRef {
     pub path: String,
     pub byte_start: Option<i64>,
     pub byte_end: Option<i64>,
+}
+
+/// An observed source binding captured at write time: repository-relative
+/// path, optional half-open raw byte span, content digest of the cited bytes
+/// (span slice, or the whole file when no span), and Git revision metadata
+/// when available. This is an observation, never proof that the source
+/// supports the prose: every claim stays [`VERIFICATION_UNVERIFIED`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct CapturedEvidence {
+    pub path: String,
+    pub byte_start: Option<i64>,
+    pub byte_end: Option<i64>,
+    pub digest: String,
+    pub git_head: Option<String>,
+    pub git_branch: Option<String>,
+}
+
+/// Freshness of one stored binding against a live repository root.
+/// Filesystem observations are sampled separately from the knowledge-row read
+/// transaction: they never establish an atomic snapshot of the working tree.
+#[derive(Debug, Clone, PartialEq)]
+pub enum EvidenceFreshness {
+    /// Live bytes match the recorded digest.
+    Fresh,
+    /// Live bytes differ (or the cited span no longer fits): the original
+    /// path/span/digest are preserved, `observed_digest` names what is there.
+    Stale { observed_digest: String },
+    /// The binding cannot be sampled (missing, escaping, unreadable,
+    /// over-cap): `reason` names why. Never a replacement target.
+    Unresolved { reason: String },
+}
+
+impl EvidenceFreshness {
+    /// Inspectable one-word reason for logs and future JSON output.
+    pub fn label(&self) -> &'static str {
+        match self {
+            EvidenceFreshness::Fresh => "fresh",
+            EvidenceFreshness::Stale { .. } => "stale",
+            EvidenceFreshness::Unresolved { .. } => "unresolved",
+        }
+    }
+}
+
+/// Knowledge claims are authored, never automatically verified — not even
+/// when every cited source is fresh. No stored digest certifies prose.
+pub const VERIFICATION_UNVERIFIED: &str = "Unverified";
+
+/// Support summary for a revision's evidence count: no evidence means
+/// unknown support, never a completeness or safety claim. Non-empty evidence
+/// is still [`VERIFICATION_UNVERIFIED`], never verified.
+pub fn evidence_support(evidence_count: usize) -> &'static str {
+    if evidence_count == 0 {
+        "unknown"
+    } else {
+        "unverified"
+    }
 }
 
 /// One named benchmark metric with an explicit unit. Values must be finite;

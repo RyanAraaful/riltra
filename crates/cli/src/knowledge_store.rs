@@ -530,35 +530,201 @@ fn record_from_row(row: &rusqlite::Row) -> rusqlite::Result<RecordVersion> {
         author: row.get(6)?,
         created_unix: row.get(7)?,
         measurement: None,
+        evidence: Vec::new(),
     })
 }
 
 const RECORD_COLS: &str = "id, revision, kind, title, body, status, author, created_unix";
 
+/// Stored binding root: the canonical root this store is bound to (verified
+/// against the registry entry at open), resolved from metadata so evidence
+/// capture needs no extra caller plumbing. Fails closed when the root is
+/// gone: no binding is fabricated.
+fn capture_root(conn: &Connection) -> Result<PathBuf, String> {
+    let path = PathBuf::from(meta_value(conn, "canonical_root")?);
+    if !path.is_dir() {
+        return Err("cannot capture evidence: repository root unavailable".to_string());
+    }
+    Ok(path)
+}
+
+/// Capture evidence bindings before any mutation: confined bounded reads
+/// (confinement, symlink escape, readability, 1 MiB cap) plus a span-bounds
+/// check against the bytes actually read. Any failure rejects the whole
+/// mutation before a write transaction starts. Digests cover the cited span
+/// slice, or the whole file when no span is given. Git HEAD/branch is a
+/// best-effort observation, never a failure.
+fn capture_evidence(
+    conn: &Connection,
+    refs: &[crate::knowledge::EvidenceRef],
+) -> Result<Vec<crate::knowledge::CapturedEvidence>, String> {
+    if refs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let root = capture_root(conn)?;
+    let git = crate::git::fingerprint(&root);
+    let mut out = Vec::with_capacity(refs.len());
+    for item in refs {
+        let bytes = crate::semantic::confined_read(&root, &item.path, crate::scan::MAX_FILE_BYTES)
+            .map_err(|e| format!("cannot capture evidence '{}': {e}", item.path))?;
+        let len = bytes.len() as u64;
+        // Parser guarantees non-negative bounds and byte_end > byte_start
+        // when both are present; the file decides whether they still bind.
+        let start = item.byte_start.map(|v| v as u64).unwrap_or(0);
+        let end = item.byte_end.map(|v| v as u64).unwrap_or(len);
+        let explicit_span = item.byte_start.is_some() || item.byte_end.is_some();
+        if end > len || start > len || (explicit_span && start >= end) {
+            return Err(format!(
+                "cannot capture evidence '{}': span [{start},{end}) binds no bytes \
+                 in {} source bytes",
+                item.path,
+                bytes.len()
+            ));
+        }
+        let cited = &bytes[start as usize..end as usize];
+        out.push(crate::knowledge::CapturedEvidence {
+            path: item.path.clone(),
+            byte_start: item.byte_start,
+            byte_end: item.byte_end,
+            digest: crate::store::content_digest(cited),
+            git_head: git.head.clone(),
+            git_branch: git.branch.clone(),
+        });
+    }
+    Ok(out)
+}
+
+fn write_evidence(
+    tx: &Transaction,
+    id: &str,
+    revision: i64,
+    items: &[crate::knowledge::CapturedEvidence],
+) -> Result<(), String> {
+    for (seq, item) in items.iter().enumerate() {
+        tx.execute(
+            "INSERT INTO evidence (id, revision, seq, path, byte_start, byte_end,
+              digest, git_head, git_branch)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![
+                id,
+                revision,
+                seq as i64,
+                item.path,
+                item.byte_start,
+                item.byte_end,
+                item.digest,
+                item.git_head,
+                item.git_branch,
+            ],
+        )
+        .map_err(|e| format!("cannot store evidence: {e}"))?;
+    }
+    Ok(())
+}
+
+fn read_evidence(
+    conn: &Connection,
+    id: &str,
+    revision: i64,
+) -> Result<Vec<crate::knowledge::CapturedEvidence>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT path, byte_start, byte_end, digest, git_head, git_branch
+             FROM evidence WHERE id = ?1 AND revision = ?2 ORDER BY seq",
+        )
+        .map_err(|e| format!("cannot read evidence: {e}"))?;
+    let items = stmt
+        .query_map(rusqlite::params![id, revision], |row| {
+            Ok(crate::knowledge::CapturedEvidence {
+                path: row.get(0)?,
+                byte_start: row.get(1)?,
+                byte_end: row.get(2)?,
+                digest: row.get(3)?,
+                git_head: row.get(4)?,
+                git_branch: row.get(5)?,
+            })
+        })
+        .map_err(|e| format!("cannot read evidence: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("cannot read evidence: {e}"))?;
+    Ok(items)
+}
+
+/// Sample one stored binding against a live root. Knowledge rows come from
+/// the caller's read; this sampling is separate and reported honestly:
+/// neither the row read nor an unchanged Git HEAD snapshots the tree, and a
+/// matching digest never verifies the prose.
+pub fn evidence_freshness(
+    recorded: &crate::knowledge::CapturedEvidence,
+    repo_root: &Path,
+) -> crate::knowledge::EvidenceFreshness {
+    use crate::knowledge::EvidenceFreshness as Fresh;
+    let bytes = match crate::semantic::confined_read(
+        repo_root,
+        &recorded.path,
+        crate::scan::MAX_FILE_BYTES,
+    ) {
+        Ok(found) => found,
+        Err(e) => return Fresh::Unresolved { reason: e },
+    };
+    let len = bytes.len() as u64;
+    let start = recorded.byte_start.map(|v| v as u64).unwrap_or(0);
+    let end = recorded.byte_end.map(|v| v as u64).unwrap_or(len);
+    // A span that no longer fits means the cited bytes changed (truncated
+    // away): stale, with the current full-file digest as observed state. A
+    // bare path on an empty file still binds (start == end == 0), matching
+    // capture; only an explicit span can go stale-empty.
+    let explicit_span = recorded.byte_start.is_some() || recorded.byte_end.is_some();
+    if end > len || start > len || (explicit_span && start >= end) {
+        return Fresh::Stale {
+            observed_digest: crate::store::content_digest(&bytes),
+        };
+    }
+    let live = crate::store::content_digest(&bytes[start as usize..end as usize]);
+    if live == recorded.digest {
+        Fresh::Fresh
+    } else {
+        Fresh::Stale {
+            observed_digest: live,
+        }
+    }
+}
+
 /// Create revision 1 of a new record. Fails on duplicates, invalid input, or
 /// path revalidation; failures commit nothing and bump no generation.
-/// Benchmark records require measurement: use [`create_validated`].
 pub fn create_record(conn: &mut Connection, input: &NewRecord) -> Result<(u64, u64), String> {
-    create_inner(conn, input, None, false)
+    create_inner(conn, input, None, &[], false)
 }
 
 /// Create revision 1 from strictly validated JSON input, persisting benchmark
-/// measurement atomically with the revision when present.
+/// measurement and captured evidence atomically with the revision.
 pub fn create_validated(
     conn: &mut Connection,
     input: &crate::knowledge::ValidatedNew,
 ) -> Result<(u64, u64), String> {
-    create_inner(conn, &input.record, input.measurement.as_ref(), false)
+    create_inner(
+        conn,
+        &input.record,
+        input.measurement.as_ref(),
+        &input.evidence,
+        false,
+    )
 }
 
-/// Test-only fault injector: fails after the records insert to prove the
-/// whole creation rolls back.
+/// Test-only fault injector: fails after the records and evidence inserts to
+/// prove the whole creation rolls back.
 #[cfg(test)]
 pub(crate) fn create_validated_with_fault(
     conn: &mut Connection,
     input: &crate::knowledge::ValidatedNew,
 ) -> Result<(u64, u64), String> {
-    create_inner(conn, &input.record, input.measurement.as_ref(), true)
+    create_inner(
+        conn,
+        &input.record,
+        input.measurement.as_ref(),
+        &input.evidence,
+        true,
+    )
 }
 
 fn write_measurement(
@@ -595,6 +761,7 @@ fn create_inner(
     conn: &mut Connection,
     input: &NewRecord,
     measurement: Option<&crate::knowledge::BenchmarkData>,
+    evidence: &[crate::knowledge::EvidenceRef],
     inject_fault: bool,
 ) -> Result<(u64, u64), String> {
     crate::knowledge::validate_new(input)?;
@@ -602,6 +769,10 @@ fn create_inner(
         return Err("benchmark records require measurement".to_string());
     }
     revalidate_open_paths(conn)?;
+    // Source bindings are sampled before the write transaction starts: any
+    // confinement, readability, cap or span failure rejects the mutation
+    // with nothing committed.
+    let captured = capture_evidence(conn, evidence)?;
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|e| format!("cannot begin knowledge write: {e}"))?;
@@ -629,9 +800,13 @@ fn create_inner(
         ],
     )
     .map_err(|e| format!("cannot insert record revision: {e}"))?;
+    // Evidence rows precede the fault hook so the injector proves they roll
+    // back with everything else; heads, FTS, measurement and generation join
+    // the same transaction below.
+    write_evidence(&tx, &input.id, 1, &captured)?;
     if inject_fault {
         // Test hook: drop the transaction here to prove partial writes roll
-        // back fully (no head, FTS, measurement or generation survives).
+        // back fully (no head, FTS, evidence, measurement or generation survives).
         return Err("injected write failure".to_string());
     }
     tx.execute(
@@ -657,14 +832,14 @@ pub fn update_record(
     expected_revision: u64,
     input: &UpdateRecord,
 ) -> Result<(u64, u64), String> {
-    update_inner(conn, id, expected_revision, input, None, false)
+    update_inner(conn, id, expected_revision, input, None, &[], false)
 }
 
 /// Update from strictly validated JSON input. A supplied measurement replaces
 /// the claim on the new revision; when absent on a benchmark revision, the
 /// previous revision's measurement is carried forward unchanged so reads stay
-/// complete. Evidence refs are validated at parse time; capture belongs to
-/// Task 4.
+/// complete. Evidence refs are captured fresh for the new revision; older
+/// revisions keep their original bindings.
 pub fn update_validated(
     conn: &mut Connection,
     id: &str,
@@ -677,12 +852,13 @@ pub fn update_validated(
         expected_revision,
         &input.record,
         input.measurement.as_ref(),
+        &input.evidence,
         false,
     )
 }
 
-/// Test-only fault injector: fails after the records insert to prove the
-/// whole update rolls back.
+/// Test-only fault injector: fails after the records and evidence inserts to
+/// prove the whole update rolls back.
 #[cfg(test)]
 pub(crate) fn update_validated_with_fault(
     conn: &mut Connection,
@@ -696,6 +872,7 @@ pub(crate) fn update_validated_with_fault(
         expected_revision,
         &input.record,
         input.measurement.as_ref(),
+        &input.evidence,
         true,
     )
 }
@@ -730,10 +907,14 @@ fn update_inner(
     expected_revision: u64,
     input: &UpdateRecord,
     measurement: Option<&crate::knowledge::BenchmarkData>,
+    evidence: &[crate::knowledge::EvidenceRef],
     inject_fault: bool,
 ) -> Result<(u64, u64), String> {
     crate::knowledge::validate_update(input)?;
     revalidate_open_paths(conn)?;
+    // Same pre-transaction capture as creation: bad bindings reject the
+    // update with nothing committed.
+    let captured = capture_evidence(conn, evidence)?;
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|e| format!("cannot begin knowledge write: {e}"))?;
@@ -792,9 +973,12 @@ fn update_inner(
         ],
     )
     .map_err(|e| format!("cannot insert record revision: {e}"))?;
+    // Evidence rows precede the fault hook so the injector proves they roll
+    // back with everything else.
+    write_evidence(&tx, id, next_i64, &captured)?;
     if inject_fault {
         // Test hook: drop the transaction here to prove partial writes roll
-        // back fully (no head, FTS, measurement or generation survives).
+        // back fully (no head, FTS, evidence, measurement or generation survives).
         return Err("injected write failure".to_string());
     }
     tx.execute(
@@ -892,6 +1076,7 @@ pub fn show_record(
             _ => format!("unknown record revision: '{id}' rev {rev}"),
         })?;
     record.measurement = read_measurement(conn, id, rev_i64)?;
+    record.evidence = read_evidence(conn, id, rev_i64)?;
     Ok(record)
 }
 
@@ -979,6 +1164,7 @@ fn history_inner(
             let rev_i64 = i64::try_from(record.revision)
                 .map_err(|_| "corrupt knowledge store: stored revision out of range".to_string())?;
             record.measurement = read_measurement(conn, id, rev_i64)?;
+            record.evidence = read_evidence(conn, id, rev_i64)?;
         }
         let end = offset.saturating_add(revisions.len());
         Ok(HistoryPage {
@@ -2272,6 +2458,279 @@ mod tests {
             )
             .unwrap();
         assert_eq!(hits, 0);
+        conn.close().unwrap();
+    }
+
+    use crate::knowledge::{evidence_support, EvidenceFreshness, VERIFICATION_UNVERIFIED};
+
+    fn repo_root(repo: &RepoEntry) -> PathBuf {
+        PathBuf::from(&repo.root)
+    }
+
+    fn create_json_with_evidence(id: &str, refs_json: &str) -> String {
+        format!(
+            "{{\"id\":\"{id}\",\"kind\":\"decision\",\"title\":\"t\",\"body\":\"b\",\
+             \"status\":\"active\",\"author\":\"r\",\"evidence\":[{refs_json}]}}"
+        )
+    }
+
+    fn update_json_with_evidence(refs_json: &str) -> String {
+        format!(
+            "{{\"title\":\"t2\",\"body\":\"b2\",\"status\":\"active\",\"author\":\"r\",\
+             \"evidence\":[{refs_json}]}}"
+        )
+    }
+
+    #[test]
+    fn evidence_write_captures_span_digest_and_reports_fresh() {
+        let (home, repo) = setup("evfresh");
+        let root = repo_root(&repo);
+        std::fs::write(root.join("src.rs"), b"0123456789abcdef").unwrap();
+        let raw =
+            create_json_with_evidence("d1", r#"{"path":"src.rs","byte_start":0,"byte_end":8}"#);
+        let input = validate_create_json(raw.as_bytes()).unwrap();
+        let mut conn = open_rw(&home, &repo);
+        let (rev, _) = create_validated(&mut conn, &input).unwrap();
+        assert_eq!(rev, 1);
+        let shown = show_record(&conn, "d1", None).unwrap();
+        assert_eq!(shown.evidence.len(), 1);
+        let ev = &shown.evidence[0];
+        assert_eq!(ev.path, "src.rs");
+        assert_eq!((ev.byte_start, ev.byte_end), (Some(0), Some(8)));
+        assert_eq!(
+            ev.digest,
+            crate::store::content_digest(b"01234567"),
+            "digest covers the cited span bytes"
+        );
+        // Tmp fixtures are never git repositories: metadata stays absent
+        // rather than fabricated.
+        assert!(ev.git_head.is_none() && ev.git_branch.is_none());
+        assert!(matches!(
+            evidence_freshness(ev, &root),
+            EvidenceFreshness::Fresh
+        ));
+        // Fresh source bytes never verify the prose.
+        assert_eq!(VERIFICATION_UNVERIFIED, "Unverified");
+        conn.close().unwrap();
+    }
+
+    #[test]
+    fn evidence_changed_bytes_report_stale_preserving_original() {
+        let (home, repo) = setup("evstale");
+        let root = repo_root(&repo);
+        std::fs::write(root.join("a.rs"), b"AAAAAAAA").unwrap();
+        let raw = create_json_with_evidence("d1", r#"{"path":"a.rs"}"#);
+        let input = validate_create_json(raw.as_bytes()).unwrap();
+        let mut conn = open_rw(&home, &repo);
+        create_validated(&mut conn, &input).unwrap();
+        std::fs::write(root.join("a.rs"), b"BBBBBBBB").unwrap();
+        let shown = show_record(&conn, "d1", None).unwrap();
+        let ev = &shown.evidence[0];
+        assert_eq!(
+            ev.digest,
+            crate::store::content_digest(b"AAAAAAAA"),
+            "stored binding keeps the original digest"
+        );
+        match evidence_freshness(ev, &root) {
+            EvidenceFreshness::Stale { observed_digest } => {
+                assert_eq!(observed_digest, crate::store::content_digest(b"BBBBBBBB"))
+            }
+            other => panic!("expected stale, got {other:?}"),
+        }
+        // Truncation below the cited span is drift, not an empty binding.
+        std::fs::write(root.join("a.rs"), b"AB").unwrap();
+        assert!(matches!(
+            evidence_freshness(&shown.evidence[0], &root),
+            EvidenceFreshness::Stale { .. }
+        ));
+        conn.close().unwrap();
+    }
+
+    #[test]
+    fn evidence_missing_overcap_unreadable_resolve_unresolved() {
+        let (home, repo) = setup("evunres");
+        let root = repo_root(&repo);
+        std::fs::write(root.join("f.rs"), b"hello").unwrap();
+        let raw = create_json_with_evidence("d1", r#"{"path":"f.rs"}"#);
+        let input = validate_create_json(raw.as_bytes()).unwrap();
+        let mut conn = open_rw(&home, &repo);
+        create_validated(&mut conn, &input).unwrap();
+        let recorded = show_record(&conn, "d1", None).unwrap().evidence;
+        assert_eq!(recorded.len(), 1);
+        // Missing file: unresolved with a reason, never a replacement.
+        std::fs::remove_file(root.join("f.rs")).unwrap();
+        match evidence_freshness(&recorded[0], &root) {
+            EvidenceFreshness::Unresolved { reason } => assert!(!reason.is_empty()),
+            other => panic!("missing file must be unresolved, got {other:?}"),
+        }
+        // Grown past the source cap: unreadable for binding purposes.
+        let big = vec![b'x'; crate::scan::MAX_FILE_BYTES as usize + 1];
+        std::fs::write(root.join("f.rs"), &big).unwrap();
+        assert!(matches!(
+            evidence_freshness(&recorded[0], &root),
+            EvidenceFreshness::Unresolved { .. }
+        ));
+        // Path replaced by a directory: not readable as source bytes.
+        std::fs::remove_file(root.join("f.rs")).unwrap();
+        std::fs::create_dir(root.join("f.rs")).unwrap();
+        assert!(matches!(
+            evidence_freshness(&recorded[0], &root),
+            EvidenceFreshness::Unresolved { .. }
+        ));
+        conn.close().unwrap();
+    }
+
+    #[test]
+    fn evidence_outside_root_and_escape_reject_mutation() {
+        let (home, repo) = setup("evreject");
+        let root = repo_root(&repo);
+        let outside_dir = tmpdir("m7-ev-outside");
+        std::fs::write(outside_dir.join("o.rs"), b"outside").unwrap();
+        std::fs::write(root.join("inside.rs"), b"inside").unwrap();
+        let mut conn = open_rw(&home, &repo);
+        for refs in [
+            r#"{"path":"../escape.rs"}"#.to_string(),
+            r#"{"path":"/absolute.rs"}"#.to_string(),
+            r#"{"path":"missing-never.rs"}"#.to_string(),
+        ] {
+            let raw = create_json_with_evidence("dx", &refs);
+            let input = validate_create_json(raw.as_bytes()).unwrap();
+            assert!(
+                create_validated(&mut conn, &input).is_err(),
+                "refs {refs} must reject the whole mutation"
+            );
+        }
+        // Symlink escape: a link inside the root resolving outside.
+        let link = root.join("link.rs");
+        let target = outside_dir.join("o.rs");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        #[cfg(windows)]
+        match plant_link(&link, &target) {
+            Some(_) => {}
+            None => {
+                eprintln!("NOT TESTED: cannot plant links in this environment");
+                return;
+            }
+        }
+        let raw = create_json_with_evidence("dx", r#"{"path":"link.rs"}"#);
+        let input = validate_create_json(raw.as_bytes()).unwrap();
+        let err = create_validated(&mut conn, &input).unwrap_err();
+        assert!(
+            err.contains("escape") || err.contains("evidence"),
+            "unexpected: {err}"
+        );
+        // Nothing committed, generation untouched.
+        assert!(show_record(&conn, "dx", None).is_err());
+        assert_eq!(read_generation(&conn).unwrap(), 0);
+        conn.close().unwrap();
+    }
+
+    #[test]
+    fn evidence_span_beyond_file_rejects_mutation() {
+        let (home, repo) = setup("evspan");
+        let root = repo_root(&repo);
+        std::fs::write(root.join("s.rs"), b"12345").unwrap();
+        let mut conn = open_rw(&home, &repo);
+        // Span end past EOF cannot bind: whole mutation fails atomically.
+        let raw =
+            create_json_with_evidence("d1", r#"{"path":"s.rs","byte_start":0,"byte_end":100}"#);
+        let input = validate_create_json(raw.as_bytes()).unwrap();
+        let err = create_validated(&mut conn, &input).unwrap_err();
+        assert!(err.contains("span"), "unexpected: {err}");
+        assert!(show_record(&conn, "d1", None).is_err());
+        assert_eq!(read_generation(&conn).unwrap(), 0);
+        // Same guard on update: head and generation unchanged.
+        let raw = create_json_with_evidence("d1", r#"{"path":"s.rs"}"#);
+        let input = validate_create_json(raw.as_bytes()).unwrap();
+        create_validated(&mut conn, &input).unwrap();
+        let gen_before = read_generation(&conn).unwrap();
+        let bad = validate_update_json(
+            update_json_with_evidence(r#"{"path":"s.rs","byte_start":4,"byte_end":50}"#).as_bytes(),
+        )
+        .unwrap();
+        let err = update_validated(&mut conn, "d1", 1, &bad).unwrap_err();
+        assert!(err.contains("span"), "unexpected: {err}");
+        assert_eq!(show_record(&conn, "d1", None).unwrap().revision, 1);
+        assert_eq!(read_generation(&conn).unwrap(), gen_before);
+        conn.close().unwrap();
+    }
+
+    #[test]
+    fn evidence_history_preserves_original_bindings() {
+        let (home, repo) = setup("evhist");
+        let root = repo_root(&repo);
+        std::fs::write(root.join("v1.rs"), b"AAAA").unwrap();
+        std::fs::write(root.join("v2.rs"), b"BBBB").unwrap();
+        let mut conn = open_rw(&home, &repo);
+        let raw = create_json_with_evidence("d1", r#"{"path":"v1.rs"}"#);
+        create_validated(&mut conn, &validate_create_json(raw.as_bytes()).unwrap()).unwrap();
+        let upd = validate_update_json(update_json_with_evidence(r#"{"path":"v2.rs"}"#).as_bytes())
+            .unwrap();
+        update_validated(&mut conn, "d1", 1, &upd).unwrap();
+        // A revision may also drop evidence: history keeps every binding.
+        let bare = validate_update_json(
+            r#"{"title":"t3","body":"b3","status":"active","author":"r","evidence":[]}"#.as_bytes(),
+        )
+        .unwrap();
+        update_validated(&mut conn, "d1", 2, &bare).unwrap();
+        let page = history(&conn, "d1", 50, 0, None).unwrap();
+        assert_eq!(page.total, 3);
+        assert_eq!(page.revisions[0].evidence[0].path, "v1.rs");
+        assert_eq!(
+            page.revisions[0].evidence[0].digest,
+            crate::store::content_digest(b"AAAA")
+        );
+        assert_eq!(page.revisions[1].evidence[0].path, "v2.rs");
+        assert_eq!(
+            page.revisions[1].evidence[0].digest,
+            crate::store::content_digest(b"BBBB")
+        );
+        assert!(page.revisions[2].evidence.is_empty());
+        conn.close().unwrap();
+    }
+
+    #[test]
+    fn evidence_fault_injection_leaves_no_partial_rows() {
+        let (home, repo) = setup("evfault");
+        let root = repo_root(&repo);
+        std::fs::write(root.join("e.rs"), b"data").unwrap();
+        let raw = create_json_with_evidence("d1", r#"{"path":"e.rs"}"#);
+        let input = validate_create_json(raw.as_bytes()).unwrap();
+        let mut conn = open_rw(&home, &repo);
+        let err = create_validated_with_fault(&mut conn, &input).unwrap_err();
+        assert!(err.contains("injected"), "unexpected: {err}");
+        let rows: i64 = conn
+            .query_row("SELECT count(*) FROM evidence", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 0, "fault must roll back evidence rows too");
+        assert_eq!(read_generation(&conn).unwrap(), 0);
+        // Update path: original binding and generation survive.
+        create_validated(&mut conn, &input).unwrap();
+        let gen_before = read_generation(&conn).unwrap();
+        std::fs::write(root.join("e2.rs"), b"data2").unwrap();
+        let upd = validate_update_json(update_json_with_evidence(r#"{"path":"e2.rs"}"#).as_bytes())
+            .unwrap();
+        let err = update_validated_with_fault(&mut conn, "d1", 1, &upd).unwrap_err();
+        assert!(err.contains("injected"), "unexpected: {err}");
+        let shown = show_record(&conn, "d1", None).unwrap();
+        assert_eq!(shown.revision, 1);
+        assert_eq!(shown.evidence[0].path, "e.rs");
+        assert_eq!(read_generation(&conn).unwrap(), gen_before);
+        conn.close().unwrap();
+    }
+
+    #[test]
+    fn evidence_truth_boundary_empty_is_unknown() {
+        // No evidence: unknown support, never a completeness claim.
+        assert_eq!(evidence_support(0), "unknown");
+        assert_eq!(evidence_support(2), "unverified");
+        let (home, repo) = setup("evtruth");
+        let mut conn = open_rw(&home, &repo);
+        create_record(&mut conn, &new_record("d1", "plain")).unwrap();
+        let shown = show_record(&conn, "d1", None).unwrap();
+        assert!(shown.evidence.is_empty());
+        assert_eq!(evidence_support(shown.evidence.len()), "unknown");
         conn.close().unwrap();
     }
 }
