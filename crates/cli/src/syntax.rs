@@ -88,6 +88,16 @@ pub struct Span {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct CalleeSpan {
+    pub start_line: u32,
+    pub start_col: u32,
+    pub end_line: u32,
+    pub end_col: u32,
+    pub byte_start: usize,
+    pub byte_end: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct Fact {
     /// "definition" | "import" | "call" (call = unresolved candidate).
     pub kind: &'static str,
@@ -98,6 +108,12 @@ pub struct Fact {
     pub span: Span,
     pub byte_start: usize,
     pub byte_end: usize,
+    /// Call-callee expression range (`function` field); `None` for defs,
+    /// imports, and calls whose grammar yields no function field.
+    pub callee: Option<CalleeSpan>,
+    /// Terminal identifier/property within `callee` (receiver split off);
+    /// `None` when inseparable or absent.
+    pub tcallee: Option<CalleeSpan>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -218,6 +234,8 @@ fn push_def(facts: &mut FileFacts, kind: &'static str, node: tree_sitter::Node, 
         span,
         byte_start,
         byte_end,
+        callee: None,
+        tcallee: None,
     });
 }
 
@@ -230,6 +248,8 @@ fn push_c_def(facts: &mut FileFacts, kind: &'static str, node: tree_sitter::Node
         span,
         byte_start,
         byte_end,
+        callee: None,
+        tcallee: None,
     });
 }
 
@@ -256,6 +276,8 @@ fn push_import(facts: &mut FileFacts, node: tree_sitter::Node, src: &[u8]) {
         span,
         byte_start: node.start_byte(),
         byte_end: end,
+        callee: None,
+        tcallee: None,
     });
 }
 
@@ -292,14 +314,30 @@ fn push_struct(facts: &mut FileFacts, node: tree_sitter::Node, src: &[u8]) {
         span,
         byte_start,
         byte_end,
+        callee: None,
+        tcallee: None,
     });
 }
 
 fn push_call(facts: &mut FileFacts, node: tree_sitter::Node, src: &[u8]) {
-    let callee = node
-        .child_by_field_name("function")
-        .and_then(|f| node_text(f, src).map(|s| s.to_string()));
+    let func = node.child_by_field_name("function");
+    let callee = func.and_then(|f| node_text(f, src).map(|s| s.to_string()));
     let (span, byte_start, byte_end) = span_of(node);
+    let (callee_span, terminal_span) = match func {
+        Some(f) => {
+            let (cspan, cbs, cbe) = span_of(f);
+            let callee_span = CalleeSpan {
+                start_line: cspan.start_line,
+                start_col: cspan.start_col,
+                end_line: cspan.end_line,
+                end_col: cspan.end_col,
+                byte_start: cbs,
+                byte_end: cbe,
+            };
+            (Some(callee_span), terminal_span(src, cbs, cbe))
+        }
+        None => (None, None),
+    };
     facts.calls.push(Fact {
         kind: "call",
         name: callee,
@@ -307,7 +345,66 @@ fn push_call(facts: &mut FileFacts, node: tree_sitter::Node, src: &[u8]) {
         span,
         byte_start,
         byte_end,
+        callee: callee_span,
+        tcallee: terminal_span,
     });
+}
+
+/// Terminal identifier/property of a callee expression: the text after the
+/// last `.`, `::`, or `->` separator. Separators are ASCII, so byte
+/// arithmetic on the UTF-8 source is exact. Returns `None` when no
+/// separator-split terminal exists (plain `foo`) — callers treat the whole
+/// callee as the terminal — or when the range is empty.
+fn terminal_span(src: &[u8], callee_bs: usize, callee_be: usize) -> Option<CalleeSpan> {
+    let text = std::str::from_utf8(src.get(callee_bs..callee_be)?).ok()?;
+    let mut cut: Option<usize> = None;
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'.' {
+            cut = Some(i + 1);
+            i += 1;
+        } else if bytes.get(i..i + 2) == Some(b"::".as_slice())
+            || bytes.get(i..i + 2) == Some(b"->".as_slice())
+        {
+            cut = Some(i + 2);
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    let start = match cut {
+        // Plain identifier call: the whole callee IS the terminal.
+        None => callee_bs,
+        Some(off) => callee_bs + off,
+    };
+    if start >= callee_be {
+        return None;
+    }
+    let (start_line, start_col) = position_of(src, start);
+    let (end_line, end_col) = position_of(src, callee_be);
+    Some(CalleeSpan {
+        start_line,
+        start_col,
+        end_line,
+        end_col,
+        byte_start: start,
+        byte_end: callee_be,
+    })
+}
+
+/// 1-based (line, byte-column) of a byte offset, matching `span_of`.
+fn position_of(src: &[u8], off: usize) -> (u32, u32) {
+    let off = off.min(src.len());
+    let line = src[..off].iter().filter(|b| **b == b'\n').count() as u32 + 1;
+    let col = (off
+        - src[..off]
+            .iter()
+            .rposition(|b| *b == b'\n')
+            .map(|p| p + 1)
+            .unwrap_or(0)) as u32
+        + 1;
+    (line, col)
 }
 
 fn visit(lang: Language, node: tree_sitter::Node, src: &[u8], facts: &mut FileFacts) {
@@ -494,6 +591,30 @@ mod tests {
             classify(Path::new("Makefile")),
             FileKind::UnsupportedExtension
         );
+    }
+
+    #[test]
+    fn callee_and_terminal_spans_are_precise() {
+        // Whole-call parity: the call span still covers the full expression.
+        let src = b"def f():\n    return foo(a, b)\n";
+        let facts = parse_source(Language::Python, src);
+        assert_eq!(facts.calls.len(), 1);
+        let call = &facts.calls[0];
+        assert_eq!(&src[call.byte_start..call.byte_end], b"foo(a, b)");
+        let callee = call.callee.as_ref().expect("callee span recorded");
+        assert_eq!(&src[callee.byte_start..callee.byte_end], b"foo");
+        let terminal = call.tcallee.as_ref().expect("terminal span recorded");
+        assert_eq!(&src[terminal.byte_start..terminal.byte_end], b"foo");
+        // Member call: callee covers the dotted path, terminal only the
+        // property — the object-base reference must never prove a call.
+        let src = b"def f():\n    return w.process(x)\n";
+        let facts = parse_source(Language::Python, src);
+        let call = &facts.calls[0];
+        let callee = call.callee.as_ref().expect("callee span recorded");
+        assert_eq!(&src[callee.byte_start..callee.byte_end], b"w.process");
+        let terminal = call.tcallee.as_ref().expect("terminal span recorded");
+        assert_eq!(&src[terminal.byte_start..terminal.byte_end], b"process");
+        assert!(terminal.byte_start > callee.byte_start);
     }
 
     #[test]
