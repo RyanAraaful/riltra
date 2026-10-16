@@ -1118,6 +1118,12 @@ fn history_inner(
     generation: Option<u64>,
     probe: Option<&dyn Fn()>,
 ) -> Result<HistoryPage, String> {
+    // Same self-loop guard as search/related: history carries no next
+    // offset, but a zero limit is still a validation error, not an empty
+    // page that callers might re-request forever.
+    if limit == 0 {
+        return Err("history limit must be at least 1".to_string());
+    }
     let limit_i64 =
         i64::try_from(limit).map_err(|_| format!("history limit out of range: {limit}"))?;
     let offset_i64 =
@@ -1273,6 +1279,11 @@ pub fn search(
             crate::knowledge::SEARCH_LIMIT_MAX
         ));
     }
+    // A zero limit can never advance next_offset: the page would point at
+    // itself forever. Reject it instead of serving a self-loop.
+    if limit == 0 {
+        return Err("search limit must be at least 1".to_string());
+    }
     // Usize page bounds always fit the SQLite range on 64-bit targets, but
     // the conversion stays explicit: absurd values fail here, never in SQL.
     i64::try_from(limit).map_err(|_| format!("search limit out of range: {limit}"))?;
@@ -1309,10 +1320,11 @@ pub fn search(
         if !include_archived {
             filters.push_str(" AND r.status = 'active'");
         }
-        // FTS is a coarse pre-filter: fetch every candidate in ID order,
-        // keep only literal-term rows in Rust, then paginate the verified
-        // set — so total and pages reflect literal matching, never FTS
-        // operator semantics.
+        // FTS is a coarse pre-filter: stream candidates in ID order, keep
+        // the literal-term check in Rust, count every verified row, and
+        // retain only the requested page — memory stays bounded by the page
+        // (at most 1000 rows), never by the corpus. Measurement and evidence
+        // load afterwards, only for returned rows.
         let mut stmt = conn
             .prepare(&format!(
                 "SELECT r.id, r.revision, r.kind, r.title, r.body, r.status, r.author, r.created_unix
@@ -1324,21 +1336,26 @@ pub fn search(
                  ORDER BY r.id COLLATE BINARY ASC"
             ))
             .map_err(|e| format!("cannot search knowledge: {e}"))?;
-        let candidates = stmt
-            .query_map(rusqlite::params_from_iter(args.iter()), record_from_row)
-            .map_err(|e| map_row_error(e, "cannot search knowledge"))?
-            .collect::<Result<Vec<_>, _>>()
+        let mut streamed = stmt
+            .query(rusqlite::params_from_iter(args.iter()))
             .map_err(|e| map_row_error(e, "cannot search knowledge"))?;
-        let total_usize = candidates
-            .iter()
-            .filter(|record| contains_all_terms(record, &tokens))
-            .count();
-        let mut hits: Vec<RecordVersion> = candidates
-            .into_iter()
-            .filter(|record| contains_all_terms(record, &tokens))
-            .skip(offset)
-            .take(limit)
-            .collect();
+        let mut total_usize: usize = 0;
+        let mut hits: Vec<RecordVersion> = Vec::new();
+        while let Some(row) = streamed
+            .next()
+            .map_err(|e| map_row_error(e, "cannot search knowledge"))?
+        {
+            let record =
+                record_from_row(row).map_err(|e| map_row_error(e, "cannot search knowledge"))?;
+            if !contains_all_terms(&record, &tokens) {
+                continue;
+            }
+            if total_usize >= offset && hits.len() < limit {
+                hits.push(record);
+            }
+            total_usize += 1;
+        }
+        drop(streamed);
         for record in &mut hits {
             let rev_i64 = i64::try_from(record.revision)
                 .map_err(|_| "corrupt knowledge store: stored revision out of range".to_string())?;
@@ -1623,6 +1640,10 @@ pub fn related(
             "related limit {limit} exceeds maximum {}",
             crate::knowledge::SEARCH_LIMIT_MAX
         ));
+    }
+    // Same self-loop guard as search: a zero limit never advances.
+    if limit == 0 {
+        return Err("related limit must be at least 1".to_string());
     }
     let limit_i64 =
         i64::try_from(limit).map_err(|_| format!("related limit out of range: {limit}"))?;
@@ -3802,6 +3823,143 @@ mod tests {
         link_simple(&mut conn, "r1", "d1", 1, "d2", 1, "supports").unwrap();
         unlink(&mut conn, "r1", "tester", "reason").unwrap();
         assert_eq!(related_outbound(&conn, "d1").unwrap().total, 0);
+        conn.close().unwrap();
+    }
+
+    #[test]
+    fn search_related_history_reject_zero_limit() {
+        let (home, repo) = setup("zerolimit");
+        let mut conn = open_rw(&home, &repo);
+        create_record(&mut conn, &new_record("d1", "zero zqxlimit")).unwrap();
+        // A zero limit can never advance next_offset: reject it instead of
+        // returning a page that points at itself.
+        let err = search(&conn, "zero", None, false, 0, 0, None).unwrap_err();
+        assert!(err.contains("limit"), "unexpected: {err}");
+        let err = related(
+            &conn,
+            "d1",
+            None,
+            RelationDirection::Outbound,
+            false,
+            0,
+            0,
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("limit"), "unexpected: {err}");
+        let err = history(&conn, "d1", 0, 0, None).unwrap_err();
+        assert!(err.contains("limit"), "unexpected: {err}");
+        // Positive limits still work everywhere.
+        assert_eq!(search_default(&conn, "zero").unwrap().total, 1);
+        assert_eq!(related_outbound(&conn, "d1").unwrap().total, 0);
+        assert_eq!(history(&conn, "d1", 50, 0, None).unwrap().total, 1);
+        conn.close().unwrap();
+    }
+
+    #[test]
+    fn search_pages_advance_and_terminate() {
+        let (home, repo) = setup("pagewalk");
+        let mut conn = open_rw(&home, &repo);
+        for i in 1..=5 {
+            create_record(
+                &mut conn,
+                &kind_record(&format!("w{i:02}"), "decision", "walk zqxterm"),
+            )
+            .unwrap();
+        }
+        // Walk the next_offset chain: strictly advancing, terminating with
+        // no next offset on the final page.
+        let mut collected = Vec::new();
+        let mut offset = 0;
+        let mut pages = 0;
+        loop {
+            let page = search(&conn, "walk", None, false, 2, offset, None).unwrap();
+            assert!(page.truncated || page.next_offset.is_none());
+            collected.extend(page.hits.iter().map(|h| h.id.clone()));
+            pages += 1;
+            assert!(pages <= 10, "pagination must terminate");
+            match page.next_offset {
+                Some(next) => {
+                    assert!(next > offset, "next offset must advance");
+                    offset = next;
+                }
+                None => break,
+            }
+        }
+        assert_eq!(pages, 3);
+        assert_eq!(collected, vec!["w01", "w02", "w03", "w04", "w05"]);
+        // Final and empty pages carry no next offset.
+        let last = search(&conn, "walk", None, false, 2, 4, None).unwrap();
+        assert!(!last.truncated);
+        assert_eq!(last.next_offset, None);
+        let past_end = search(&conn, "walk", None, false, 2, 99, None).unwrap();
+        assert_eq!(past_end.total, 5);
+        assert!(past_end.hits.is_empty());
+        assert!(!past_end.truncated);
+        assert_eq!(past_end.next_offset, None);
+        conn.close().unwrap();
+    }
+
+    #[test]
+    fn search_bounded_pages_over_large_match_set() {
+        let (home, repo) = setup("bigpage");
+        let root = repo_root(&repo);
+        let mut conn = open_rw(&home, &repo);
+        // More matches than any single page, plus archived and other-kind
+        // records that filters must exclude before counting.
+        for i in 1..=12 {
+            create_record(
+                &mut conn,
+                &kind_record(&format!("k{i:02}"), "decision", "bounded zqxmatch"),
+            )
+            .unwrap();
+        }
+        create_record(
+            &mut conn,
+            &kind_record("c1", "constraint", "bounded zqxmatch"),
+        )
+        .unwrap();
+        create_record(
+            &mut conn,
+            &kind_record("c2", "constraint", "bounded zqxmatch"),
+        )
+        .unwrap();
+        update_record(
+            &mut conn,
+            "k12",
+            1,
+            &update_to("bounded zqxmatch", "archived"),
+        )
+        .unwrap();
+        std::fs::write(root.join("ev.rs"), b"bounded zqxmatch").unwrap();
+        let raw = "{\"id\":\"kev\",\"kind\":\"decision\",\"title\":\"bounded zqxmatch\",\
+                   \"body\":\"bounded zqxmatch body\",\"status\":\"active\",\"author\":\"r\",\
+                   \"evidence\":[{\"path\":\"ev.rs\"}]}";
+        create_validated(&mut conn, &validate_create_json(raw.as_bytes()).unwrap()).unwrap();
+        // Default view: 11 visible decisions + kev + 2 constraints = 14.
+        let p1 = search(&conn, "bounded", None, false, 5, 0, None).unwrap();
+        assert_eq!(p1.total, 14);
+        assert!(p1.truncated);
+        assert_eq!(p1.next_offset, Some(5));
+        assert_eq!(
+            p1.hits.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(),
+            vec!["c1", "c2", "k01", "k02", "k03"]
+        );
+        // Kind filter narrows before counting: 11 visible decisions + kev.
+        let kinds = search(&conn, "bounded", Some("decision"), false, 5, 10, None).unwrap();
+        assert_eq!(kinds.total, 12);
+        assert!(!kinds.truncated);
+        assert_eq!(kinds.next_offset, None);
+        assert_eq!(kinds.hits.len(), 2);
+        assert_eq!(kinds.hits[1].id, "kev");
+        // Returned rows carry their full payload; archived appears on demand.
+        assert!(kinds.hits[1].evidence.iter().any(|e| e.path == "ev.rs"));
+        let all = search(&conn, "bounded", Some("decision"), true, 50, 0, None).unwrap();
+        assert_eq!(all.total, 13);
+        assert!(all
+            .hits
+            .iter()
+            .any(|h| h.id == "k12" && h.status == "archived"));
         conn.close().unwrap();
     }
 }
