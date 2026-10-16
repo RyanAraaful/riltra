@@ -11,8 +11,9 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior};
 
+use crate::knowledge::{NewRecord, RecordVersion, UpdateRecord};
 use crate::paths;
 use crate::registry::RepoEntry;
 
@@ -435,6 +436,260 @@ fn check_meta(conn: &Connection, repo: &RepoEntry, croot: &Path) -> Result<(), S
         ));
     }
     Ok(())
+}
+
+/// One page of immutable revision history with its generation guard.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HistoryPage {
+    pub revisions: Vec<RecordVersion>,
+    pub total: usize,
+    pub truncated: bool,
+    pub generation: u64,
+}
+
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Current monotonic knowledge generation (bumped by every mutation).
+pub fn read_generation(conn: &Connection) -> Result<u64, String> {
+    let raw: String = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'knowledge_generation'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|_| "corrupt knowledge store: generation unreadable".to_string())?;
+    raw.parse::<u64>()
+        .map_err(|_| "corrupt knowledge store: generation unreadable".to_string())
+}
+
+fn bump_generation(tx: &Transaction) -> Result<u64, String> {
+    let next = read_generation(tx)? + 1;
+    tx.execute(
+        "UPDATE meta SET value = ?1 WHERE key = 'knowledge_generation'",
+        [next.to_string()],
+    )
+    .map_err(|e| format!("cannot bump knowledge generation: {e}"))?;
+    Ok(next)
+}
+
+/// Re-check the database and companion paths immediately before a write
+/// transaction starts: a link planted between open and write refuses the
+/// mutation with nothing committed. This covers the check instant only;
+/// races between this scan and SQLite's own access are not claimed away
+/// (TOCTOU), only narrowed to that window on top of SQLite's locking.
+fn revalidate_open_paths(conn: &Connection) -> Result<(), String> {
+    if let Some(path) = conn.path() {
+        let db = Path::new(path);
+        reject_link(db)?;
+        for companion in companion_paths(db) {
+            reject_link(&companion)?;
+        }
+    }
+    Ok(())
+}
+
+fn record_from_row(row: &rusqlite::Row) -> rusqlite::Result<RecordVersion> {
+    let revision_i64: i64 = row.get(1)?;
+    Ok(RecordVersion {
+        id: row.get(0)?,
+        revision: revision_i64 as u64,
+        kind: row.get(2)?,
+        title: row.get(3)?,
+        body: row.get(4)?,
+        status: row.get(5)?,
+        author: row.get(6)?,
+        created_unix: row.get(7)?,
+    })
+}
+
+const RECORD_COLS: &str = "id, revision, kind, title, body, status, author, created_unix";
+
+/// Create revision 1 of a new record. Fails on duplicates, invalid input, or
+/// path revalidation; failures commit nothing and bump no generation.
+pub fn create_record(conn: &mut Connection, input: &NewRecord) -> Result<(u64, u64), String> {
+    crate::knowledge::validate_new(input)?;
+    revalidate_open_paths(conn)?;
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|e| format!("cannot begin knowledge write: {e}"))?;
+    let exists: i64 = tx
+        .query_row(
+            "SELECT count(*) FROM heads WHERE id = ?1",
+            [&input.id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("cannot check record existence: {e}"))?;
+    if exists != 0 {
+        return Err(format!("duplicate record id: '{}'", input.id));
+    }
+    tx.execute(
+        "INSERT INTO records (id, revision, kind, title, body, status, author, created_unix)
+         VALUES (?1, 1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        rusqlite::params![
+            input.id,
+            input.kind,
+            input.title,
+            input.body,
+            input.status,
+            input.author,
+            now_unix()
+        ],
+    )
+    .map_err(|e| format!("cannot insert record revision: {e}"))?;
+    tx.execute(
+        "INSERT INTO heads (id, current_revision) VALUES (?1, 1)",
+        [&input.id],
+    )
+    .map_err(|e| format!("cannot advance record head: {e}"))?;
+    let generation = bump_generation(&tx)?;
+    tx.commit()
+        .map_err(|e| format!("cannot commit record creation: {e}"))?;
+    Ok((1, generation))
+}
+
+/// Append a new immutable revision. The expected head is verified inside the
+/// write transaction, so concurrent writers serialize: exactly one wins and
+/// the loser fails with a conflict, committing nothing.
+pub fn update_record(
+    conn: &mut Connection,
+    id: &str,
+    expected_revision: u64,
+    input: &UpdateRecord,
+) -> Result<(u64, u64), String> {
+    crate::knowledge::validate_update(input)?;
+    revalidate_open_paths(conn)?;
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|e| format!("cannot begin knowledge write: {e}"))?;
+    let current: Option<i64> = tx
+        .query_row(
+            "SELECT current_revision FROM heads WHERE id = ?1",
+            [id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("cannot read record head: {e}"))?;
+    let current = match current {
+        Some(c) => c,
+        None => return Err(format!("unknown record id: '{id}'")),
+    };
+    if current as u64 != expected_revision {
+        return Err(format!(
+            "revision conflict for '{id}': expected {expected_revision} but head is {current}"
+        ));
+    }
+    let kind: String = tx
+        .query_row(
+            "SELECT kind FROM records WHERE id = ?1 AND revision = ?2",
+            rusqlite::params![id, current],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("cannot read record kind: {e}"))?;
+    let next = (current + 1) as u64;
+    tx.execute(
+        "INSERT INTO records (id, revision, kind, title, body, status, author, created_unix)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        rusqlite::params![
+            id,
+            next as i64,
+            kind,
+            input.title,
+            input.body,
+            input.status,
+            input.author,
+            now_unix()
+        ],
+    )
+    .map_err(|e| format!("cannot insert record revision: {e}"))?;
+    tx.execute(
+        "UPDATE heads SET current_revision = ?1 WHERE id = ?2",
+        rusqlite::params![next as i64, id],
+    )
+    .map_err(|e| format!("cannot advance record head: {e}"))?;
+    let generation = bump_generation(&tx)?;
+    tx.commit()
+        .map_err(|e| format!("cannot commit record update: {e}"))?;
+    Ok((next, generation))
+}
+
+/// Read one revision (`None` = current head). Never creates anything.
+pub fn show_record(
+    conn: &Connection,
+    id: &str,
+    revision: Option<u64>,
+) -> Result<RecordVersion, String> {
+    let rev = match revision {
+        Some(r) => r,
+        None => {
+            let current: i64 = conn
+                .query_row(
+                    "SELECT current_revision FROM heads WHERE id = ?1",
+                    [id],
+                    |row| row.get(0),
+                )
+                .map_err(|_| format!("unknown record id: '{id}'"))?;
+            current as u64
+        }
+    };
+    conn.query_row(
+        &format!("SELECT {RECORD_COLS} FROM records WHERE id = ?1 AND revision = ?2"),
+        rusqlite::params![id, rev as i64],
+        record_from_row,
+    )
+    .map_err(|_| format!("unknown record revision: '{id}' rev {rev}"))
+}
+
+/// Deterministic history by revision with a generation guard: a supplied
+/// generation that no longer matches fails instead of serving shifted pages.
+pub fn history(
+    conn: &Connection,
+    id: &str,
+    limit: usize,
+    offset: usize,
+    generation: Option<u64>,
+) -> Result<HistoryPage, String> {
+    let current = read_generation(conn)?;
+    if let Some(expected) = generation {
+        if expected != current {
+            return Err(format!(
+                "knowledge generation conflict: expected {expected} but store is at {current}"
+            ));
+        }
+    }
+    let total: i64 = conn
+        .query_row("SELECT count(*) FROM records WHERE id = ?1", [id], |row| {
+            row.get(0)
+        })
+        .map_err(|e| format!("cannot read record history: {e}"))?;
+    if total == 0 {
+        return Err(format!("unknown record id: '{id}'"));
+    }
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT {RECORD_COLS} FROM records WHERE id = ?1
+             ORDER BY revision ASC LIMIT ?2 OFFSET ?3"
+        ))
+        .map_err(|e| format!("cannot read record history: {e}"))?;
+    let revisions = stmt
+        .query_map(
+            rusqlite::params![id, limit as i64, offset as i64],
+            record_from_row,
+        )
+        .map_err(|e| format!("cannot read record history: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("cannot read record history: {e}"))?;
+    let total_usize = total as usize;
+    Ok(HistoryPage {
+        truncated: offset + revisions.len() < total_usize,
+        total: total_usize,
+        generation: current,
+        revisions,
+    })
 }
 
 #[cfg(test)]
@@ -1022,5 +1277,265 @@ mod tests {
             err.contains("link") || err.contains("escape") || err.contains("retarget"),
             "unexpected: {err}"
         );
+    }
+
+    use crate::knowledge::{NewRecord, UpdateRecord};
+
+    fn new_record(id: &str, title: &str) -> NewRecord {
+        NewRecord {
+            id: id.to_string(),
+            kind: "decision".to_string(),
+            title: title.to_string(),
+            body: format!("body of {title}"),
+            status: "active".to_string(),
+            author: "tester".to_string(),
+        }
+    }
+
+    fn update_to(title: &str, status: &str) -> UpdateRecord {
+        UpdateRecord {
+            title: title.to_string(),
+            body: format!("body of {title}"),
+            status: status.to_string(),
+            author: "tester".to_string(),
+        }
+    }
+
+    fn open_rw(home: &Path, repo: &RepoEntry) -> rusqlite::Connection {
+        open_knowledge_at(home, repo, true).unwrap()
+    }
+
+    #[test]
+    fn knowledge_records_create_show_update_history() {
+        let (home, repo) = setup("revs");
+        let mut conn = open_rw(&home, &repo);
+        let (rev, gen) = create_record(&mut conn, &new_record("d1", "first zqxtitle")).unwrap();
+        assert_eq!((rev, gen), (1, 1));
+        let shown = show_record(&conn, "d1", None).unwrap();
+        assert_eq!(shown.revision, 1);
+        assert_eq!(shown.title, "first zqxtitle");
+        let (rev2, gen2) =
+            update_record(&mut conn, "d1", 1, &update_to("second zqxtitle", "active")).unwrap();
+        assert_eq!((rev2, gen2), (2, 2));
+        let old = show_record(&conn, "d1", Some(1)).unwrap();
+        assert_eq!(old.title, "first zqxtitle");
+        let page = history(&conn, "d1", 50, 0, None).unwrap();
+        assert_eq!(page.total, 2);
+        assert!(!page.truncated);
+        assert_eq!(page.generation, 2);
+        assert_eq!(
+            page.revisions
+                .iter()
+                .map(|r| r.revision)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        conn.close().unwrap();
+    }
+
+    #[test]
+    fn knowledge_records_stale_expected_revision_conflict() {
+        let (home, repo) = setup("stale");
+        let mut conn = open_rw(&home, &repo);
+        update_record(&mut conn, "missing-never", 1, &update_to("x", "active")).unwrap_err();
+        create_record(&mut conn, &new_record("d1", "stable zqxone")).unwrap();
+        update_record(&mut conn, "d1", 1, &update_to("moved zqxtwo", "active")).unwrap();
+        let gen_before = read_generation(&conn).unwrap();
+        let err =
+            update_record(&mut conn, "d1", 1, &update_to("loser zqxthree", "active")).unwrap_err();
+        assert!(err.contains("conflict"), "unexpected: {err}");
+        // No write and no generation bump happened.
+        assert_eq!(show_record(&conn, "d1", None).unwrap().revision, 2);
+        assert_eq!(read_generation(&conn).unwrap(), gen_before);
+        let page = history(&conn, "d1", 50, 0, None).unwrap();
+        assert_eq!(page.total, 2);
+        let hits: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM knowledge_fts WHERE knowledge_fts MATCH 'zqxthree'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(hits, 0, "failed update must not leak into the index");
+        conn.close().unwrap();
+    }
+
+    #[test]
+    fn knowledge_records_duplicate_id_fails() {
+        let (home, repo) = setup("dup");
+        let mut conn = open_rw(&home, &repo);
+        create_record(&mut conn, &new_record("d1", "t1")).unwrap();
+        let err = create_record(&mut conn, &new_record("d1", "t2")).unwrap_err();
+        assert!(err.contains("duplicate"), "unexpected: {err}");
+        // Same id with a different kind is still a duplicate, not a rename.
+        let mut other_kind = new_record("d1", "t3");
+        other_kind.kind = "constraint".to_string();
+        let err = create_record(&mut conn, &other_kind).unwrap_err();
+        assert!(err.contains("duplicate"), "unexpected: {err}");
+        assert_eq!(history(&conn, "d1", 50, 0, None).unwrap().total, 1);
+        conn.close().unwrap();
+    }
+
+    #[test]
+    fn knowledge_records_id_and_kind_immutable() {
+        let (home, repo) = setup("immutable");
+        let mut conn = open_rw(&home, &repo);
+        create_record(&mut conn, &new_record("d1", "t1")).unwrap();
+        update_record(&mut conn, "d1", 1, &update_to("t2", "active")).unwrap();
+        let shown = show_record(&conn, "d1", None).unwrap();
+        assert_eq!(shown.id, "d1");
+        assert_eq!(shown.kind, "decision");
+        conn.close().unwrap();
+    }
+
+    #[test]
+    fn knowledge_records_invalid_kind_and_status_rejected() {
+        let (home, repo) = setup("invalid");
+        let mut conn = open_rw(&home, &repo);
+        let mut bad_kind = new_record("d1", "t");
+        bad_kind.kind = "note".to_string();
+        assert!(create_record(&mut conn, &bad_kind).is_err());
+        for status in ["superseded", "retracted", "bogus"] {
+            let mut bad_status = new_record("d1", "t");
+            bad_status.status = status.to_string();
+            let err = create_record(&mut conn, &bad_status).unwrap_err();
+            assert!(err.contains("status"), "{status}: unexpected: {err}");
+        }
+        // Nothing was written by the rejected inputs.
+        assert!(show_record(&conn, "d1", None).is_err());
+        assert_eq!(read_generation(&conn).unwrap(), 0);
+        conn.close().unwrap();
+    }
+
+    #[test]
+    fn knowledge_records_archive_restore_new_revisions() {
+        let (home, repo) = setup("lifecycle");
+        let mut conn = open_rw(&home, &repo);
+        create_record(&mut conn, &new_record("d1", "t1")).unwrap();
+        let (rev2, _) = update_record(&mut conn, "d1", 1, &update_to("t1", "archived")).unwrap();
+        assert_eq!(rev2, 2);
+        assert_eq!(show_record(&conn, "d1", None).unwrap().status, "archived");
+        let (rev3, _) = update_record(&mut conn, "d1", 2, &update_to("t1", "active")).unwrap();
+        assert_eq!(rev3, 3);
+        assert_eq!(show_record(&conn, "d1", None).unwrap().status, "active");
+        assert_eq!(history(&conn, "d1", 50, 0, None).unwrap().total, 3);
+        conn.close().unwrap();
+    }
+
+    #[test]
+    fn knowledge_records_concurrent_writers_one_winner() {
+        let (home, repo) = setup("race");
+        let mut first = open_rw(&home, &repo);
+        create_record(&mut first, &new_record("d1", "base zqxbase")).unwrap();
+        let gen_before = read_generation(&first).unwrap();
+        drop(first);
+        // Two read-write connections observe the same head revision.
+        let mut a = open_knowledge_at(&home, &repo, true).unwrap();
+        let mut b = open_knowledge_at(&home, &repo, true).unwrap();
+        assert_eq!(show_record(&a, "d1", None).unwrap().revision, 1);
+        assert_eq!(show_record(&b, "d1", None).unwrap().revision, 1);
+        let ra = update_record(&mut a, "d1", 1, &update_to("winner zqxwin", "active"));
+        let rb = update_record(&mut b, "d1", 1, &update_to("loser zqxlose", "active"));
+        // Exactly one writer wins; the loser reports a conflict.
+        match (ra, rb) {
+            (Ok(_), Err(e)) | (Err(e), Ok(_)) => {
+                assert!(e.contains("conflict"), "loser must conflict: {e}")
+            }
+            (Ok(_), Ok(_)) => panic!("both writers won: lost update"),
+            (Err(a), Err(b)) => panic!("both writers lost: {a} vs {b}"),
+        }
+        drop(a);
+        drop(b);
+        let check = open_knowledge_at(&home, &repo, false).unwrap();
+        let head = show_record(&check, "d1", None).unwrap();
+        assert_eq!(
+            head.revision, 2,
+            "no lost update: head advanced exactly once"
+        );
+        assert_eq!(history(&check, "d1", 50, 0, None).unwrap().total, 2);
+        assert_eq!(
+            read_generation(&check).unwrap(),
+            gen_before + 1,
+            "loser caused no generation bump"
+        );
+        check.close().unwrap();
+    }
+
+    #[test]
+    fn knowledge_records_history_generation_guard_and_pagination() {
+        let (home, repo) = setup("paging");
+        let mut conn = open_rw(&home, &repo);
+        create_record(&mut conn, &new_record("d1", "t1")).unwrap();
+        update_record(&mut conn, "d1", 1, &update_to("t2", "active")).unwrap();
+        update_record(&mut conn, "d1", 2, &update_to("t3", "active")).unwrap();
+        let gen = read_generation(&conn).unwrap();
+        let err = history(&conn, "d1", 50, 0, Some(gen + 1)).unwrap_err();
+        assert!(err.contains("generation"), "unexpected: {err}");
+        let p1 = history(&conn, "d1", 2, 0, Some(gen)).unwrap();
+        assert_eq!(p1.total, 3);
+        assert!(p1.truncated);
+        assert_eq!(
+            p1.revisions.iter().map(|r| r.revision).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        let p2 = history(&conn, "d1", 2, 2, Some(gen)).unwrap();
+        assert!(!p2.truncated);
+        assert_eq!(
+            p2.revisions.iter().map(|r| r.revision).collect::<Vec<_>>(),
+            vec![3]
+        );
+        let empty = history(&conn, "d1", 2, 3, Some(gen)).unwrap();
+        assert_eq!(empty.total, 3);
+        assert!(empty.revisions.is_empty());
+        conn.close().unwrap();
+    }
+
+    #[test]
+    fn knowledge_records_missing_id_errors() {
+        let (home, repo) = setup("noid");
+        let mut conn = open_rw(&home, &repo);
+        assert!(show_record(&conn, "nope", None).is_err());
+        assert!(show_record(&conn, "nope", Some(1)).is_err());
+        assert!(history(&conn, "nope", 50, 0, None).is_err());
+        assert!(update_record(&mut conn, "nope", 1, &update_to("t", "active")).is_err());
+        conn.close().unwrap();
+    }
+
+    #[test]
+    fn knowledge_records_write_revalidates_companions() {
+        let (home, repo) = setup("revalidate");
+        let mut conn = open_rw(&home, &repo);
+        create_record(&mut conn, &new_record("d1", "t1")).unwrap();
+        let gen_before = read_generation(&conn).unwrap();
+        conn.close().unwrap();
+        let db = knowledge_db_path(&home, "revalidate");
+        let wal = companion(&db, "-wal");
+        let _ = std::fs::remove_file(&wal);
+        // Open the writer while the paths are clean, then plant a hostile
+        // companion between open and write: the mutation itself must refuse
+        // with no head or generation change.
+        let mut conn = open_knowledge_at(&home, &repo, true).unwrap();
+        let outside = tmpdir("m7-outside-reval");
+        let target = outside.join("evil-wal");
+        std::fs::write(&target, b"SENTINEL").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, &wal).unwrap();
+        #[cfg(windows)]
+        match plant_link(&wal, &target) {
+            Some(mech) => eprintln!("revalidation link planted via {mech}"),
+            None => {
+                eprintln!("NOT TESTED: cannot plant links in this environment");
+                return;
+            }
+        }
+        let err = update_record(&mut conn, "d1", 1, &update_to("t2", "active")).unwrap_err();
+        assert!(
+            err.contains("link") || err.contains("escape"),
+            "unexpected: {err}"
+        );
+        assert_eq!(show_record(&conn, "d1", None).unwrap().revision, 1);
+        assert_eq!(read_generation(&conn).unwrap(), gen_before);
+        conn.close().unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"SENTINEL");
     }
 }
