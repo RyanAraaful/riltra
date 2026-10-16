@@ -85,6 +85,25 @@ pub fn validate_status(status: &str) -> Result<(), String> {
     }
 }
 
+/// Authored relationship kinds: `relates_to`, `supports`, `contradicts`.
+/// `supports` certifies nothing and `contradicts` judges nothing; both stay
+/// inert assertions.
+pub fn validate_relation_kind(kind: &str) -> Result<(), String> {
+    match kind {
+        "relates_to" | "supports" | "contradicts" => Ok(()),
+        _ => Err(format!("invalid relation kind: {kind:?}")),
+    }
+}
+
+/// Opaque repository-local relation IDs: non-empty, at most 128 bytes, and
+/// NUL-free (SQLite text cannot store NUL; reject it with a clean error).
+pub fn validate_relation_id(id: &str) -> Result<(), String> {
+    if id.is_empty() || id.len() > 128 || id.contains('\0') {
+        return Err(format!("invalid relation id: {id:?}"));
+    }
+    Ok(())
+}
+
 pub fn validate_new(input: &NewRecord) -> Result<(), String> {
     validate_id(&input.id)?;
     validate_kind(&input.kind)?;
@@ -117,6 +136,8 @@ pub const MAX_QUERY_TEXT_BYTES: usize = 4096;
 /// Search paging: Task 7 applies the default; the store enforces the cap.
 pub const SEARCH_LIMIT_DEFAULT: usize = 50;
 pub const SEARCH_LIMIT_MAX: usize = 1000;
+/// Relation rationales and retraction reasons cap at 64 KiB (bytes).
+pub const MAX_RATIONALE_BYTES: usize = 64 * 1024;
 const MAX_JSON_DEPTH: usize = 64;
 
 /// Parsed JSON that preserves every key occurrence so duplicates can be

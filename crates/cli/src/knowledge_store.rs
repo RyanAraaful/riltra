@@ -1367,6 +1367,370 @@ pub fn search(
     }
 }
 
+/// One-hop direction for [`related`]. Outbound follows authored source
+/// links; inbound follows links pointing at the record. No transitive walk.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RelationDirection {
+    Outbound,
+    Inbound,
+}
+
+/// One authored relationship with its retraction state. Endpoints stay pinned
+/// to the exact revisions named at link time; updating a record never moves
+/// them. Retraction details are present only when `retracted` is true and the
+/// caller asked for retracted rows.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RelationView {
+    pub relation_id: String,
+    pub src_id: String,
+    pub src_revision: u64,
+    pub dst_id: String,
+    pub dst_revision: u64,
+    pub kind: String,
+    pub author: String,
+    pub rationale: String,
+    pub created_unix: i64,
+    pub retracted: bool,
+    pub retraction_author: Option<String>,
+    pub retraction_reason: Option<String>,
+}
+
+/// One page of one-hop relations with its generation guard.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RelatedPage {
+    pub relations: Vec<RelationView>,
+    pub total: usize,
+    pub truncated: bool,
+    pub next_offset: Option<usize>,
+    pub generation: u64,
+}
+
+fn check_actor(text: &str, field: &str) -> Result<(), String> {
+    if text.is_empty() || text.len() > crate::knowledge::MAX_AUTHOR_BYTES {
+        return Err(format!(
+            "field `{field}` must be 1..={} bytes",
+            crate::knowledge::MAX_AUTHOR_BYTES
+        ));
+    }
+    Ok(())
+}
+
+fn check_rationale(text: &str, field: &str) -> Result<(), String> {
+    if text.is_empty() || text.len() > crate::knowledge::MAX_RATIONALE_BYTES {
+        return Err(format!(
+            "field `{field}` must be 1..={} bytes",
+            crate::knowledge::MAX_RATIONALE_BYTES
+        ));
+    }
+    Ok(())
+}
+
+fn endpoint_exists(tx: &Transaction, id: &str, revision: i64) -> Result<bool, String> {
+    tx.query_row(
+        "SELECT count(*) FROM records WHERE id = ?1 AND revision = ?2",
+        rusqlite::params![id, revision],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|count| count == 1)
+    .map_err(|e| format!("cannot read relation endpoint: {e}"))
+}
+
+/// Author one directed relationship between two exact record revisions in
+/// this database. Null, foreign, guessed or name-matched endpoints cannot be
+/// expressed: both revisions must exist before commit, and an identical
+/// active endpoint/kind tuple is rejected. One write transaction covers the
+/// insert and the generation bump.
+#[allow(clippy::too_many_arguments)]
+pub fn link(
+    conn: &mut Connection,
+    relation_id: &str,
+    src_id: &str,
+    src_revision: u64,
+    dst_id: &str,
+    dst_revision: u64,
+    kind: &str,
+    author: &str,
+    rationale: &str,
+) -> Result<u64, String> {
+    crate::knowledge::validate_relation_id(relation_id)?;
+    crate::knowledge::validate_relation_kind(kind)?;
+    check_actor(author, "author")?;
+    check_rationale(rationale, "rationale")?;
+    let src_i64 = i64::try_from(src_revision)
+        .map_err(|_| format!("relation revision out of range: {src_revision}"))?;
+    let dst_i64 = i64::try_from(dst_revision)
+        .map_err(|_| format!("relation revision out of range: {dst_revision}"))?;
+    revalidate_open_paths(conn)?;
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|e| format!("cannot begin knowledge write: {e}"))?;
+    let id_taken: i64 = tx
+        .query_row(
+            "SELECT count(*) FROM relations WHERE relation_id = ?1",
+            [relation_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("cannot check relation id: {e}"))?;
+    if id_taken != 0 {
+        return Err(format!("duplicate relation id: '{relation_id}'"));
+    }
+    if !endpoint_exists(&tx, src_id, src_i64)? {
+        return Err(format!(
+            "unknown relation endpoint: '{src_id}' rev {src_revision}"
+        ));
+    }
+    if !endpoint_exists(&tx, dst_id, dst_i64)? {
+        return Err(format!(
+            "unknown relation endpoint: '{dst_id}' rev {dst_revision}"
+        ));
+    }
+    // Retracted rows are history, not active assertions: only a live tuple
+    // with the same endpoints and kind blocks the link.
+    let live_dup: i64 = tx
+        .query_row(
+            "SELECT count(*) FROM relations r
+             LEFT JOIN retractions t ON t.relation_id = r.relation_id
+             WHERE r.src_id = ?1 AND r.src_revision = ?2
+               AND r.dst_id = ?3 AND r.dst_revision = ?4
+               AND r.kind = ?5 AND t.relation_id IS NULL",
+            rusqlite::params![src_id, src_i64, dst_id, dst_i64, kind],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("cannot check duplicate relation: {e}"))?;
+    if live_dup != 0 {
+        return Err(format!(
+            "duplicate relation: '{src_id}' rev {src_revision} '{kind}' '{dst_id}' rev {dst_revision}"
+        ));
+    }
+    tx.execute(
+        "INSERT INTO relations (relation_id, src_id, src_revision, dst_id, dst_revision,
+          kind, author, rationale, created_unix)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        rusqlite::params![
+            relation_id,
+            src_id,
+            src_i64,
+            dst_id,
+            dst_i64,
+            kind,
+            author,
+            rationale,
+            now_unix()
+        ],
+    )
+    .map_err(|e| format!("cannot store relation: {e}"))?;
+    let generation = bump_generation(&tx)?;
+    tx.commit()
+        .map_err(|e| format!("cannot commit relation link: {e}"))?;
+    Ok(generation)
+}
+
+/// Retract a relationship: an append-only event with author and reason, never
+/// a deletion. Normal queries omit the relation afterwards; audit reads with
+/// `include_retracted` retain it. Repeating the retraction fails.
+pub fn unlink(
+    conn: &mut Connection,
+    relation_id: &str,
+    author: &str,
+    reason: &str,
+) -> Result<u64, String> {
+    crate::knowledge::validate_relation_id(relation_id)?;
+    check_actor(author, "author")?;
+    check_rationale(reason, "reason")?;
+    revalidate_open_paths(conn)?;
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|e| format!("cannot begin knowledge write: {e}"))?;
+    let known: i64 = tx
+        .query_row(
+            "SELECT count(*) FROM relations WHERE relation_id = ?1",
+            [relation_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("cannot read relation: {e}"))?;
+    if known != 1 {
+        return Err(format!("unknown relation id: '{relation_id}'"));
+    }
+    let already: i64 = tx
+        .query_row(
+            "SELECT count(*) FROM retractions WHERE relation_id = ?1",
+            [relation_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("cannot read relation retraction: {e}"))?;
+    if already != 0 {
+        return Err(format!("relation already retracted: '{relation_id}'"));
+    }
+    tx.execute(
+        "INSERT INTO retractions (relation_id, author, reason, created_unix)
+         VALUES (?1, ?2, ?3, ?4)",
+        rusqlite::params![relation_id, author, reason, now_unix()],
+    )
+    .map_err(|e| format!("cannot store relation retraction: {e}"))?;
+    let generation = bump_generation(&tx)?;
+    tx.commit()
+        .map_err(|e| format!("cannot commit relation retraction: {e}"))?;
+    Ok(generation)
+}
+
+fn relation_from_row(row: &rusqlite::Row) -> rusqlite::Result<RelationView> {
+    let bad = |rev: i64| {
+        rusqlite::Error::FromSqlConversionFailure(
+            1,
+            rusqlite::types::Type::Integer,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("negative relation revision {rev}"),
+            )),
+        )
+    };
+    let src_i64: i64 = row.get(2)?;
+    let dst_i64: i64 = row.get(4)?;
+    Ok(RelationView {
+        relation_id: row.get(0)?,
+        src_id: row.get(1)?,
+        src_revision: u64::try_from(src_i64).map_err(|_| bad(src_i64))?,
+        dst_id: row.get(3)?,
+        dst_revision: u64::try_from(dst_i64).map_err(|_| bad(dst_i64))?,
+        kind: row.get(5)?,
+        author: row.get(6)?,
+        rationale: row.get(7)?,
+        created_unix: row.get(8)?,
+        retracted: row.get::<_, Option<String>>(9)?.is_some(),
+        retraction_author: row.get(10)?,
+        retraction_reason: row.get(11)?,
+    })
+}
+
+/// One-hop relations for one record revision (`None` = current head).
+/// Current and historical revisions read separately by construction: an empty
+/// current result never implies no historical relation existed — pass the
+/// explicit revision to see it. Generation, total and rows are read inside
+/// one SQLite read transaction.
+#[allow(clippy::too_many_arguments)]
+pub fn related(
+    conn: &Connection,
+    id: &str,
+    revision: Option<u64>,
+    direction: RelationDirection,
+    include_retracted: bool,
+    limit: usize,
+    offset: usize,
+    generation: Option<u64>,
+) -> Result<RelatedPage, String> {
+    if limit > crate::knowledge::SEARCH_LIMIT_MAX {
+        return Err(format!(
+            "related limit {limit} exceeds maximum {}",
+            crate::knowledge::SEARCH_LIMIT_MAX
+        ));
+    }
+    let limit_i64 =
+        i64::try_from(limit).map_err(|_| format!("related limit out of range: {limit}"))?;
+    let offset_i64 =
+        i64::try_from(offset).map_err(|_| format!("related offset out of range: {offset}"))?;
+    conn.execute_batch("BEGIN")
+        .map_err(|e| format!("cannot begin knowledge read: {e}"))?;
+    let page = (|| {
+        let current = read_generation(conn)?;
+        if let Some(expected) = generation {
+            if expected != current {
+                return Err(format!(
+                    "knowledge generation conflict: expected {expected} but store is at {current}"
+                ));
+            }
+        }
+        // Resolve the queried revision first: heads for the default, an
+        // existence check for explicit history. Either failure names the
+        // record instead of returning a misleading empty page.
+        let rev_i64 = match revision {
+            None => conn
+                .query_row(
+                    "SELECT current_revision FROM heads WHERE id = ?1",
+                    [id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(|_| format!("unknown record id: '{id}'"))?,
+            Some(rev) => {
+                let wanted = i64::try_from(rev)
+                    .map_err(|_| format!("record revision out of range: {rev}"))?;
+                let found: i64 = conn
+                    .query_row(
+                        "SELECT count(*) FROM records WHERE id = ?1 AND revision = ?2",
+                        rusqlite::params![id, wanted],
+                        |row| row.get(0),
+                    )
+                    .map_err(|e| format!("cannot read record revision: {e}"))?;
+                if found != 1 {
+                    return Err(format!("unknown record revision: '{id}' rev {rev}"));
+                }
+                wanted
+            }
+        };
+        let endpoint = match direction {
+            RelationDirection::Outbound => "r.src_id = ?1 AND r.src_revision = ?2",
+            RelationDirection::Inbound => "r.dst_id = ?1 AND r.dst_revision = ?2",
+        };
+        let retracted_filter = if include_retracted {
+            ""
+        } else {
+            " AND t.relation_id IS NULL"
+        };
+        let from_where = format!(
+            "FROM relations r
+             LEFT JOIN retractions t ON t.relation_id = r.relation_id
+             WHERE {endpoint}{retracted_filter}"
+        );
+        let total: i64 = conn
+            .query_row(
+                &format!("SELECT count(*) {from_where}"),
+                rusqlite::params![id, rev_i64],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("cannot read relations: {e}"))?;
+        let total_usize = usize::try_from(total)
+            .map_err(|_| "corrupt knowledge store: relation total out of range".to_string())?;
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT r.relation_id, r.src_id, r.src_revision, r.dst_id, r.dst_revision,
+                   r.kind, r.author, r.rationale, r.created_unix,
+                   t.relation_id, t.author, t.reason
+                 {from_where}
+                 ORDER BY r.src_id COLLATE BINARY ASC, r.src_revision ASC,
+                   r.dst_id COLLATE BINARY ASC, r.dst_revision ASC,
+                   r.kind COLLATE BINARY ASC, r.relation_id COLLATE BINARY ASC
+                 LIMIT ?3 OFFSET ?4"
+            ))
+            .map_err(|e| format!("cannot read relations: {e}"))?;
+        let items = stmt
+            .query_map(
+                rusqlite::params![id, rev_i64, limit_i64, offset_i64],
+                relation_from_row,
+            )
+            .map_err(|e| map_row_error(e, "cannot read relations"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| map_row_error(e, "cannot read relations"))?;
+        let end = offset.saturating_add(items.len());
+        Ok(RelatedPage {
+            truncated: end < total_usize,
+            next_offset: if end < total_usize { Some(end) } else { None },
+            total: total_usize,
+            generation: current,
+            relations: items,
+        })
+    })();
+    match page {
+        Ok(built) => {
+            conn.execute_batch("COMMIT")
+                .map_err(|e| format!("cannot commit knowledge read: {e}"))?;
+            Ok(built)
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(e)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3092,6 +3456,352 @@ mod tests {
         )
         .unwrap();
         assert_eq!(after.total, before.total);
+        conn.close().unwrap();
+    }
+
+    fn link_simple(
+        conn: &mut Connection,
+        relation_id: &str,
+        src_id: &str,
+        src_rev: u64,
+        dst_id: &str,
+        dst_rev: u64,
+        kind: &str,
+    ) -> Result<u64, String> {
+        link(
+            conn,
+            relation_id,
+            src_id,
+            src_rev,
+            dst_id,
+            dst_rev,
+            kind,
+            "tester",
+            "related work",
+        )
+    }
+
+    fn related_outbound(conn: &Connection, id: &str) -> Result<RelatedPage, String> {
+        related(
+            conn,
+            id,
+            None,
+            RelationDirection::Outbound,
+            false,
+            50,
+            0,
+            None,
+        )
+    }
+
+    fn two_records(conn: &mut Connection) {
+        create_record(conn, &new_record("d1", "first")).unwrap();
+        create_record(conn, &new_record("d2", "second")).unwrap();
+    }
+
+    #[test]
+    fn relation_valid_link_pins_exact_revisions() {
+        let (home, repo) = setup("relpin");
+        let mut conn = open_rw(&home, &repo);
+        two_records(&mut conn);
+        let gen = link_simple(&mut conn, "r1", "d1", 1, "d2", 1, "supports").unwrap();
+        assert_eq!(read_generation(&conn).unwrap(), gen);
+        let page = related_outbound(&conn, "d1").unwrap();
+        assert_eq!(page.total, 1);
+        assert!(!page.truncated);
+        let rel = &page.relations[0];
+        assert_eq!(rel.relation_id, "r1");
+        assert_eq!((rel.src_id.as_str(), rel.src_revision), ("d1", 1));
+        assert_eq!((rel.dst_id.as_str(), rel.dst_revision), ("d2", 1));
+        assert_eq!(rel.kind, "supports");
+        assert!(!rel.retracted);
+        conn.close().unwrap();
+    }
+
+    #[test]
+    fn relation_endpoints_must_exist_in_same_store() {
+        let (home, repo) = setup("relend");
+        let mut conn = open_rw(&home, &repo);
+        two_records(&mut conn);
+        let gen_before = read_generation(&conn).unwrap();
+        // Missing IDs, missing revisions, and empty/oversize relation IDs all
+        // fail with no rows and no generation change. A same-name record in
+        // another store is unreachable by construction: endpoints resolve in
+        // this database only.
+        for (rel, src, sr, dst, dr) in [
+            ("r1", "missing", 1, "d2", 1),
+            ("r2", "d1", 1, "missing", 1),
+            ("r3", "d1", 99, "d2", 1),
+            ("r4", "d1", 1, "d2", 99),
+        ] {
+            let err = link_simple(&mut conn, rel, src, sr, dst, dr, "relates_to").unwrap_err();
+            assert!(
+                err.contains("endpoint") || err.contains("unknown"),
+                "unexpected: {err}"
+            );
+        }
+        assert!(link_simple(&mut conn, "", "d1", 1, "d2", 1, "relates_to").is_err());
+        assert!(link_simple(&mut conn, &"r".repeat(129), "d1", 1, "d2", 1, "relates_to").is_err());
+        assert!(link_simple(&mut conn, "r-ok", "d1", 1, "d2", 1, "certifies").is_err());
+        let rows: i64 = conn
+            .query_row("SELECT count(*) FROM relations", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 0);
+        assert_eq!(read_generation(&conn).unwrap(), gen_before);
+        conn.close().unwrap();
+    }
+
+    #[test]
+    fn relation_duplicate_active_tuple_rejected() {
+        let (home, repo) = setup("reldup");
+        let mut conn = open_rw(&home, &repo);
+        two_records(&mut conn);
+        link_simple(&mut conn, "r1", "d1", 1, "d2", 1, "supports").unwrap();
+        let gen_before = read_generation(&conn).unwrap();
+        // Same endpoints and kind under a new relation ID still duplicates.
+        let err = link_simple(&mut conn, "r2", "d1", 1, "d2", 1, "supports").unwrap_err();
+        assert!(err.contains("duplicate"), "unexpected: {err}");
+        // Same relation ID is a duplicate too.
+        assert!(link_simple(&mut conn, "r1", "d1", 1, "d2", 1, "contradicts").is_err());
+        // A different kind is a distinct assertion.
+        link_simple(&mut conn, "r3", "d1", 1, "d2", 1, "contradicts").unwrap();
+        // Retraction ends the active tuple: re-linking is a new assertion.
+        unlink(&mut conn, "r1", "tester", "mistake").unwrap();
+        link_simple(&mut conn, "r4", "d1", 1, "d2", 1, "supports").unwrap();
+        let page = related_outbound(&conn, "d1").unwrap();
+        assert_eq!(page.total, 2);
+        assert_eq!(read_generation(&conn).unwrap(), gen_before + 3);
+        conn.close().unwrap();
+    }
+
+    #[test]
+    fn relation_update_preserves_pins_current_vs_historical() {
+        let (home, repo) = setup("relhist");
+        let mut conn = open_rw(&home, &repo);
+        two_records(&mut conn);
+        link_simple(&mut conn, "r1", "d1", 1, "d2", 1, "supports").unwrap();
+        // Updating the source never moves its relations to the new revision.
+        update_record(&mut conn, "d1", 1, &update_to("first v2", "active")).unwrap();
+        let current = related_outbound(&conn, "d1").unwrap();
+        assert_eq!(current.total, 0, "rev 2 carries no relations forward");
+        let pinned = related(
+            &conn,
+            "d1",
+            Some(1),
+            RelationDirection::Outbound,
+            false,
+            50,
+            0,
+            None,
+        )
+        .unwrap();
+        assert_eq!(pinned.total, 1);
+        assert_eq!(pinned.relations[0].relation_id, "r1");
+        // The untouched target still sees the inbound link at its head.
+        let inbound = related(
+            &conn,
+            "d2",
+            None,
+            RelationDirection::Inbound,
+            false,
+            50,
+            0,
+            None,
+        )
+        .unwrap();
+        assert_eq!(inbound.total, 1);
+        // Unknown revisions fail instead of guessing.
+        assert!(related(
+            &conn,
+            "d1",
+            Some(99),
+            RelationDirection::Outbound,
+            false,
+            50,
+            0,
+            None
+        )
+        .is_err());
+        assert!(related(
+            &conn,
+            "missing",
+            None,
+            RelationDirection::Outbound,
+            false,
+            50,
+            0,
+            None
+        )
+        .is_err());
+        conn.close().unwrap();
+    }
+
+    #[test]
+    fn relation_retraction_keeps_audit_and_rejects_double_unlink() {
+        let (home, repo) = setup("relretract");
+        let mut conn = open_rw(&home, &repo);
+        two_records(&mut conn);
+        link_simple(&mut conn, "r1", "d1", 1, "d2", 1, "supports").unwrap();
+        unlink(&mut conn, "r1", "tester", "no longer holds").unwrap();
+        // Normal queries omit retracted relations.
+        assert_eq!(related_outbound(&conn, "d1").unwrap().total, 0);
+        // Audit output retains them with author and reason.
+        let audit = related(
+            &conn,
+            "d1",
+            None,
+            RelationDirection::Outbound,
+            true,
+            50,
+            0,
+            None,
+        )
+        .unwrap();
+        assert_eq!(audit.total, 1);
+        assert!(audit.relations[0].retracted);
+        assert_eq!(
+            audit.relations[0].retraction_author.as_deref(),
+            Some("tester")
+        );
+        assert_eq!(
+            audit.relations[0].retraction_reason.as_deref(),
+            Some("no longer holds")
+        );
+        // Retraction is append-only: repeats and unknown IDs fail.
+        let gen_before = read_generation(&conn).unwrap();
+        assert!(unlink(&mut conn, "r1", "tester", "again").is_err());
+        assert!(unlink(&mut conn, "missing", "tester", "reason").is_err());
+        assert!(unlink(&mut conn, "r1", "", "reason").is_err());
+        assert!(unlink(&mut conn, "r1", "tester", "").is_err());
+        assert_eq!(read_generation(&conn).unwrap(), gen_before);
+        conn.close().unwrap();
+    }
+
+    #[test]
+    fn relation_self_link_and_cycle_stay_one_hop() {
+        let (home, repo) = setup("relcycle");
+        let mut conn = open_rw(&home, &repo);
+        two_records(&mut conn);
+        // Authored self-links and cycles are permitted; queries never infer
+        // transitive relations from them.
+        link_simple(&mut conn, "r-self", "d1", 1, "d1", 1, "relates_to").unwrap();
+        link_simple(&mut conn, "r-fwd", "d1", 1, "d2", 1, "supports").unwrap();
+        link_simple(&mut conn, "r-back", "d2", 1, "d1", 1, "contradicts").unwrap();
+        let out = related_outbound(&conn, "d1").unwrap();
+        assert_eq!(out.total, 2);
+        // Order is endpoint/revision/kind + relation ID: dst d1 sorts
+        // before dst d2, so the self-link comes first.
+        assert_eq!(
+            out.relations
+                .iter()
+                .map(|r| r.relation_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["r-self", "r-fwd"]
+        );
+        // r-back is inbound to d1, not a second outbound hop; d2 sees only
+        // its own outbound link (no transitive d2 -> d1 -> d1 expansion).
+        let d2out = related_outbound(&conn, "d2").unwrap();
+        assert_eq!(d2out.total, 1);
+        assert_eq!(d2out.relations[0].relation_id, "r-back");
+        conn.close().unwrap();
+    }
+
+    #[test]
+    fn relation_pagination_and_generation_guard() {
+        let (home, repo) = setup("relpage");
+        let mut conn = open_rw(&home, &repo);
+        two_records(&mut conn);
+        create_record(&mut conn, &new_record("d3", "third")).unwrap();
+        // Created out of order: reads stay in endpoint/kind/relation order.
+        link_simple(&mut conn, "r-c", "d1", 1, "d3", 1, "supports").unwrap();
+        link_simple(&mut conn, "r-a", "d1", 1, "d2", 1, "supports").unwrap();
+        link_simple(&mut conn, "r-b", "d1", 1, "d2", 1, "contradicts").unwrap();
+        let full = related_outbound(&conn, "d1").unwrap();
+        assert_eq!(full.total, 3);
+        // Endpoint order first (dst d2 before d3), then kind
+        // ("contradicts" before "supports"), then relation ID.
+        assert_eq!(
+            full.relations
+                .iter()
+                .map(|r| r.relation_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["r-b", "r-a", "r-c"]
+        );
+        let p1 = related(
+            &conn,
+            "d1",
+            None,
+            RelationDirection::Outbound,
+            false,
+            2,
+            0,
+            None,
+        )
+        .unwrap();
+        assert!(p1.truncated);
+        assert_eq!(p1.next_offset, Some(2));
+        let p2 = related(
+            &conn,
+            "d1",
+            None,
+            RelationDirection::Outbound,
+            false,
+            2,
+            2,
+            Some(p1.generation),
+        )
+        .unwrap();
+        assert!(!p2.truncated);
+        assert_eq!(p2.relations[0].relation_id, "r-c");
+        // A concurrent link bumps generation: stale pages fail explicitly.
+        link_simple(&mut conn, "r-d", "d1", 1, "d3", 1, "contradicts").unwrap();
+        let err = related(
+            &conn,
+            "d1",
+            None,
+            RelationDirection::Outbound,
+            false,
+            2,
+            2,
+            Some(p1.generation),
+        )
+        .unwrap_err();
+        assert!(err.contains("generation"), "unexpected: {err}");
+        assert!(related(
+            &conn,
+            "d1",
+            None,
+            RelationDirection::Outbound,
+            false,
+            1001,
+            0,
+            None
+        )
+        .is_err());
+        conn.close().unwrap();
+    }
+
+    #[test]
+    fn relation_foundation_status_guard() {
+        // Full-stage record statuses stay invalid even beside retraction
+        // events, which live on links — the two lifecycles never mix.
+        let (home, repo) = setup("relstatus");
+        let mut conn = open_rw(&home, &repo);
+        two_records(&mut conn);
+        for status in ["retracted", "superseded"] {
+            let raw = format!(
+                "{{\"id\":\"dx\",\"kind\":\"decision\",\"title\":\"t\",\"body\":\"b\",\
+                 \"status\":\"{status}\",\"author\":\"r\",\"evidence\":[]}}"
+            );
+            assert!(validate_create_json(raw.as_bytes()).is_err());
+            // The store path rejects them too, beneath the JSON layer.
+            let err = update_record(&mut conn, "d1", 1, &update_to("t", status)).unwrap_err();
+            assert!(err.contains("status"), "{status}: unexpected: {err}");
+        }
+        // Link retraction still succeeds: it is an event, not a status.
+        link_simple(&mut conn, "r1", "d1", 1, "d2", 1, "supports").unwrap();
+        unlink(&mut conn, "r1", "tester", "reason").unwrap();
+        assert_eq!(related_outbound(&conn, "d1").unwrap().total, 0);
         conn.close().unwrap();
     }
 }
