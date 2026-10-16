@@ -465,6 +465,17 @@ fn ingest_file(
                 )?;
             }
             for call in &facts.calls {
+                let span_cols =
+                    |span: &Option<crate::syntax::CalleeSpan>| -> Option<store::SpanCols> {
+                        span.as_ref().map(|s| store::SpanCols {
+                            start_line: s.start_line,
+                            start_col: s.start_col,
+                            end_line: s.end_line,
+                            end_col: s.end_col,
+                            byte_start: s.byte_start,
+                            byte_end: s.byte_end,
+                        })
+                    };
                 store::insert_call(
                     conn,
                     snapshot_id,
@@ -477,6 +488,8 @@ fn ingest_file(
                         end_col: call.span.end_col,
                         byte_start: call.byte_start,
                         byte_end: call.byte_end,
+                        callee: span_cols(&call.callee),
+                        tcallee: span_cols(&call.tcallee),
                         unresolved: 1,
                         provider: "syntax".to_string(),
                         grammar: grammar.clone(),

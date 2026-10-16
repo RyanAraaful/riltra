@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use rusqlite::{params, Connection, OptionalExtension};
 
 /// Current schema version (`PRAGMA user_version`).
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 /// Parser/extraction version. Bump whenever `syntax.rs` extraction changes;
 /// freshness treats a mismatch as stale (never silently current).
 pub const PARSER_VERSION: u32 = 1;
@@ -129,9 +129,29 @@ CREATE TABLE IF NOT EXISTS calls (
   file_id INTEGER NOT NULL, name TEXT, start_line INTEGER NOT NULL,
   start_col INTEGER NOT NULL, end_line INTEGER NOT NULL, end_col INTEGER NOT NULL,
   byte_start INTEGER NOT NULL, byte_end INTEGER NOT NULL,
+  callee_start_line INT NULL, callee_start_col INT NULL,
+  callee_end_line INT NULL, callee_end_col INT NULL,
+  callee_byte_start INT NULL, callee_byte_end INT NULL,
+  tcallee_start_line INT NULL, tcallee_start_col INT NULL,
+  tcallee_end_line INT NULL, tcallee_end_col INT NULL,
+  tcallee_byte_start INT NULL, tcallee_byte_end INT NULL,
   unresolved INTEGER NOT NULL, provider TEXT NOT NULL, grammar TEXT NOT NULL,
   language TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS code_edges (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, snapshot_id INTEGER NOT NULL,
+  file_id INTEGER NOT NULL,
+  caller_kind TEXT NOT NULL, caller_import_id INT NULL, caller_uri TEXT NULL,
+  caller_doc TEXT NULL, caller_path TEXT NULL, caller_bs INT NULL, caller_be INT NULL,
+  caller_file TEXT NOT NULL, caller_sbs INTEGER NOT NULL, caller_sbe INTEGER NOT NULL,
+  callee_kind TEXT NOT NULL, callee_import_id INT NULL, callee_uri TEXT NULL,
+  callee_doc TEXT NULL, callee_path TEXT NULL, callee_bs INT NULL, callee_be INT NULL,
+  callee_name TEXT NOT NULL,
+  edge_kind TEXT NOT NULL, precision TEXT NOT NULL, provider TEXT NOT NULL,
+  evidence TEXT NOT NULL, unresolved TEXT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_edges_out ON code_edges(snapshot_id, caller_kind, caller_import_id, caller_uri, caller_path, caller_bs);
+CREATE INDEX IF NOT EXISTS idx_edges_in ON code_edges(snapshot_id, callee_kind, callee_import_id, callee_uri, callee_path, callee_bs);
 CREATE VIRTUAL TABLE IF NOT EXISTS symbols_fts USING fts5(
   name, content='symbols', content_rowid='id', tokenize='unicode61'
 );
@@ -166,8 +186,9 @@ CREATE INDEX IF NOT EXISTS idx_semfacts_span ON semantic_facts(snapshot_id, rel_
 
 /// Bring any database to the current schema in ONE explicit transaction:
 /// empty files are built at current, v1 gains nonce backfill, v2 gains the
-/// semantic tables. Any failure rolls back: version marker and readable
-/// data stay exactly as before. Newer versions are rejected, never guessed.
+/// semantic tables, v3 gains the callee columns + the edges table. Any
+/// failure rolls back: version marker and readable data stay exactly as
+/// before. Newer versions are rejected, never guessed.
 pub fn migrate(conn: &Connection) -> Result<(), String> {
     let version: u32 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
@@ -192,7 +213,29 @@ pub fn migrate(conn: &Connection) -> Result<(), String> {
             )
             .map_err(|e| format!("schema migration v1->v2 failed: {e}"))?;
         }
-        conn.execute("PRAGMA user_version = 3", [])
+        // v3 databases have the old `calls` shape: add each callee column
+        // only when missing, so fresh databases (built at v4 by the DDL
+        // above) never hit a double-ALTER error.
+        for col in [
+            "callee_start_line",
+            "callee_start_col",
+            "callee_end_line",
+            "callee_end_col",
+            "callee_byte_start",
+            "callee_byte_end",
+            "tcallee_start_line",
+            "tcallee_start_col",
+            "tcallee_end_line",
+            "tcallee_end_col",
+            "tcallee_byte_start",
+            "tcallee_byte_end",
+        ] {
+            if !column_exists(conn, "calls", col)? {
+                conn.execute_batch(&format!("ALTER TABLE calls ADD COLUMN {col} INT NULL;"))
+                    .map_err(|e| format!("schema migration v3->v4 failed: {e}"))?;
+            }
+        }
+        conn.execute("PRAGMA user_version = 4", [])
             .map_err(|e| e.to_string())?;
         Ok(())
     })();
@@ -203,6 +246,20 @@ pub fn migrate(conn: &Connection) -> Result<(), String> {
             Err(e)
         }
     }
+}
+
+fn column_exists(conn: &Connection, table: &str, col: &str) -> Result<bool, String> {
+    let mut names = conn
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(|e| e.to_string())?;
+    let found = names
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?
+        .iter()
+        .any(|n| n == col);
+    Ok(found)
 }
 
 /// True when the bundled SQLite was compiled with FTS5. Pinned by test on
@@ -287,10 +344,68 @@ pub struct CallRow {
     pub end_col: u32,
     pub byte_start: usize,
     pub byte_end: usize,
+    /// Callee expression range (`function` field); `None` for legacy rows.
+    pub callee: Option<SpanCols>,
+    /// Terminal identifier/property within `callee`; `None` if inseparable.
+    pub tcallee: Option<SpanCols>,
     pub unresolved: u8,
     pub provider: String,
     pub grammar: String,
     pub language: String,
+}
+
+/// One 1-based span + byte range, shared by call callee columns.
+// Task 3 wires the derivation; allow until then (staged plan, not dead design).
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpanCols {
+    pub start_line: u32,
+    pub start_col: u32,
+    pub end_line: u32,
+    pub end_col: u32,
+    pub byte_start: usize,
+    pub byte_end: usize,
+}
+
+/// One graph endpoint. There is deliberately NO `Unknown` variant: unknown
+/// caller/target endpoints are stored as `None` with callsite/import
+/// location evidence, never a fabricated key, and BFS never expands them.
+// Task 3 wires the derivation; allow until then (staged plan, not dead design).
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq)]
+pub enum EdgeEndpoint {
+    /// SCIP identity: producing import + symbol URI (+ document for locals).
+    Scip {
+        import_id: i64,
+        symbol_uri: String,
+        doc: Option<String>,
+    },
+    /// Snapshot-local syntax identity: file + byte range of the definition.
+    SyntaxDef {
+        path: String,
+        byte_start: usize,
+        byte_end: usize,
+    },
+}
+
+/// One stored graph edge. `caller`/`callee` are `None` exactly when that
+/// endpoint is unresolved; `evidence` always carries the source location.
+// Task 3 wires the derivation; allow until then (staged plan, not dead design).
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct EdgeRow {
+    pub snapshot_id: i64,
+    pub file_id: i64,
+    pub caller: Option<EdgeEndpoint>,
+    pub caller_path: String,
+    pub caller_span_bytes: (usize, usize),
+    pub callee: Option<EdgeEndpoint>,
+    pub callee_name: String,
+    pub edge_kind: String,
+    pub precision: String,
+    pub provider: String,
+    pub evidence: String,
+    pub unresolved: Option<String>,
 }
 
 /// One semantic provider import bound to a single snapshot. `artifact_id`
@@ -720,6 +835,7 @@ pub fn promote_staging(
              DELETE FROM snapshots;
              DELETE FROM semantic_facts;
              DELETE FROM semantic_imports;
+             DELETE FROM code_edges;
              INSERT INTO snapshots SELECT * FROM src.snapshots;
              INSERT INTO files SELECT * FROM src.files;
              INSERT INTO symbols SELECT * FROM src.symbols;
@@ -727,6 +843,7 @@ pub fn promote_staging(
              INSERT INTO calls SELECT * FROM src.calls;
              INSERT INTO semantic_imports SELECT * FROM src.semantic_imports;
              INSERT INTO semantic_facts SELECT * FROM src.semantic_facts;
+             INSERT INTO code_edges SELECT * FROM src.code_edges;
              COMMIT;",
         )
         .map_err(|e| format!("promote failed, live snapshot intact: {e}"))?;
@@ -837,7 +954,7 @@ pub fn copy_mapped_facts(
     for (i, (table, extra)) in [
         ("symbols", "kind, name, start_line, start_col, end_line, end_col, byte_start, byte_end, provider, grammar, language"),
         ("imports", "text, start_line, start_col, end_line, end_col, byte_start, byte_end, provider, grammar, language"),
-        ("calls", "name, start_line, start_col, end_line, end_col, byte_start, byte_end, unresolved, provider, grammar, language"),
+        ("calls", "name, start_line, start_col, end_line, end_col, byte_start, byte_end, callee_start_line, callee_start_col, callee_end_line, callee_end_col, callee_byte_start, callee_byte_end, tcallee_start_line, tcallee_start_col, tcallee_end_line, tcallee_end_col, tcallee_byte_start, tcallee_byte_end, unresolved, provider, grammar, language"),
     ]
     .iter()
     .enumerate()
@@ -1099,8 +1216,10 @@ pub fn insert_import(
 }
 
 pub fn insert_call(conn: &Connection, snapshot_id: i64, call: &CallRow) -> Result<(), String> {
+    let c = span_opt6(&call.callee);
+    let t = span_opt6(&call.tcallee);
     conn.execute(
-        "INSERT INTO calls (snapshot_id, file_id, name, start_line, start_col, end_line, end_col, byte_start, byte_end, unresolved, provider, grammar, language) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+        "INSERT INTO calls (snapshot_id, file_id, name, start_line, start_col, end_line, end_col, byte_start, byte_end, callee_start_line, callee_start_col, callee_end_line, callee_end_col, callee_byte_start, callee_byte_end, tcallee_start_line, tcallee_start_col, tcallee_end_line, tcallee_end_col, tcallee_byte_start, tcallee_byte_end, unresolved, provider, grammar, language) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25)",
         params![
             snapshot_id,
             call.file_id,
@@ -1111,6 +1230,8 @@ pub fn insert_call(conn: &Connection, snapshot_id: i64, call: &CallRow) -> Resul
             call.end_col as i64,
             call.byte_start as i64,
             call.byte_end as i64,
+            c[0], c[1], c[2], c[3], c[4], c[5],
+            t[0], t[1], t[2], t[3], t[4], t[5],
             i64::from(call.unresolved),
             call.provider,
             call.grammar,
@@ -1119,6 +1240,310 @@ pub fn insert_call(conn: &Connection, snapshot_id: i64, call: &CallRow) -> Resul
     )
     .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+fn span_opt6(span: &Option<SpanCols>) -> [Option<i64>; 6] {
+    match span {
+        Some(s) => [
+            Some(s.start_line as i64),
+            Some(s.start_col as i64),
+            Some(s.end_line as i64),
+            Some(s.end_col as i64),
+            Some(s.byte_start as i64),
+            Some(s.byte_end as i64),
+        ],
+        None => [None, None, None, None, None, None],
+    }
+}
+
+fn read_span(row: &rusqlite::Row, base: usize) -> Result<Option<SpanCols>, rusqlite::Error> {
+    let sl: Option<i64> = row.get(base)?;
+    let sc: Option<i64> = row.get(base + 1)?;
+    let el: Option<i64> = row.get(base + 2)?;
+    let ec: Option<i64> = row.get(base + 3)?;
+    let bs: Option<i64> = row.get(base + 4)?;
+    let be: Option<i64> = row.get(base + 5)?;
+    match (sl, sc, el, ec, bs, be) {
+        (Some(sl), Some(sc), Some(el), Some(ec), Some(bs), Some(be)) => Ok(Some(SpanCols {
+            start_line: sl as u32,
+            start_col: sc as u32,
+            end_line: el as u32,
+            end_col: ec as u32,
+            byte_start: bs as usize,
+            byte_end: be as usize,
+        })),
+        _ => Ok(None),
+    }
+}
+
+/// All calls of one snapshot, including callee spans (`None` for legacy).
+// Task 3 wires the derivation; allow until then (staged plan, not dead design).
+#[allow(dead_code)]
+pub fn calls_for(conn: &Connection, snapshot_id: i64) -> Result<Vec<CallRow>, String> {
+    let mut statement = conn
+        .prepare("SELECT file_id, name, start_line, start_col, end_line, end_col, byte_start, byte_end, callee_start_line, callee_start_col, callee_end_line, callee_end_col, callee_byte_start, callee_byte_end, tcallee_start_line, tcallee_start_col, tcallee_end_line, tcallee_end_col, tcallee_byte_start, tcallee_byte_end, unresolved, provider, grammar, language FROM calls WHERE snapshot_id = ?1 ORDER BY id")
+        .map_err(|e| e.to_string())?;
+    let rows = statement
+        .query_map([snapshot_id], |row| {
+            Ok(CallRow {
+                file_id: row.get(0)?,
+                name: row.get(1)?,
+                start_line: row.get::<_, i64>(2)? as u32,
+                start_col: row.get::<_, i64>(3)? as u32,
+                end_line: row.get::<_, i64>(4)? as u32,
+                end_col: row.get::<_, i64>(5)? as u32,
+                byte_start: row.get::<_, i64>(6)? as usize,
+                byte_end: row.get::<_, i64>(7)? as usize,
+                callee: read_span(row, 8)?,
+                tcallee: read_span(row, 14)?,
+                unresolved: row.get::<_, i64>(20)? as u8,
+                provider: row.get(21)?,
+                grammar: row.get(22)?,
+                language: row.get(23)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(rows)
+}
+
+struct EndpointParts<'a> {
+    kind: &'static str,
+    import_id: Option<i64>,
+    uri: Option<&'a str>,
+    doc: Option<&'a str>,
+    path: Option<&'a str>,
+    bs: Option<i64>,
+    be: Option<i64>,
+}
+
+fn endpoint_parts(endpoint: &Option<EdgeEndpoint>) -> EndpointParts<'_> {
+    match endpoint {
+        Some(EdgeEndpoint::Scip {
+            import_id,
+            symbol_uri,
+            doc,
+        }) => EndpointParts {
+            kind: "scip",
+            import_id: Some(*import_id),
+            uri: Some(symbol_uri.as_str()),
+            doc: doc.as_deref(),
+            path: None,
+            bs: None,
+            be: None,
+        },
+        Some(EdgeEndpoint::SyntaxDef {
+            path,
+            byte_start,
+            byte_end,
+        }) => EndpointParts {
+            kind: "syntax",
+            import_id: None,
+            uri: None,
+            doc: None,
+            path: Some(path.as_str()),
+            bs: Some(*byte_start as i64),
+            be: Some(*byte_end as i64),
+        },
+        None => EndpointParts {
+            kind: "unknown",
+            import_id: None,
+            uri: None,
+            doc: None,
+            path: None,
+            bs: None,
+            be: None,
+        },
+    }
+}
+
+fn read_endpoint(
+    kind: &str,
+    import_id: Option<i64>,
+    uri: Option<String>,
+    doc: Option<String>,
+    path: Option<String>,
+    bs: Option<i64>,
+    be: Option<i64>,
+) -> Option<EdgeEndpoint> {
+    match kind {
+        "scip" => Some(EdgeEndpoint::Scip {
+            import_id: import_id?,
+            symbol_uri: uri?,
+            doc,
+        }),
+        "syntax" => Some(EdgeEndpoint::SyntaxDef {
+            path: path?,
+            byte_start: bs? as usize,
+            byte_end: be? as usize,
+        }),
+        _ => None,
+    }
+}
+
+/// Store one graph edge. Unknown endpoints stay `None` — never fabricated.
+// Task 3 wires the derivation; allow until then (staged plan, not dead design).
+#[allow(dead_code)]
+pub fn insert_edge(conn: &Connection, edge: &EdgeRow) -> Result<i64, String> {
+    let from = endpoint_parts(&edge.caller);
+    let to = endpoint_parts(&edge.callee);
+    conn.execute(
+        "INSERT INTO code_edges (snapshot_id, file_id, caller_kind, caller_import_id, caller_uri, caller_doc, caller_path, caller_bs, caller_be, caller_file, caller_sbs, caller_sbe, callee_kind, callee_import_id, callee_uri, callee_doc, callee_path, callee_bs, callee_be, callee_name, edge_kind, precision, provider, evidence, unresolved) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25)",
+        params![
+            edge.snapshot_id,
+            edge.file_id,
+            from.kind,
+            from.import_id,
+            from.uri,
+            from.doc,
+            from.path,
+            from.bs,
+            from.be,
+            edge.caller_path,
+            edge.caller_span_bytes.0 as i64,
+            edge.caller_span_bytes.1 as i64,
+            to.kind,
+            to.import_id,
+            to.uri,
+            to.doc,
+            to.path,
+            to.bs,
+            to.be,
+            edge.callee_name,
+            edge.edge_kind,
+            edge.precision,
+            edge.provider,
+            edge.evidence,
+            edge.unresolved,
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(conn.last_insert_rowid())
+}
+
+fn read_edge(row: &rusqlite::Row) -> Result<EdgeRow, rusqlite::Error> {
+    let caller_kind: String = row.get(3)?;
+    let callee_kind: String = row.get(13)?;
+    Ok(EdgeRow {
+        snapshot_id: row.get(1)?,
+        file_id: row.get(2)?,
+        caller: read_endpoint(
+            &caller_kind,
+            row.get(4)?,
+            row.get(5)?,
+            row.get(6)?,
+            row.get(7)?,
+            row.get(8)?,
+            row.get(9)?,
+        ),
+        caller_path: row.get(10)?,
+        caller_span_bytes: (
+            row.get::<_, i64>(11)? as usize,
+            row.get::<_, i64>(12)? as usize,
+        ),
+        callee: read_endpoint(
+            &callee_kind,
+            row.get(14)?,
+            row.get(15)?,
+            row.get(16)?,
+            row.get(17)?,
+            row.get(18)?,
+            row.get(19)?,
+        ),
+        callee_name: row.get(20)?,
+        edge_kind: row.get(21)?,
+        precision: row.get(22)?,
+        provider: row.get(23)?,
+        evidence: row.get(24)?,
+        unresolved: row.get(25)?,
+    })
+}
+
+const EDGE_COLS: &str = "id, snapshot_id, file_id, caller_kind, caller_import_id, caller_uri, caller_doc, caller_path, caller_bs, caller_be, caller_file, caller_sbs, caller_sbe, callee_kind, callee_import_id, callee_uri, callee_doc, callee_path, callee_bs, callee_be, callee_name, edge_kind, precision, provider, evidence, unresolved";
+
+/// Outbound edges of one endpoint (callees direction), deterministic order.
+// Task 3 wires the derivation; allow until then (staged plan, not dead design).
+#[allow(dead_code)]
+pub fn edges_outbound(
+    conn: &Connection,
+    snapshot_id: i64,
+    from: &EdgeEndpoint,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<EdgeRow>, String> {
+    query_edges(conn, snapshot_id, "caller", from, limit, offset)
+}
+
+/// Inbound edges of one endpoint (callers direction), deterministic order.
+// Task 3 wires the derivation; allow until then (staged plan, not dead design).
+#[allow(dead_code)]
+pub fn edges_inbound(
+    conn: &Connection,
+    snapshot_id: i64,
+    to: &EdgeEndpoint,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<EdgeRow>, String> {
+    query_edges(conn, snapshot_id, "callee", to, limit, offset)
+}
+
+fn query_edges(
+    conn: &Connection,
+    snapshot_id: i64,
+    prefix: &str,
+    endpoint: &EdgeEndpoint,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<EdgeRow>, String> {
+    let limit = limit.clamp(1, 1000);
+    let offset = offset.max(0);
+    let rows = match endpoint {
+        EdgeEndpoint::Scip {
+            import_id,
+            symbol_uri,
+            doc,
+        } => {
+            let doc_sql = match doc {
+                Some(_) => format!("AND {prefix}_doc = ?4"),
+                None => format!("AND {prefix}_doc IS NULL"),
+            };
+            let mut statement = conn
+                .prepare(&format!(
+                    "SELECT {EDGE_COLS} FROM code_edges WHERE snapshot_id = ?1 AND {prefix}_kind = 'scip' AND {prefix}_import_id = ?2 AND {prefix}_uri = ?3 {doc_sql} ORDER BY caller_file, caller_sbs, callee_name LIMIT ?5 OFFSET ?6"
+                ))
+                .map_err(|e| e.to_string())?;
+            let mapped = statement
+                .query_map(
+                    params![snapshot_id, import_id, symbol_uri, doc, limit, offset],
+                    read_edge,
+                )
+                .map_err(|e| e.to_string())?;
+            mapped
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?
+        }
+        EdgeEndpoint::SyntaxDef {
+            path,
+            byte_start,
+            byte_end,
+        } => {
+            let mut statement = conn
+                .prepare(&format!(
+                    "SELECT {EDGE_COLS} FROM code_edges WHERE snapshot_id = ?1 AND {prefix}_kind = 'syntax' AND {prefix}_path = ?2 AND {prefix}_bs = ?3 AND {prefix}_be = ?4 ORDER BY caller_file, caller_sbs, callee_name LIMIT ?5 OFFSET ?6"
+                ))
+                .map_err(|e| e.to_string())?;
+            let bs = *byte_start as i64;
+            let be = *byte_end as i64;
+            let mapped = statement
+                .query_map(params![snapshot_id, path, bs, be, limit, offset], read_edge)
+                .map_err(|e| e.to_string())?;
+            mapped
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?
+        }
+    };
+    Ok(rows)
 }
 
 fn snapshot_from_row(row: &rusqlite::Row) -> rusqlite::Result<Snapshot> {
@@ -1431,7 +1856,7 @@ mod tests {
         END;";
 
     #[test]
-    fn v2_db_migrates_to_v3_with_data_intact() {
+    fn v2_db_migrates_to_current_with_data_intact() {
         let dir = tmpdir("store-v2-m3");
         let path = dir.join("v2.db");
         {
@@ -1451,12 +1876,12 @@ mod tests {
         let version: u32 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, SCHEMA_VERSION);
         let snap = latest_snapshot(&conn).unwrap().unwrap();
         assert_eq!(snap.nonce, "nonce-v2");
         let (_, hits) = search_symbols(&conn, snap.id, "keep_me", 10, 0).unwrap();
         assert_eq!(hits.len(), 1, "v2 facts must survive migration");
-        for t in ["semantic_imports", "semantic_facts"] {
+        for t in ["semantic_imports", "semantic_facts", "code_edges"] {
             let n: i64 = conn
                 .query_row(
                     "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?1",
@@ -1464,12 +1889,12 @@ mod tests {
                     |r| r.get(0),
                 )
                 .unwrap();
-            assert_eq!(n, 1, "missing v3 table {t}");
+            assert_eq!(n, 1, "missing v4 table {t}");
         }
     }
 
     #[test]
-    fn v1_db_migrates_to_v3() {
+    fn v1_db_migrates_to_current() {
         let dir = tmpdir("store-v1-m3");
         let path = dir.join("old.db");
         {
@@ -1491,7 +1916,7 @@ mod tests {
         let version: u32 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, SCHEMA_VERSION);
         let snap = latest_snapshot(&conn).unwrap().unwrap();
         assert_eq!(snap.nonce, "v1-legacy-1");
         let n: i64 = conn
@@ -1896,6 +2321,8 @@ mod tests {
                 end_col: 20,
                 byte_start: 15,
                 byte_end: 30,
+                callee: None,
+                tcallee: None,
                 unresolved: 1,
                 provider: "syntax".to_string(),
                 grammar: "python:0.25.0".to_string(),
@@ -1964,6 +2391,8 @@ mod tests {
                     end_col: 20,
                     byte_start: 15,
                     byte_end: 30,
+                    callee: None,
+                    tcallee: None,
                     unresolved: 1,
                     provider: "syntax".to_string(),
                     grammar: "python:0.25.0".to_string(),
@@ -2109,6 +2538,216 @@ mod tests {
             staging.exists(),
             "staging file itself is left for the caller to clean"
         );
+    }
+
+    #[test]
+    fn m6_v4_migrate_chain_and_fresh_db() {
+        use super::{edges_outbound, insert_edge, EdgeEndpoint, EdgeRow};
+        // v1-shaped database migrates all the way to v4 with data intact.
+        let dir = tmpdir("store-m6v1");
+        let path = dir.join("old.db");
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE snapshots (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 repo TEXT NOT NULL, root TEXT NOT NULL, created_unix INTEGER NOT NULL,
+                 head TEXT, branch TEXT, dirty INTEGER NOT NULL, untracked INTEGER NOT NULL,
+                 parser_version INTEGER NOT NULL, grammar_versions TEXT NOT NULL,
+                 config_fingerprint TEXT NOT NULL, pre_fingerprint TEXT NOT NULL,
+                 post_fingerprint TEXT NOT NULL, status_at_write TEXT NOT NULL);
+                 INSERT INTO snapshots (repo, root, created_unix, head, branch, dirty, untracked, parser_version, grammar_versions, config_fingerprint, pre_fingerprint, post_fingerprint, status_at_write)
+                 VALUES ('r', 'C:\\r', 1, 'abc', 'main', 0, 0, 1, 'g', 'c', 'p', 'p', 'fresh');
+                 PRAGMA user_version = 1;",
+            )
+            .unwrap();
+        }
+        let conn = open_live(&path).unwrap();
+        migrate(&conn).unwrap();
+        let version: u32 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 4, "v1 must migrate to v4");
+        assert!(table_exists(&conn, "code_edges"), "edges table created");
+        // v3-shaped database: old calls shape without callee columns.
+        let dir = tmpdir("store-m6v3");
+        let path = dir.join("old3.db");
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE snapshots (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 repo TEXT NOT NULL, root TEXT NOT NULL, created_unix INTEGER NOT NULL,
+                 head TEXT, branch TEXT, dirty INTEGER NOT NULL, untracked INTEGER NOT NULL,
+                 parser_version INTEGER NOT NULL, grammar_versions TEXT NOT NULL,
+                 config_fingerprint TEXT NOT NULL, pre_fingerprint TEXT NOT NULL,
+                 post_fingerprint TEXT NOT NULL, status_at_write TEXT NOT NULL,
+                 nonce TEXT NOT NULL DEFAULT '');
+                 CREATE TABLE calls (id INTEGER PRIMARY KEY AUTOINCREMENT, snapshot_id INTEGER NOT NULL,
+                 file_id INTEGER NOT NULL, name TEXT, start_line INTEGER NOT NULL,
+                 start_col INTEGER NOT NULL, end_line INTEGER NOT NULL, end_col INTEGER NOT NULL,
+                 byte_start INTEGER NOT NULL, byte_end INTEGER NOT NULL,
+                 unresolved INTEGER NOT NULL, provider TEXT NOT NULL, grammar TEXT NOT NULL,
+                 language TEXT NOT NULL);
+                 INSERT INTO snapshots (repo, root, created_unix, dirty, untracked, parser_version, grammar_versions, config_fingerprint, pre_fingerprint, post_fingerprint, status_at_write, nonce)
+                 VALUES ('r', 'C:\\r', 1, 0, 0, 1, 'g', 'c', 'p', 'p', 'fresh', 'n1');
+                 INSERT INTO calls (snapshot_id, file_id, name, start_line, start_col, end_line, end_col, byte_start, byte_end, unresolved, provider, grammar, language)
+                 VALUES (1, 1, 'foo', 1, 1, 1, 9, 0, 8, 1, 'syntax', 'python:0.25.0', 'python');
+                 PRAGMA user_version = 3;",
+            )
+            .unwrap();
+        }
+        let conn = open_live(&path).unwrap();
+        migrate(&conn).unwrap();
+        let version: u32 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 4, "v3 must migrate to v4");
+        let name: Option<String> = conn
+            .query_row("SELECT name FROM calls WHERE snapshot_id = 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(name.as_deref(), Some("foo"), "old call rows survive");
+        let callee_null: Option<i64> = conn
+            .query_row(
+                "SELECT callee_byte_start FROM calls WHERE snapshot_id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(callee_null, None, "legacy rows keep NULL callee cols");
+        // Fresh database builds at v4; a second migrate is a no-op (no
+        // double-ALTER failure).
+        let dir = tmpdir("store-m6fresh");
+        let fresh = open_live(&dir.join("f.db")).unwrap();
+        migrate(&fresh).unwrap();
+        migrate(&fresh).unwrap();
+        let version: u32 = fresh
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 4);
+        // Edges round-trip through promote: hand-inserted row survives.
+        let staging = dir.join("s.db");
+        let live_path = dir.join("live.db");
+        let staging_conn = open_live(&staging).unwrap();
+        let id = insert_snapshot(&staging_conn, &sample_snapshot()).unwrap();
+        insert_edge(
+            &staging_conn,
+            &EdgeRow {
+                snapshot_id: id,
+                file_id: 1,
+                caller: Some(EdgeEndpoint::SyntaxDef {
+                    path: "a.py".to_string(),
+                    byte_start: 0,
+                    byte_end: 20,
+                }),
+                caller_path: "a.py".to_string(),
+                caller_span_bytes: (10, 18),
+                callee: None,
+                callee_name: "foo".to_string(),
+                edge_kind: "POTENTIAL_CALL".to_string(),
+                precision: "Heuristic".to_string(),
+                provider: "syntax".to_string(),
+                evidence: "{\"path\":\"a.py\"}".to_string(),
+                unresolved: Some("no-overlap".to_string()),
+            },
+        )
+        .unwrap();
+        let live = open_live(&live_path).unwrap();
+        let base = live_base(&live).unwrap();
+        promote_staging(&live, &staging, &base).unwrap();
+        let live_snap = latest_snapshot(&live).unwrap().unwrap();
+        let key = EdgeEndpoint::SyntaxDef {
+            path: "a.py".to_string(),
+            byte_start: 0,
+            byte_end: 20,
+        };
+        let out = edges_outbound(&live, live_snap.id, &key, 50, 0).unwrap();
+        assert_eq!(out.len(), 1, "promoted edge round-trips");
+        assert!(out[0].callee.is_none(), "unknown target stays unknown");
+        assert_eq!(out[0].unresolved.as_deref(), Some("no-overlap"));
+    }
+
+    fn table_exists(conn: &rusqlite::Connection, table: &str) -> bool {
+        conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            [table],
+            |r| r.get::<_, i64>(0),
+        )
+        .map(|n| n == 1)
+        .unwrap_or(false)
+    }
+
+    #[test]
+    fn m6_call_callee_roundtrip_with_legacy_null() {
+        use super::{calls_for, CallRow};
+        let conn = open_memory().unwrap();
+        let snap = insert_snapshot(&conn, &sample_snapshot()).unwrap();
+        let fid = insert_file(
+            &conn,
+            snap,
+            &FileRow {
+                path: "a.py".to_string(),
+                language: "python".to_string(),
+                bytes: 30,
+                digest: "d".to_string(),
+                errors: 0,
+            },
+        )
+        .unwrap();
+        insert_call(
+            &conn,
+            snap,
+            &CallRow {
+                file_id: fid,
+                name: Some("w.process".to_string()),
+                start_line: 2,
+                start_col: 5,
+                end_line: 2,
+                end_col: 20,
+                byte_start: 15,
+                byte_end: 30,
+                callee: Some(super::SpanCols {
+                    start_line: 2,
+                    start_col: 5,
+                    end_line: 2,
+                    end_col: 14,
+                    byte_start: 15,
+                    byte_end: 24,
+                }),
+                tcallee: Some(super::SpanCols {
+                    start_line: 2,
+                    start_col: 7,
+                    end_line: 2,
+                    end_col: 14,
+                    byte_start: 17,
+                    byte_end: 24,
+                }),
+                unresolved: 1,
+                provider: "syntax".to_string(),
+                grammar: "python:0.25.0".to_string(),
+                language: "python".to_string(),
+            },
+        )
+        .unwrap();
+        // Legacy row without callee data reads back as None.
+        conn.execute(
+            "INSERT INTO calls (snapshot_id, file_id, name, start_line, start_col, end_line, end_col, byte_start, byte_end, unresolved, provider, grammar, language) VALUES (?1,?2,'old',1,1,1,4,0,3,1,'syntax','python:0.25.0','python')",
+            [snap, fid],
+        )
+        .unwrap();
+        let rows = calls_for(&conn, snap).unwrap();
+        assert_eq!(rows.len(), 2);
+        let precise = rows
+            .iter()
+            .find(|r| r.name.as_deref() == Some("w.process"))
+            .unwrap();
+        assert_eq!(precise.callee.as_ref().unwrap().byte_start, 15);
+        assert_eq!(precise.tcallee.as_ref().unwrap().byte_start, 17);
+        let legacy = rows
+            .iter()
+            .find(|r| r.name.as_deref() == Some("old"))
+            .unwrap();
+        assert!(legacy.callee.is_none() && legacy.tcallee.is_none());
     }
 
     #[test]
