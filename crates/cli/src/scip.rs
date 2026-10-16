@@ -306,6 +306,42 @@ struct DecodedSource {
     raw_map: Option<Vec<usize>>,
 }
 
+/// Task 4 CLI positions are 0-based UTF-8 byte columns in decoded text.
+/// Reuse the importer decoder so UTF-16 disk bytes (BOM included) keep their
+/// original raw offsets; producer occurrence column encodings are irrelevant.
+pub(crate) fn query_byte_offset(
+    raw: &[u8],
+    encoding: &str,
+    line0: u32,
+    col0: u32,
+) -> Result<usize, String> {
+    let encoding = match encoding {
+        "UTF8" => TextEncoding::UTF8,
+        "UTF16" => TextEncoding::UTF16,
+        _ => return Err("unsupported source text encoding".to_string()),
+    };
+    let decoded = decode_source(raw, encoding, "anchor")?;
+    let mut start = 0;
+    let line = decoded
+        .text
+        .split('\n')
+        .nth(line0 as usize)
+        .ok_or("position outside source")?;
+    for line in decoded.text.split('\n').take(line0 as usize) {
+        start += line.len() + 1;
+    }
+    let line = line.strip_suffix('\r').unwrap_or(line);
+    let col = col0 as usize;
+    if col > line.len() || !line.is_char_boundary(col) {
+        return Err("position outside source or mid-character".to_string());
+    }
+    let offset = start + col;
+    Ok(match decoded.raw_map {
+        Some(map) => map.get(offset).copied().unwrap_or(raw.len()),
+        None => offset,
+    })
+}
+
 /// Decode on-disk bytes per the index `text_document_encoding`. UTF-16
 /// requires a BOM (LE `FF FE` / BE `FE FF`); BOM-less or odd-length input
 /// is rejected rather than guessed. Digests always cover the RAW bytes

@@ -57,7 +57,7 @@ pub fn unify(a: &EdgeEndpoint, b: &EdgeEndpoint) -> bool {
 /// The trust root is `import_file` — the only writer of such rows —
 /// re-validated here defense-in-depth, so a forged row can never resolve
 /// `CALLS` no matter what provider it claims.
-fn import_provenance_ok(import: &store::SemanticImport) -> bool {
+pub(crate) fn import_provenance_ok(import: &store::SemanticImport) -> bool {
     import.provider_name != "lsp-subprocess"
         && !import.artifact_id.is_empty()
         && import
@@ -113,6 +113,7 @@ fn has_receiver(name: &str) -> bool {
 }
 
 fn evidence_json(path: &str, span_bs: usize, span_be: usize, extra: &str) -> String {
+    let path = crate::json::escape(path);
     format!("{{\"path\":\"{path}\",\"span\":[{span_bs},{span_be}]{extra}}}")
 }
 
@@ -251,6 +252,18 @@ pub fn upsert_semantic_edges(
         path_of.insert(*fid, path.as_str());
         digest_of.insert(*fid, digest.as_str());
     }
+    // A row ID is not a source revision. Contradictory indexed bytes cannot
+    // participate in strict reference/definition proof or owner bridging.
+    // Unindexed semantic documents retain M5's digest verification lifecycle.
+    let facts: Vec<_> = facts
+        .into_iter()
+        .filter(|fact| match id_map.get(&fact.rel_path) {
+            Some((fid, digest)) => {
+                fact.file_id.is_none_or(|bound| bound == *fid) && fact.file_digest == *digest
+            }
+            None => fact.file_id.is_none(),
+        })
+        .collect();
     // Definitions by URI; locals additionally keyed by document.
     let mut defs: BTreeMap<&str, Vec<&store::SemanticFact>> = BTreeMap::new();
     for fact in &facts {
@@ -276,6 +289,7 @@ pub fn upsert_semantic_edges(
     let empty: Vec<&store::CallRow> = Vec::new();
     let mut stats = EdgeStats::default();
     let mut resolved: BTreeSet<(i64, usize, usize)> = BTreeSet::new();
+    let mut terminal_sites = BTreeSet::new();
     let mut out = Vec::new();
     for fact in &facts {
         let uri = match fact.symbol_uri.as_deref() {
@@ -321,6 +335,39 @@ pub fn upsert_semantic_edges(
             let call = terminal_hits[0];
             let path = path_of.get(&call.file_id).copied().unwrap_or("?");
             let owner = owner_of(&symbols, call.file_id, call.byte_start);
+            let site = (call.file_id, call.byte_start, call.byte_end);
+            if !terminal_sites.insert(site) {
+                continue;
+            }
+            let terminal = call.tcallee.as_ref().expect("terminal overlap");
+            let targets: BTreeSet<_> = facts
+                .iter()
+                .filter(|candidate| {
+                    candidate.roles & 1 == 0
+                        && candidate.rel_path == path
+                        && candidate.byte_start < terminal.byte_end
+                        && terminal.byte_start < candidate.byte_end
+                })
+                .filter_map(|candidate| candidate.symbol_uri.as_deref())
+                .collect();
+            if targets.len() > 1 {
+                out.push(potential_row(
+                    (snapshot_id, import_id),
+                    call.file_id,
+                    path,
+                    call,
+                    owner.map(|o| EdgeEndpoint::SyntaxDef {
+                        path: path.to_string(),
+                        byte_start: o.byte_start,
+                        byte_end: o.byte_end,
+                    }),
+                    call.name.as_deref().map(terminal_of).unwrap_or_default(),
+                    &format!("ambiguous:{}", targets.len()),
+                ));
+                stats.potential += 1;
+                resolved.insert(site);
+                continue;
+            }
             let external = fact.external;
             let def = def_for(uri, &fact.rel_path);
             match (owner, def, external) {
@@ -375,7 +422,7 @@ pub fn upsert_semantic_edges(
                     });
                     let terminal = call.name.as_deref().map(terminal_of).unwrap_or_default();
                     out.push(potential_row(
-                        snapshot_id,
+                        (snapshot_id, import_id),
                         call.file_id,
                         path,
                         call,
@@ -399,7 +446,7 @@ pub fn upsert_semantic_edges(
                 });
                 let terminal = call.name.as_deref().map(terminal_of).unwrap_or_default();
                 out.push(potential_row(
-                    snapshot_id,
+                    (snapshot_id, import_id),
                     call.file_id,
                     path,
                     call,
@@ -421,7 +468,7 @@ pub fn upsert_semantic_edges(
                 });
                 let terminal = call.name.as_deref().map(terminal_of).unwrap_or_default();
                 out.push(potential_row(
-                    snapshot_id,
+                    (snapshot_id, import_id),
                     call.file_id,
                     path,
                     call,
@@ -468,7 +515,7 @@ pub fn upsert_semantic_edges(
 }
 
 fn potential_row(
-    snapshot_id: i64,
+    scope: (i64, i64),
     file_id: i64,
     path: &str,
     call: &store::CallRow,
@@ -476,6 +523,7 @@ fn potential_row(
     terminal: &str,
     reason: &str,
 ) -> EdgeRow {
+    let (snapshot_id, import_id) = scope;
     EdgeRow {
         snapshot_id,
         file_id,
@@ -487,7 +535,12 @@ fn potential_row(
         edge_kind: EdgeKind::PotentialCall.as_str().to_string(),
         precision: "Heuristic".to_string(),
         provider: "scip-import".to_string(),
-        evidence: evidence_json(path, call.byte_start, call.byte_end, ""),
+        evidence: evidence_json(
+            path,
+            call.byte_start,
+            call.byte_end,
+            &format!(",\"import\":{import_id}"),
+        ),
         unresolved: Some(reason.to_string()),
     }
 }
@@ -495,7 +548,7 @@ fn potential_row(
 /// Map a proven owner definition to its SCIP identity in this import when the
 /// definition fact is bound to the indexed file: same file, contained
 /// occurrence, same import, same display name, AND file-identity evidence —
-/// the fact's `file_id` when present, else a digest match against the files
+/// the fact's `file_id` when present, plus a digest match against the files
 /// row (stale or foreign facts never bridge, even with the right name).
 /// Local symbols additionally require the fact document. `None` keeps the
 /// snapshot-local syntax identity. This is the single validated
@@ -510,20 +563,21 @@ fn owner_scip(
 ) -> Option<EdgeEndpoint> {
     let facts = store::semantic_facts_of_import(conn, snapshot_id, import_id).ok()?;
     let name = owner.name.as_deref()?;
-    facts
+    let candidates = facts
         .iter()
         .filter(|f| f.roles & 0x1 != 0)
         .filter(|f| f.display_name.as_deref() == Some(name))
-        .find(|f| {
+        .filter(|f| {
             f.rel_path == path
                 && owner.byte_start <= f.byte_start
                 && f.byte_end <= owner.byte_end
+                && f.file_digest == file_digest
                 && match f.file_id {
                     Some(fid) => fid == owner.file_id,
                     None => f.file_digest == file_digest,
                 }
         })
-        .and_then(|f| {
+        .filter_map(|f| {
             f.symbol_uri.as_deref().map(|uri| EdgeEndpoint::Scip {
                 import_id,
                 symbol_uri: uri.to_string(),
@@ -533,7 +587,70 @@ fn owner_scip(
                     None
                 },
             })
-        })
+        });
+    let mut unique = None;
+    for candidate in candidates {
+        if unique
+            .as_ref()
+            .is_some_and(|previous| !unify(previous, &candidate))
+        {
+            return None;
+        }
+        unique = Some(candidate);
+    }
+    unique
+}
+
+/// Query aliases reuse the exact same validated owner mapping as derivation.
+/// They retrieve unresolved syntax rows; they never change edge identity.
+pub(crate) fn syntax_aliases(
+    conn: &rusqlite::Connection,
+    snapshot_id: i64,
+    endpoint: &EdgeEndpoint,
+) -> Result<Vec<EdgeEndpoint>, String> {
+    let EdgeEndpoint::Scip {
+        import_id,
+        symbol_uri,
+        doc,
+    } = endpoint
+    else {
+        return Ok(Vec::new());
+    };
+    let valid = store::semantic_import_by_id(conn, *import_id)?
+        .is_some_and(|(_, i)| i.snapshot_id == snapshot_id && import_provenance_ok(&i));
+    if !valid {
+        return Ok(Vec::new());
+    }
+    let files = store::file_id_map(conn, snapshot_id)?;
+    let mut aliases = Vec::new();
+    for fact in store::semantic_facts_for(conn, snapshot_id, symbol_uri)? {
+        if fact.import_id != *import_id
+            || fact.roles & 1 == 0
+            || doc.as_ref().is_some_and(|p| *p != fact.rel_path)
+        {
+            continue;
+        }
+        let Some((fid, digest)) = files.get(&fact.rel_path) else {
+            continue;
+        };
+        let symbols = store::symbols_at(conn, snapshot_id, &fact.rel_path)?;
+        let Some(owner) = owner_of(&symbols, *fid, fact.byte_start) else {
+            continue;
+        };
+        if owner_scip(conn, snapshot_id, *import_id, owner, &fact.rel_path, digest)
+            .is_some_and(|mapped| unify(endpoint, &mapped))
+        {
+            let alias = EdgeEndpoint::SyntaxDef {
+                path: fact.rel_path,
+                byte_start: owner.byte_start,
+                byte_end: owner.byte_end,
+            };
+            if !aliases.iter().any(|previous| unify(previous, &alias)) {
+                aliases.push(alias);
+            }
+        }
+    }
+    Ok(aliases)
 }
 
 /// Full re-derivation after semantic carry-over and `import_id` rebinding.
@@ -1301,6 +1418,220 @@ mod tests {
             matches!(inbound[0].caller, Some(EdgeEndpoint::SyntaxDef { .. })),
             "unproven caller stays snapshot-local, never a fabricated Scip: {:?}",
             inbound[0].caller
+        );
+    }
+
+    #[test]
+    fn edges_bridge_matching_file_id_does_not_override_changed_digest() {
+        let conn = mem_db();
+        let snap = mk_snap(&conn);
+        let src = b"def caller():\n    return target()\n";
+        ingest_py(&conn, snap, "main.py", src);
+        let imp = mk_import_full(
+            &conn,
+            snap,
+            "scip-import",
+            "definitions,references",
+            "UTF8",
+            "artifact",
+        );
+        let owner = store::symbols_for(&conn, snap).unwrap().remove(0);
+        let mut fact = mk_fact(
+            snap,
+            imp,
+            "main.py",
+            "old-revision-digest",
+            Some("caller-uri"),
+            "caller",
+            1,
+            (1, 5, 1, 11),
+            (4, 10),
+            false,
+        );
+        fact.file_id = Some(owner.file_id);
+        store::insert_semantic_facts(&conn, &[fact]).unwrap();
+        assert!(
+            owner_scip(
+                &conn,
+                snap,
+                imp,
+                &owner,
+                "main.py",
+                &store::content_digest(src)
+            )
+            .is_none(),
+            "row ID alone must not override contradictory source identity"
+        );
+    }
+
+    #[test]
+    fn edges_evidence_escapes_source_paths() {
+        let encoded = evidence_json("a\"\\\n.py", 4, 9, "");
+        let value: serde_json::Value =
+            serde_json::from_str(&encoded).expect("path must be JSON escaped");
+        assert_eq!(value["path"], "a\"\\\n.py");
+    }
+
+    #[test]
+    fn edges_bridge_ambiguous_semantic_owners_stays_syntax() {
+        let conn = mem_db();
+        let snap = mk_snap(&conn);
+        let src = b"def caller():\n    pass\n";
+        let fid = ingest_py(&conn, snap, "main.py", src);
+        let imp = mk_import_full(
+            &conn,
+            snap,
+            "scip-import",
+            "definitions,references",
+            "UTF8",
+            "artifact",
+        );
+        let owner = store::symbols_for(&conn, snap).unwrap().remove(0);
+        for uri in ["owner-a", "owner-b"] {
+            let mut fact = mk_fact(
+                snap,
+                imp,
+                "main.py",
+                &store::content_digest(src),
+                Some(uri),
+                "caller",
+                1,
+                (1, 5, 1, 11),
+                (4, 10),
+                false,
+            );
+            fact.file_id = Some(fid);
+            store::insert_semantic_facts(&conn, &[fact]).unwrap();
+        }
+        assert!(
+            owner_scip(
+                &conn,
+                snap,
+                imp,
+                &owner,
+                "main.py",
+                &store::content_digest(src)
+            )
+            .is_none(),
+            "ambiguous semantic owners must not pick the first row"
+        );
+    }
+
+    #[test]
+    fn edges_stale_reference_or_target_digest_never_proves_calls() {
+        for stale_reference in [true, false] {
+            let conn = mem_db();
+            let snap = mk_snap(&conn);
+            let main = b"def caller():\n    return target()\n";
+            let lib = b"def target():\n    return 1\n";
+            let fid = ingest_py(&conn, snap, "main.py", main);
+            let target_fid = ingest_py(&conn, snap, "lib.py", lib);
+            let imp = mk_import_full(
+                &conn,
+                snap,
+                "scip-import",
+                "definitions,references",
+                "UTF8",
+                "artifact",
+            );
+            let mut reference = mk_fact(
+                snap,
+                imp,
+                "main.py",
+                &store::content_digest(main),
+                Some("target-uri"),
+                "target",
+                0,
+                (2, 12, 2, 18),
+                (25, 31),
+                false,
+            );
+            reference.file_id = Some(fid);
+            let mut target = mk_fact(
+                snap,
+                imp,
+                "lib.py",
+                &store::content_digest(lib),
+                Some("target-uri"),
+                "target",
+                1,
+                (1, 5, 1, 11),
+                (4, 10),
+                false,
+            );
+            target.file_id = Some(target_fid);
+            if stale_reference {
+                reference.file_digest = "old-reference".to_string();
+            } else {
+                target.file_digest = "old-target".to_string();
+            }
+            store::insert_semantic_facts(&conn, &[reference, target]).unwrap();
+            assert_eq!(
+                upsert_semantic_edges(&conn, snap, imp).unwrap().calls,
+                0,
+                "same row ID cannot prove source alignment; stale_reference={stale_reference}"
+            );
+        }
+    }
+
+    #[test]
+    fn edges_two_semantic_targets_at_one_terminal_are_potential_only() {
+        let conn = mem_db();
+        let snap = mk_snap(&conn);
+        let main = b"def caller():\n    target()\n";
+        let lib = b"def target():\n    pass\n";
+        ingest_py(&conn, snap, "main.py", main);
+        for path in ["a.py", "b.py"] {
+            ingest_py(&conn, snap, path, lib);
+        }
+        let imp = mk_import_full(
+            &conn,
+            snap,
+            "scip-import",
+            "definitions,references",
+            "UTF8",
+            "artifact",
+        );
+        for (path, uri) in [("a.py", "target-a"), ("b.py", "target-b")] {
+            store::insert_semantic_facts(
+                &conn,
+                &[
+                    mk_fact(
+                        snap,
+                        imp,
+                        path,
+                        &store::content_digest(lib),
+                        Some(uri),
+                        "target",
+                        1,
+                        (1, 5, 1, 11),
+                        (4, 10),
+                        false,
+                    ),
+                    mk_fact(
+                        snap,
+                        imp,
+                        "main.py",
+                        &store::content_digest(main),
+                        Some(uri),
+                        "target",
+                        0,
+                        (2, 5, 2, 11),
+                        (18, 24),
+                        false,
+                    ),
+                ],
+            )
+            .unwrap();
+        }
+        let result = upsert_semantic_edges(&conn, snap, imp).unwrap();
+        assert_eq!(
+            result.calls, 0,
+            "multiple semantic candidates cannot prove either CALLS edge"
+        );
+        assert_eq!(
+            result.potential, 1,
+            "one unresolved callsite, not duplicated per candidate"
         );
     }
 

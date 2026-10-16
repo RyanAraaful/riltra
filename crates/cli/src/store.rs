@@ -604,6 +604,39 @@ pub fn semantic_facts_of_import(
         .map_err(|e| e.to_string())
 }
 
+/// All symbols of one file in one snapshot, ordered by start byte.
+/// Positional anchor resolution for M6 edge queries.
+pub fn symbols_at(
+    conn: &Connection,
+    snapshot_id: i64,
+    rel_path: &str,
+) -> Result<Vec<SymbolRow>, String> {
+    let mut statement = conn
+        .prepare("SELECT s.file_id, s.kind, s.name, s.start_line, s.start_col, s.end_line, s.end_col, s.byte_start, s.byte_end, s.provider, s.grammar, s.language FROM symbols AS s JOIN files AS f ON f.id = s.file_id AND f.snapshot_id = s.snapshot_id WHERE s.snapshot_id = ?1 AND f.path = ?2 ORDER BY s.byte_start, s.byte_end")
+        .map_err(|e| e.to_string())?;
+    let mapped = statement
+        .query_map(params![snapshot_id, rel_path], |row| {
+            Ok(SymbolRow {
+                file_id: row.get(0)?,
+                kind: row.get(1)?,
+                name: row.get(2)?,
+                start_line: row.get::<_, i64>(3)? as u32,
+                start_col: row.get::<_, i64>(4)? as u32,
+                end_line: row.get::<_, i64>(5)? as u32,
+                end_col: row.get::<_, i64>(6)? as u32,
+                byte_start: row.get::<_, i64>(7)? as usize,
+                byte_end: row.get::<_, i64>(8)? as usize,
+                provider: row.get(9)?,
+                grammar: row.get(10)?,
+                language: row.get(11)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    mapped
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())
+}
+
 /// All stored facts for one symbol in one snapshot, ordered by path/line.
 #[allow(dead_code)]
 pub fn semantic_facts_for(
@@ -1426,8 +1459,6 @@ fn endpoint_parts(endpoint: &Option<EdgeEndpoint>) -> EndpointParts<'_> {
     }
 }
 
-// Task 4 queries are the production caller; allow until then.
-#[allow(dead_code)]
 fn read_endpoint(
     kind: &str,
     import_id: Option<i64>,
@@ -1490,8 +1521,6 @@ pub fn insert_edge(conn: &Connection, edge: &EdgeRow) -> Result<i64, String> {
     Ok(conn.last_insert_rowid())
 }
 
-// Task 4 queries are the production caller; allow until then.
-#[allow(dead_code)]
 fn read_edge(row: &rusqlite::Row) -> Result<EdgeRow, rusqlite::Error> {
     let caller_kind: String = row.get(3)?;
     let callee_kind: String = row.get(13)?;
@@ -1530,13 +1559,113 @@ fn read_edge(row: &rusqlite::Row) -> Result<EdgeRow, rusqlite::Error> {
     })
 }
 
-// Task 4 queries are the production caller; allow until then.
-#[allow(dead_code)]
 const EDGE_COLS: &str = "id, snapshot_id, file_id, caller_kind, caller_import_id, caller_uri, caller_doc, caller_path, caller_bs, caller_be, caller_file, caller_sbs, caller_sbe, callee_kind, callee_import_id, callee_uri, callee_doc, callee_path, callee_bs, callee_be, callee_name, edge_kind, precision, provider, evidence, unresolved";
 
+// Total order within a pinned snapshot, shared by exact and candidate queries.
+const EDGE_ORDER: &str = "caller_file, caller_sbs, callee_kind, callee_import_id, callee_uri, callee_doc, callee_path, callee_bs, callee_be, caller_sbe, edge_kind, caller_kind, caller_import_id, caller_uri, caller_doc, caller_path, caller_bs, caller_be, provider, id";
+
+pub struct EdgeSelection<'a> {
+    pub snapshot_id: i64,
+    pub endpoint: &'a EdgeEndpoint,
+    pub inbound: bool,
+    pub candidate_name: Option<&'a str>,
+    pub candidate_paths: &'a [String],
+    pub syntax_aliases: &'a [EdgeEndpoint],
+}
+
+impl EdgeSelection<'_> {
+    fn sql(&self) -> (String, Vec<rusqlite::types::Value>) {
+        use rusqlite::types::Value;
+        let p = if self.inbound { "callee" } else { "caller" };
+        let owned = Some(self.endpoint.clone());
+        let part = endpoint_parts(&owned);
+        let text = |v: Option<&str>| v.map(|s| Value::Text(s.to_string())).unwrap_or(Value::Null);
+        let num = |v: Option<i64>| v.map(Value::Integer).unwrap_or(Value::Null);
+        let values = vec![
+            Value::Integer(self.snapshot_id),
+            text(Some(part.kind)),
+            num(part.import_id),
+            text(part.uri),
+            text(part.doc),
+            text(part.path),
+            num(part.bs),
+            num(part.be),
+            text(self.candidate_name),
+            Value::Text(serde_json::to_string(self.candidate_paths).expect("string paths")),
+            Value::Text(
+                serde_json::to_string(
+                    &self
+                        .syntax_aliases
+                        .iter()
+                        .filter_map(|alias| match alias {
+                            EdgeEndpoint::SyntaxDef {
+                                path,
+                                byte_start,
+                                byte_end,
+                            } => Some(serde_json::json!([path, byte_start, byte_end])),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>(),
+                )
+                .expect("syntax aliases"),
+            ),
+        ];
+        let predicate = format!("snapshot_id = ?1 AND (({p}_kind = ?2 AND {p}_import_id IS ?3 AND {p}_uri IS ?4 AND {p}_doc IS ?5 AND {p}_path IS ?6 AND {p}_bs IS ?7 AND {p}_be IS ?8) OR (edge_kind = 'POTENTIAL_CALL' AND callee_kind = 'unknown' AND callee_name = ?9 AND (provider = 'syntax' OR CASE WHEN json_valid(evidence) THEN json_extract(evidence, '$.import') END = ?3) AND caller_file IN (SELECT value FROM json_each(?10))) OR (caller_kind = 'syntax' AND (provider = 'syntax' OR callee_import_id = ?3 OR CASE WHEN json_valid(evidence) THEN json_extract(evidence, '$.import') END = ?3) AND EXISTS (SELECT 1 FROM json_each(?11) a WHERE caller_path = json_extract(a.value, '$[0]') AND caller_bs = json_extract(a.value, '$[1]') AND caller_be = json_extract(a.value, '$[2]'))))");
+        (predicate, values)
+    }
+}
+
+pub struct EdgeCounts {
+    pub total: usize,
+    pub unresolved_owner: usize,
+    pub unresolved_target: usize,
+    pub dynamic_calls: usize,
+    pub ambiguous_calls: usize,
+    pub unresolved: usize,
+}
+
+pub fn selected_edge_counts(
+    conn: &Connection,
+    selection: &EdgeSelection<'_>,
+) -> Result<EdgeCounts, String> {
+    let (predicate, values) = selection.sql();
+    edge_counts(conn, &predicate, values)
+}
+
+pub fn snapshot_edge_counts(conn: &Connection, snapshot_id: i64) -> Result<EdgeCounts, String> {
+    edge_counts(
+        conn,
+        "snapshot_id = ?1 AND edge_kind != 'IMPORTS'",
+        vec![rusqlite::types::Value::Integer(snapshot_id)],
+    )
+}
+
+fn edge_counts(
+    conn: &Connection,
+    predicate: &str,
+    values: Vec<rusqlite::types::Value>,
+) -> Result<EdgeCounts, String> {
+    conn.query_row(&format!("SELECT COUNT(*), COALESCE(SUM(caller_kind = 'unknown'),0), COALESCE(SUM(callee_kind = 'unknown'),0), COALESCE(SUM(unresolved = 'dynamic'),0), COALESCE(SUM(unresolved LIKE 'ambiguous:%'),0), COALESCE(SUM(unresolved IS NOT NULL),0) FROM code_edges WHERE {predicate}"), rusqlite::params_from_iter(values), |r| Ok(EdgeCounts { total: r.get::<_, i64>(0)? as usize, unresolved_owner: r.get::<_, i64>(1)? as usize, unresolved_target: r.get::<_, i64>(2)? as usize, dynamic_calls: r.get::<_, i64>(3)? as usize, ambiguous_calls: r.get::<_, i64>(4)? as usize, unresolved: r.get::<_, i64>(5)? as usize })).map_err(|e| e.to_string())
+}
+
+pub fn selected_edge_page(
+    conn: &Connection,
+    selection: &EdgeSelection<'_>,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<EdgeRow>, String> {
+    let (predicate, mut values) = selection.sql();
+    values.push(rusqlite::types::Value::Integer(limit.clamp(1, 1000)));
+    values.push(rusqlite::types::Value::Integer(offset.max(0)));
+    let mut stmt = conn.prepare(&format!("SELECT {EDGE_COLS} FROM code_edges WHERE {predicate} ORDER BY {EDGE_ORDER} LIMIT ?12 OFFSET ?13")).map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(values), read_edge)
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())
+}
+
 /// Outbound edges of one endpoint (callees direction), deterministic order.
-// Task 4 queries are the production caller; allow until then.
-#[allow(dead_code)]
 pub fn edges_outbound(
     conn: &Connection,
     snapshot_id: i64,
@@ -1548,8 +1677,6 @@ pub fn edges_outbound(
 }
 
 /// Inbound edges of one endpoint (callers direction), deterministic order.
-// Task 4 queries are the production caller; allow until then.
-#[allow(dead_code)]
 pub fn edges_inbound(
     conn: &Connection,
     snapshot_id: i64,
@@ -1560,8 +1687,6 @@ pub fn edges_inbound(
     query_edges(conn, snapshot_id, "callee", to, limit, offset)
 }
 
-// Task 4 queries are the production caller; allow until then.
-#[allow(dead_code)]
 fn query_edges(
     conn: &Connection,
     snapshot_id: i64,
@@ -1570,54 +1695,19 @@ fn query_edges(
     limit: i64,
     offset: i64,
 ) -> Result<Vec<EdgeRow>, String> {
-    let limit = limit.clamp(1, 1000);
-    let offset = offset.max(0);
-    let rows = match endpoint {
-        EdgeEndpoint::Scip {
-            import_id,
-            symbol_uri,
-            doc,
-        } => {
-            let doc_sql = match doc {
-                Some(_) => format!("AND {prefix}_doc = ?4"),
-                None => format!("AND {prefix}_doc IS NULL"),
-            };
-            let mut statement = conn
-                .prepare(&format!(
-                    "SELECT {EDGE_COLS} FROM code_edges WHERE snapshot_id = ?1 AND {prefix}_kind = 'scip' AND {prefix}_import_id = ?2 AND {prefix}_uri = ?3 {doc_sql} ORDER BY caller_file, caller_sbs, callee_name LIMIT ?5 OFFSET ?6"
-                ))
-                .map_err(|e| e.to_string())?;
-            let mapped = statement
-                .query_map(
-                    params![snapshot_id, import_id, symbol_uri, doc, limit, offset],
-                    read_edge,
-                )
-                .map_err(|e| e.to_string())?;
-            mapped
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| e.to_string())?
-        }
-        EdgeEndpoint::SyntaxDef {
-            path,
-            byte_start,
-            byte_end,
-        } => {
-            let mut statement = conn
-                .prepare(&format!(
-                    "SELECT {EDGE_COLS} FROM code_edges WHERE snapshot_id = ?1 AND {prefix}_kind = 'syntax' AND {prefix}_path = ?2 AND {prefix}_bs = ?3 AND {prefix}_be = ?4 ORDER BY caller_file, caller_sbs, callee_name LIMIT ?5 OFFSET ?6"
-                ))
-                .map_err(|e| e.to_string())?;
-            let bs = *byte_start as i64;
-            let be = *byte_end as i64;
-            let mapped = statement
-                .query_map(params![snapshot_id, path, bs, be, limit, offset], read_edge)
-                .map_err(|e| e.to_string())?;
-            mapped
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| e.to_string())?
-        }
-    };
-    Ok(rows)
+    selected_edge_page(
+        conn,
+        &EdgeSelection {
+            snapshot_id,
+            endpoint,
+            inbound: prefix == "callee",
+            candidate_name: None,
+            candidate_paths: &[],
+            syntax_aliases: &[],
+        },
+        limit,
+        offset,
+    )
 }
 
 fn snapshot_from_row(row: &rusqlite::Row) -> rusqlite::Result<Snapshot> {

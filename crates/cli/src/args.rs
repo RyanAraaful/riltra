@@ -39,6 +39,31 @@ pub enum Command {
     Semantic {
         op: SemanticOp,
     },
+    Edge {
+        op: EdgeOp,
+    },
+}
+
+#[derive(Debug, PartialEq)]
+pub enum EdgeOp {
+    Callers {
+        repo: String,
+        path: String,
+        line: String,
+        col: String,
+        symbol: Option<String>,
+        limit: Option<String>,
+        offset: Option<String>,
+    },
+    Callees {
+        repo: String,
+        path: String,
+        line: String,
+        col: String,
+        symbol: Option<String>,
+        limit: Option<String>,
+        offset: Option<String>,
+    },
 }
 
 #[derive(Debug, PartialEq)]
@@ -280,6 +305,66 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             }
             _ => Err(crate::usage()),
         },
+        "callers" => parse_edge_args(args, true).map(|op| Command::Edge { op }),
+        "callees" => parse_edge_args(args, false).map(|op| Command::Edge { op }),
+        _ => Err(crate::usage()),
+    }
+}
+
+/// Shared `callers`/`callees` flag parsing: anchored position plus optional
+/// identity check and bounded pagination. `Err` is the usage text (exit 2).
+fn parse_edge_args(args: &[String], callers: bool) -> Result<EdgeOp, String> {
+    let mut repo = None;
+    let mut path = None;
+    let mut line = None;
+    let mut col = None;
+    let mut symbol = None;
+    let mut limit = None;
+    let mut offset = None;
+    let mut i = 1;
+    while i < args.len() {
+        if let Some(v) = take_value(args, &mut i, "--repo") {
+            repo = Some(v);
+        } else if let Some(v) = take_value(args, &mut i, "--path") {
+            path = Some(v);
+        } else if let Some(v) = take_value(args, &mut i, "--line") {
+            line = Some(v);
+        } else if let Some(v) = take_value(args, &mut i, "--col") {
+            col = Some(v);
+        } else if let Some(v) = take_value(args, &mut i, "--symbol") {
+            symbol = Some(v);
+        } else if let Some(v) = take_value(args, &mut i, "--limit") {
+            limit = Some(v);
+        } else if let Some(v) = take_value(args, &mut i, "--offset") {
+            offset = Some(v);
+        } else {
+            return Err(crate::usage());
+        }
+    }
+    match (repo, path, line, col) {
+        (Some(repo), Some(path), Some(line), Some(col)) => {
+            if callers {
+                Ok(EdgeOp::Callers {
+                    repo,
+                    path,
+                    line,
+                    col,
+                    symbol,
+                    limit,
+                    offset,
+                })
+            } else {
+                Ok(EdgeOp::Callees {
+                    repo,
+                    path,
+                    line,
+                    col,
+                    symbol,
+                    limit,
+                    offset,
+                })
+            }
+        }
         _ => Err(crate::usage()),
     }
 }

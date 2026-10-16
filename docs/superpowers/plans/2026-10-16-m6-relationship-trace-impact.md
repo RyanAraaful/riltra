@@ -127,11 +127,11 @@ Rules (locked): owner = narrowest enclosing CALLABLE `symbols` def (`function|me
 
 Contract: `{"repo","snapshot":{"id","nonce"},"anchor":{"kind":"semantic|syntax-fallback",...,"anchor_uncertainty":null|reason},"verification","completeness":{"status":"complete|partial","covered":n,"total":m,"denominator":{...counts},"unresolved":[reasons]},"edges":[{"kind","precision","caller":{...},"callee":{...},"evidence":{"path","span","provider","import":id}}],"truncated":bool,"timings_ms":{...},"limits":{"limit","offset"}}`. Ordering deterministic (caller path, caller byte_start, callee key) for stable pagination.
 
-- [ ] **Step 1: Write failing CLI tests** — one caller + one callee golden on a 3-file Python fixture; semantic anchor case; syntax-fallback case asserts `anchor_kind == "syntax-fallback"` + uncertainty reason; `import_id` isolation (same URI two imports never merged); stale-after-edit reads `Stale`.
-- [ ] **Step 2: Run to verify they fail** — Run: `cargo test --locked --test edges` Expected: FAIL (unknown command).
-- [ ] **Step 3: Implement args + query fns + JSON** (semantic anchor first via `semantic_facts_at` narrowest half-open occurrence, fallback to syntax enclosing def; reuse `evaluate_snapshot`, `import_verdict` memo; limit default 50/max 1000).
-- [ ] **Step 4: Re-run** — Run: `cargo test --locked --test edges` Expected: PASS.
-- [ ] **Step 5: Commit** — `git add crates/cli/src/args.rs crates/cli/src/main.rs crates/cli/src/index.rs crates/cli/tests/edges.rs && git commit -m "m6: callers/callees CLI with evidence contract"`
+- [x] **Step 1: Write failing CLI tests** — extend inherited tests with full caller/callee goldens on the minimal Python corpus, semantic/syntax-fallback anchors, uncertainty, import/document/repository isolation, stale edits, pagination, source proof, encoding, and actual query/promotion concurrency. See `docs/m6-validation.md` for the assertion-to-test map.
+- [x] **Step 2: Run to verify they fail** — inherited commands already existed; actual RED runs reproduced six initial contract/query gaps and subsequent proof/identity/coverage regressions. No historical unknown-command RED is claimed.
+- [x] **Step 3: Implement args + query fns + JSON** — single read txn, semantic byte-span anchors, validated syntax-owner aliases, source-safe fallback, per-query verdict memo, full evidence, exact SQL counts, total ordering, default 50/max 1000, and continuation. Task 4 user decision: runtime timings remain outside JSON for byte determinism; `limits` also carries `next_offset`, evidence carries proven `imports[]`, and conservative denominator counters are documented in `docs/m6-validation.md`.
+- [x] **Step 4: Re-run** — `cargo test --locked --test edges`: 30 passed; full locked suite: 285 passed. Format, check, and warning-denying Clippy pass locally; real CLI syntax/SCIP smoke verified.
+- [x] **Step 5: Commit** — signed local checkpoint `m6: callers/callees CLI with evidence contract`, including query/store/proof helpers, tests, four goldens, and `docs/m6-validation.md`. Keep the branch local and stop for audit; no push or Task 5 work.
 
 ### Task 5: Bounded static trace (`--to` destination or bounded enumeration)
 

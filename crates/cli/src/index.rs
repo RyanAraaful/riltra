@@ -1137,6 +1137,805 @@ pub fn semantic_query(
     })
 }
 
+/// M6 edge-query anchor: semantic identity when provable, syntax fallback
+/// otherwise. The endpoint is the single key both directions query by.
+#[derive(Debug)]
+pub struct EdgeAnchor {
+    pub kind: AnchorKind,
+    pub path: String,
+    pub line1: u32,
+    pub col1: u32,
+    pub symbol_uri: Option<String>,
+    pub import_id: Option<i64>,
+    pub doc: Option<String>,
+    /// Display name backing the caller-candidate union (anchor's own name).
+    pub display: Option<String>,
+    /// Syntax definition byte range for fallback anchors; `None` for semantic.
+    pub span_bytes: Option<(usize, usize)>,
+    pub precision: String,
+    pub uncertainty: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnchorKind {
+    Semantic,
+    SyntaxFallback,
+}
+
+impl AnchorKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AnchorKind::Semantic => "semantic",
+            AnchorKind::SyntaxFallback => "syntax-fallback",
+        }
+    }
+}
+
+/// The queryable endpoint for an anchor. `None` is unreachable here:
+/// anchors without identity fail in `resolve_edge_anchor`, never fabricate.
+pub fn anchor_endpoint(anchor: &EdgeAnchor) -> Option<store::EdgeEndpoint> {
+    match anchor.kind {
+        AnchorKind::Semantic => Some(store::EdgeEndpoint::Scip {
+            import_id: anchor.import_id?,
+            symbol_uri: anchor.symbol_uri.clone()?,
+            doc: anchor.doc.clone(),
+        }),
+        AnchorKind::SyntaxFallback => {
+            let (bs, be) = anchor.span_bytes?;
+            Some(store::EdgeEndpoint::SyntaxDef {
+                path: anchor.path.clone(),
+                byte_start: bs,
+                byte_end: be,
+            })
+        }
+    }
+}
+
+/// Byte offset of 0-based (line, byte-col) in source; `None` past the end.
+/// Columns follow the tree-sitter byte convention, never clamped or guessed.
+fn byte_offset_of(source: &[u8], line0: u32, col0: u32) -> Option<usize> {
+    let mut start = 0usize;
+    for _ in 0..line0 {
+        let rel = source.get(start..)?.iter().position(|b| *b == b'\n')?;
+        start += rel + 1;
+    }
+    let end = source
+        .get(start..)
+        .and_then(|tail| tail.iter().position(|b| *b == b'\n').map(|p| start + p))
+        .unwrap_or(source.len());
+    let off = start.checked_add(col0 as usize)?;
+    if off > end {
+        return None;
+    }
+    Some(off)
+}
+
+/// Recover old UTF8 byte positions from indexed syntax, never from changed
+/// live bytes or producer-native SCIP columns. Sparse/unindexed stale lines
+/// without a unique recorded base remain unresolved.
+fn snapshot_byte_offset(
+    tx: &rusqlite::Connection,
+    snapshot_id: i64,
+    file_id: i64,
+    line0: u32,
+    col0: u32,
+) -> Result<Option<usize>, String> {
+    if line0 == 0 {
+        return Ok(Some(col0 as usize));
+    }
+    let mut bases = BTreeSet::new();
+    let mut stmt = tx.prepare("SELECT start_line, start_col, byte_start, end_line, end_col, byte_end FROM symbols WHERE snapshot_id = ?1 AND file_id = ?2 AND (start_line = ?3 OR end_line = ?3) UNION ALL SELECT start_line, start_col, byte_start, end_line, end_col, byte_end FROM calls WHERE snapshot_id = ?1 AND file_id = ?2 AND (start_line = ?3 OR end_line = ?3) UNION ALL SELECT start_line, start_col, byte_start, end_line, end_col, byte_end FROM imports WHERE snapshot_id = ?1 AND file_id = ?2 AND (start_line = ?3 OR end_line = ?3)").map_err(|e| e.to_string())?;
+    let mut rows = stmt
+        .query(params![snapshot_id, file_id, line0 as i64 + 1])
+        .map_err(|e| e.to_string())?;
+    while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+        for base in [0, 3] {
+            if row.get::<_, i64>(base).map_err(|e| e.to_string())? != line0 as i64 + 1 {
+                continue;
+            }
+            let col = row.get::<_, i64>(base + 1).map_err(|e| e.to_string())?;
+            let offset = row.get::<_, i64>(base + 2).map_err(|e| e.to_string())?;
+            if col > 0 && offset >= col - 1 {
+                bases.insert((offset - (col - 1)) as usize);
+            }
+        }
+    }
+    Ok(if bases.len() == 1 {
+        bases
+            .first()
+            .and_then(|start| start.checked_add(col0 as usize))
+    } else {
+        None
+    })
+}
+
+/// Resolve one edge-query anchor: semantic identity when a stored occurrence
+/// proves it, else the nearest enclosing syntax definition with explicit
+/// uncertainty. `line0`/`col0` are 0-based (M5 convention). Ambiguous or
+/// contradicted anchors fail loudly — never an arbitrary pick.
+pub fn resolve_edge_anchor(
+    tx: &rusqlite::Connection,
+    snapshot_id: i64,
+    canon: &Path,
+    validated: &str,
+    line0: u32,
+    col0: u32,
+    symbol: Option<&str>,
+) -> Result<EdgeAnchor, String> {
+    let facts = store::semantic_facts_at(tx, snapshot_id, validated)?;
+    let source = crate::semantic::confined_read(canon, validated, crate::scan::MAX_FILE_BYTES).ok();
+    let current_digest = source.as_ref().map(|s| store::content_digest(s));
+    let files = store::file_id_map(tx, snapshot_id)?;
+    let indexed = files.get(validated);
+    let snapshot_offset = if let Some((id, _)) = indexed {
+        snapshot_byte_offset(tx, snapshot_id, *id, line0, col0)?
+    } else {
+        None
+    };
+    let mut positions = BTreeMap::new();
+    let mut best_width = usize::MAX;
+    let mut best: Vec<&store::SemanticFact> = Vec::new();
+    let mut provenance: BTreeMap<i64, Option<String>> = BTreeMap::new();
+    for fact in &facts {
+        let encoding = match provenance.get(&fact.import_id) {
+            Some(encoding) => encoding.clone(),
+            None => {
+                let encoding = store::semantic_import_by_id(tx, fact.import_id)?
+                    .filter(|(_, import)| {
+                        import.snapshot_id == snapshot_id
+                            && crate::edges::import_provenance_ok(import)
+                    })
+                    .map(|(_, import)| import.text_encoding);
+                provenance.insert(fact.import_id, encoding.clone());
+                encoding
+            }
+        };
+        let Some(encoding) = encoding else {
+            continue;
+        };
+        if fact.symbol_uri.is_none() {
+            continue;
+        }
+        let offset = if current_digest.as_deref() == Some(fact.file_digest.as_str()) {
+            *positions.entry(encoding.clone()).or_insert_with(|| {
+                source.as_ref().and_then(|raw| {
+                    crate::scip::query_byte_offset(raw, &encoding, line0, col0).ok()
+                })
+            })
+        } else if encoding == "UTF8"
+            && indexed.is_some_and(|(_, digest)| *digest == fact.file_digest)
+            && fact.start_line == fact.end_line
+            && fact.start_line == line0
+        {
+            snapshot_offset
+        } else {
+            None
+        };
+        let inside = offset.is_some_and(|off| fact.byte_start <= off && off < fact.byte_end);
+        if !inside {
+            continue;
+        }
+        let width = fact.byte_end.saturating_sub(fact.byte_start);
+        if width < best_width {
+            best_width = width;
+            best.clear();
+        }
+        if width == best_width {
+            best.push(fact);
+        }
+    }
+    if let Some(want) = symbol {
+        if best.is_empty() || !best.iter().any(|f| f.symbol_uri.as_deref() == Some(want)) {
+            return Err(
+                "anchor unresolved: --symbol disagrees with the position identity".to_string(),
+            );
+        }
+        best.retain(|f| f.symbol_uri.as_deref() == Some(want));
+    }
+    if !best.is_empty() {
+        let mut uris = BTreeSet::new();
+        for fact in &best {
+            match fact.symbol_uri.as_deref() {
+                Some(uri) => {
+                    uris.insert(uri.to_string());
+                }
+                None => {
+                    return Err("occurrence has no symbol identity: unresolved".to_string());
+                }
+            }
+        }
+        if uris.len() > 1 {
+            let mut list: Vec<&str> = uris.iter().map(String::as_str).collect();
+            list.sort();
+            return Err(format!("ambiguous anchor identities: {}", list.join(", ")));
+        }
+        let uri = uris.into_iter().next().unwrap_or_default();
+        let mut imports = BTreeSet::new();
+        for fact in &best {
+            imports.insert(fact.import_id);
+        }
+        if imports.len() > 1 {
+            return Err(format!(
+                "ambiguous anchor: same identity from {} imports, resolve with a rebuild",
+                imports.len()
+            ));
+        }
+        let import_id = best[0].import_id;
+        let local = uri == "local" || uri.starts_with("local ");
+        return Ok(EdgeAnchor {
+            kind: AnchorKind::Semantic,
+            path: validated.to_string(),
+            line1: line0 + 1,
+            col1: col0 + 1,
+            symbol_uri: Some(uri),
+            import_id: Some(import_id),
+            doc: if local {
+                Some(validated.to_string())
+            } else {
+                None
+            },
+            display: best[0].display_name.clone(),
+            span_bytes: Some((best[0].byte_start, best[0].byte_end)),
+            precision: best[0].precision.clone(),
+            uncertainty: None,
+        });
+    }
+    if symbol.is_some() {
+        return Err("anchor unresolved: no semantic occurrence here".to_string());
+    }
+    // Syntax fallback: nearest enclosing definition by byte containment.
+    let source = source.ok_or("anchor unresolved: source unavailable")?;
+    if !files
+        .get(validated)
+        .is_some_and(|(_, digest)| *digest == store::content_digest(&source))
+    {
+        return Err(
+            "anchor unresolved: source-changed; reindex before syntax fallback".to_string(),
+        );
+    }
+    let off = byte_offset_of(&source, line0, col0)
+        .ok_or_else(|| "anchor unresolved: position outside the source".to_string())?;
+    let mut best_width = usize::MAX;
+    let mut best: Vec<&store::SymbolRow> = Vec::new();
+    let defs = store::symbols_at(tx, snapshot_id, validated)?;
+    for def in &defs {
+        if def.byte_start <= off && off < def.byte_end {
+            let width = def.byte_end.saturating_sub(def.byte_start);
+            if width < best_width {
+                best_width = width;
+                best.clear();
+            }
+            if width == best_width {
+                best.push(def);
+            }
+        }
+    }
+    let mut keys = BTreeSet::new();
+    for def in &best {
+        keys.insert((
+            def.byte_start,
+            def.byte_end,
+            def.kind.clone(),
+            def.name.clone(),
+        ));
+    }
+    if keys.len() > 1 {
+        return Err("ambiguous anchor: overlapping definitions".to_string());
+    }
+    let def = best
+        .into_iter()
+        .next()
+        .ok_or_else(|| "no anchor here".to_string())?;
+    Ok(EdgeAnchor {
+        kind: AnchorKind::SyntaxFallback,
+        path: validated.to_string(),
+        line1: line0 + 1,
+        col1: col0 + 1,
+        symbol_uri: None,
+        import_id: None,
+        doc: None,
+        display: def.name.clone(),
+        span_bytes: Some((def.byte_start, def.byte_end)),
+        precision: "Heuristic".to_string(),
+        uncertainty: Some("syntax-only anchor: no semantic identity at this position".to_string()),
+    })
+}
+
+/// Direct import candidates are deliberately conservative, never identity proof.
+/// Unrecognized bindings remain missing coverage rather than a name-based link.
+fn import_mentions_path(importer: &str, language: &str, text: &str, target: &str) -> bool {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    if language == "python" {
+        let module = match words.as_slice() {
+            ["from", module, "import", ..] => *module,
+            ["import", module, ..] => *module,
+            _ => return false,
+        };
+        let parent = importer.rsplit_once('/').map(|(p, _)| p).unwrap_or("");
+        let leading = module.chars().take_while(|c| *c == '.').count();
+        let module = if leading == 0 {
+            module.replace('.', "/")
+        } else {
+            let mut dirs: Vec<&str> = parent.split('/').filter(|s| !s.is_empty()).collect();
+            for _ in 1..leading {
+                if dirs.pop().is_none() {
+                    return false;
+                }
+            }
+            dirs.push(&module[leading..]);
+            dirs.join("/").replace('.', "/")
+        };
+        return target == format!("{module}.py") || target == format!("{module}/__init__.py");
+    }
+    // Only literal relative imports/includes; require() is never an import row.
+    if matches!(language, "javascript" | "typescript" | "c" | "cpp") {
+        let literal = text.split(['\'', '"']).nth(1);
+        if let Some(module) = literal.filter(|s| !s.is_empty()) {
+            if !module.starts_with('.') && !matches!(language, "c" | "cpp") {
+                return false;
+            }
+            let mut dirs: Vec<&str> = importer
+                .rsplit_once('/')
+                .map(|(p, _)| p.split('/').collect())
+                .unwrap_or_default();
+            for part in module.split('/') {
+                match part {
+                    "." | "" => {}
+                    ".." => {
+                        if dirs.pop().is_none() {
+                            return false;
+                        }
+                    }
+                    p => dirs.push(p),
+                }
+            }
+            let path = dirs.join("/");
+            return target == path
+                || [".js", ".ts", ".tsx", ".jsx", "/index.js", "/index.ts"]
+                    .iter()
+                    .any(|ext| target == format!("{path}{ext}"));
+        }
+    }
+    if language == "rust" {
+        if let Some(module) = text.trim().strip_prefix("use crate::") {
+            let module = module
+                .split([';', '{', '*'])
+                .next()
+                .unwrap_or("")
+                .trim_end_matches(':');
+            let parts: Vec<&str> = module.split("::").collect();
+            return (1..=parts.len()).any(|n| {
+                let path = parts[..n].join("/");
+                target == format!("src/{path}.rs") || target == format!("src/{path}/mod.rs")
+            });
+        }
+    }
+    false
+}
+
+fn caller_candidate_paths(
+    tx: &rusqlite::Connection,
+    snapshot_id: i64,
+    anchor: &EdgeAnchor,
+) -> Result<Vec<String>, String> {
+    let id_map = store::file_id_map(tx, snapshot_id)?;
+    let paths: BTreeMap<i64, &str> = id_map
+        .iter()
+        .map(|(p, (id, _))| (*id, p.as_str()))
+        .collect();
+    let mut linked = BTreeSet::from([anchor.path.clone()]);
+    // Local SCIP identities never gain cross-document name candidates.
+    if anchor.doc.is_none() {
+        for import in store::imports_for(tx, snapshot_id)? {
+            if let (Some(path), Some(text)) = (paths.get(&import.file_id), import.text.as_deref()) {
+                if import_mentions_path(path, &import.language, text, &anchor.path) {
+                    linked.insert((*path).to_string());
+                }
+            }
+        }
+    }
+    Ok(linked.into_iter().collect())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgeDir {
+    Callers,
+    Callees,
+}
+impl EdgeDir {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Callers => "callers",
+            Self::Callees => "callees",
+        }
+    }
+}
+
+pub struct EdgeRequest<'a> {
+    pub anchor: SpanQuery<'a>,
+    pub symbol: Option<&'a str>,
+    pub direction: EdgeDir,
+    pub limit: usize,
+    pub offset: usize,
+}
+
+pub struct EdgeEvidence {
+    pub digest: String,
+    pub callee_span: Option<(usize, usize)>,
+    pub terminal_span: Option<(usize, usize)>,
+    pub reference_span: Option<(usize, usize)>,
+    pub imports: Vec<(i64, store::SemanticImport)>,
+}
+
+pub struct EdgeHitOut {
+    pub edge: store::EdgeRow,
+    pub verification: String,
+    pub evidence: EdgeEvidence,
+}
+
+pub struct CompletenessOut {
+    pub status: String,
+    pub covered: usize,
+    pub total: usize,
+    /// These diagnostic counters overlap; they are not a coverage percentage.
+    pub denominator: BTreeMap<&'static str, usize>,
+    pub unresolved: Vec<String>,
+}
+
+pub struct EdgeQueryOut {
+    pub repo: String,
+    pub snapshot: store::Snapshot,
+    pub revision: String,
+    pub direction: EdgeDir,
+    pub anchor: EdgeAnchor,
+    pub freshness: String,
+    pub freshness_reasons: Vec<String>,
+    pub verification: String,
+    pub completeness: CompletenessOut,
+    pub edges: Vec<EdgeHitOut>,
+    pub truncated: bool,
+    pub limit: usize,
+    pub offset: usize,
+    pub next_offset: Option<usize>,
+}
+
+/// Shared query-local verification context; no cache survives this read txn.
+struct EdgeRead<'a> {
+    tx: &'a rusqlite::Connection,
+    snapshot: &'a store::Snapshot,
+    live: &'a crate::semantic::LiveState,
+    canon: &'a Path,
+    source_fresh: bool,
+    memo: BTreeMap<i64, (String, String, String)>,
+}
+
+impl EdgeRead<'_> {
+    fn verdict(&mut self, id: i64) -> Result<String, String> {
+        Ok(import_verdict(
+            self.tx,
+            self.snapshot,
+            self.live,
+            self.source_fresh,
+            self.canon,
+            id,
+            &mut self.memo,
+        )?
+        .0)
+    }
+
+    fn hit(&mut self, edge: store::EdgeRow) -> Result<EdgeHitOut, String> {
+        let stored: serde_json::Value = serde_json::from_str(&edge.evidence)
+            .map_err(|e| format!("invalid stored edge evidence: {e}"))?;
+        let mut ids = BTreeSet::new();
+        for endpoint in [&edge.caller, &edge.callee].into_iter().flatten() {
+            if let store::EdgeEndpoint::Scip { import_id, .. } = endpoint {
+                ids.insert(*import_id);
+            }
+        }
+        if let Some(value) = stored.get("import") {
+            ids.insert(
+                value
+                    .as_i64()
+                    .filter(|id| *id > 0)
+                    .ok_or("invalid edge producer import")?,
+            );
+        }
+        // Legacy unresolved edges have no proven producer import. Do not infer
+        // one from overlapping facts (especially when several imports overlap).
+        let mut imports = Vec::new();
+        let mut verification = if self.source_fresh {
+            "Unverified"
+        } else {
+            "Stale"
+        }
+        .to_string();
+        for id in ids {
+            if self.verdict(id)? == "Stale" {
+                verification = "Stale".to_string();
+            }
+            let (_, import) =
+                store::semantic_import_by_id(self.tx, id)?.ok_or("edge import missing")?;
+            if import.snapshot_id != self.snapshot.id
+                || !crate::edges::import_provenance_ok(&import)
+            {
+                return Err("edge has invalid import provenance".to_string());
+            }
+            imports.push((id, import));
+        }
+        let digest: String = self
+            .tx
+            .query_row(
+                "SELECT digest FROM files WHERE snapshot_id = ?1 AND id = ?2 AND path = ?3",
+                params![self.snapshot.id, edge.file_id, edge.caller_path],
+                |r| r.get(0),
+            )
+            .map_err(|e| format!("edge source identity: {e}"))?;
+        if stored["path"].as_str() != Some(edge.caller_path.as_str())
+            || stored["span"]
+                != serde_json::json!([edge.caller_span_bytes.0, edge.caller_span_bytes.1])
+        {
+            return Err("edge evidence disagrees with stored source location".to_string());
+        }
+        let reference_span = match stored.get("ref") {
+            Some(v) => Some((
+                v.get(0)
+                    .and_then(|x| x.as_u64())
+                    .ok_or("invalid reference span")? as usize,
+                v.get(1)
+                    .and_then(|x| x.as_u64())
+                    .ok_or("invalid reference span")? as usize,
+            )),
+            None => None,
+        };
+        type CallSpans = (Option<(usize, usize)>, Option<(usize, usize)>);
+        let spans: Option<CallSpans> = self.tx.query_row("SELECT callee_byte_start, callee_byte_end, tcallee_byte_start, tcallee_byte_end FROM calls WHERE snapshot_id = ?1 AND file_id = ?2 AND byte_start = ?3 AND byte_end = ?4 ORDER BY id LIMIT 1", params![self.snapshot.id, edge.file_id, edge.caller_span_bytes.0 as i64, edge.caller_span_bytes.1 as i64], |r| {
+            let (a, b, c, d): (Option<i64>, Option<i64>, Option<i64>, Option<i64>) = (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?);
+            Ok((a.zip(b).map(|(a,b)| (a as usize,b as usize)), c.zip(d).map(|(a,b)| (a as usize,b as usize))))
+        }).optional().map_err(|e| e.to_string())?;
+        let (callee_span, terminal_span) = spans.unwrap_or_default();
+        Ok(EdgeHitOut {
+            edge,
+            verification,
+            evidence: EdgeEvidence {
+                digest,
+                callee_span,
+                terminal_span,
+                reference_span,
+                imports,
+            },
+        })
+    }
+}
+
+pub fn edge_query(
+    home: &Path,
+    name: &str,
+    root: &Path,
+    request: &EdgeRequest<'_>,
+) -> Result<EdgeQueryOut, String> {
+    edge_query_inner(home, name, root, request, || {})
+}
+
+// A query-local callback allows deterministic promotion tests at the actual
+// query boundary. Production supplies a no-op; no global hook or sleep.
+fn edge_query_inner(
+    home: &Path,
+    name: &str,
+    root: &Path,
+    request: &EdgeRequest<'_>,
+    pinned: impl FnOnce(),
+) -> Result<EdgeQueryOut, String> {
+    if request.anchor.line1 == 0
+        || request.anchor.col1 == 0
+        || !(1..=MAX_SEARCH_LIMIT).contains(&request.limit)
+        || request.offset > i64::MAX as usize - MAX_SEARCH_LIMIT
+    {
+        return Err("invalid edge query bounds".to_string());
+    }
+    let canon = canonical_repo_root(root)?;
+    let validated = crate::semantic::validate_doc_path(&canon, request.anchor.rel)?;
+    let mut conn = store::open_live(&store::db_path(home, name))?;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let snapshot = store::latest_snapshot(&tx)?.ok_or("no snapshot: index the repository first")?;
+    pinned();
+    let (freshness, mut freshness_reasons) = evaluate_snapshot(&tx, name, &canon, &snapshot);
+    freshness_reasons.sort();
+    freshness_reasons.dedup();
+    let live = live_state_for(&tx, &snapshot)?;
+    let revision = crate::semantic::revision_string(&live);
+    let anchor = resolve_edge_anchor(
+        &tx,
+        snapshot.id,
+        &canon,
+        &validated,
+        request.anchor.line1 - 1,
+        request.anchor.col1 - 1,
+        request.symbol,
+    )?;
+    let endpoint = anchor_endpoint(&anchor).ok_or("anchor has no endpoint")?;
+    let aliases = if request.direction == EdgeDir::Callees {
+        crate::edges::syntax_aliases(&tx, snapshot.id, &endpoint)?
+    } else {
+        Vec::new()
+    };
+    let paths = if request.direction == EdgeDir::Callers {
+        caller_candidate_paths(&tx, snapshot.id, &anchor)?
+    } else {
+        Vec::new()
+    };
+    let selection = store::EdgeSelection {
+        snapshot_id: snapshot.id,
+        endpoint: &endpoint,
+        inbound: request.direction == EdgeDir::Callers,
+        candidate_name: if request.direction == EdgeDir::Callers {
+            anchor.display.as_deref()
+        } else {
+            None
+        },
+        candidate_paths: &paths,
+        syntax_aliases: &aliases,
+    };
+    let counts = store::selected_edge_counts(&tx, &selection)?;
+    let unknowns = store::snapshot_edge_counts(&tx, snapshot.id)?;
+    let page = if selection.candidate_name.is_some() || !aliases.is_empty() {
+        store::selected_edge_page(&tx, &selection, request.limit as i64, request.offset as i64)?
+    } else if selection.inbound {
+        store::edges_inbound(
+            &tx,
+            snapshot.id,
+            &endpoint,
+            request.limit as i64,
+            request.offset as i64,
+        )?
+    } else {
+        store::edges_outbound(
+            &tx,
+            snapshot.id,
+            &endpoint,
+            request.limit as i64,
+            request.offset as i64,
+        )?
+    };
+    let next = request.offset + page.len();
+    let truncated = next < counts.total;
+    let mut read = EdgeRead {
+        tx: &tx,
+        snapshot: &snapshot,
+        live: &live,
+        canon: &canon,
+        source_fresh: freshness == "fresh",
+        memo: BTreeMap::new(),
+    };
+    let mut verification = if read.source_fresh {
+        "Unverified"
+    } else {
+        "Stale"
+    }
+    .to_string();
+    if let Some(id) = anchor.import_id {
+        if read.verdict(id)? == "Stale" {
+            verification = "Stale".to_string();
+        }
+    }
+    let mut stale_imports = 0;
+    // Conservative repository-wide coverage context. It is NOT proof that a
+    // provider observed all behavior, and counts intentionally may overlap.
+    let imports = store::semantic_imports_for(&tx, snapshot.id)?;
+    let mut provider_paths = BTreeSet::new();
+    for (id, import) in &imports {
+        if !crate::edges::import_provenance_ok(import) {
+            continue;
+        }
+        if read.verdict(*id)? == "Stale" {
+            stale_imports += 1;
+        }
+        let mut stmt = tx.prepare("SELECT DISTINCT rel_path FROM semantic_facts WHERE snapshot_id = ?1 AND import_id = ?2 AND symbol_uri IS NOT NULL").map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![snapshot.id, id], |r| r.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
+        for row in rows {
+            provider_paths.insert(row.map_err(|e| e.to_string())?);
+        }
+    }
+    if stale_imports > 0 {
+        verification = "Stale".to_string();
+    }
+    let mut edges = Vec::with_capacity(page.len());
+    let mut reasons = BTreeSet::new();
+    for edge in page {
+        let hit = read.hit(edge)?;
+        if hit.verification == "Stale" {
+            verification = "Stale".to_string();
+        }
+        if let Some(reason) = &hit.edge.unresolved {
+            reasons.insert(reason.clone());
+        }
+        edges.push(hit);
+    }
+    let files = store::file_id_map(&tx, snapshot.id)?;
+    let missing = files
+        .keys()
+        .filter(|p| !provider_paths.contains(*p))
+        .count();
+    let (walk, skips) = scan::plan_walk(&canon)?;
+    let unsupported = walk
+        .iter()
+        .filter(|f| matches!(f.action, PlanAction::Unsupported(_)))
+        .count();
+    let skipped = skips.escape
+        + skips.unreadable
+        + walk
+            .iter()
+            .filter(|f| {
+                matches!(f.action, PlanAction::Skip(reason) if reason != "ignored")
+                    || (matches!(f.action, PlanAction::Parse(_)) && !files.contains_key(&f.rel))
+            })
+            .count();
+    let parse_error_files: usize = tx
+        .query_row(
+            "SELECT COUNT(*) FROM files WHERE snapshot_id = ?1 AND errors > 0",
+            params![snapshot.id],
+            |r| r.get::<_, i64>(0),
+        )
+        .map_err(|e| e.to_string())? as usize;
+    let denominator = BTreeMap::from([
+        ("observed_edges", counts.total),
+        ("unsupported_files", unsupported),
+        ("missing_provider_files", missing),
+        ("dynamic_calls", unknowns.dynamic_calls),
+        ("ambiguous_calls", unknowns.ambiguous_calls),
+        (
+            "truncated_branches",
+            usize::from(truncated || request.offset > 0),
+        ),
+        ("unresolved_owner", unknowns.unresolved_owner),
+        ("unresolved_target", unknowns.unresolved_target),
+        ("stale_imports", stale_imports),
+        ("skipped_files", skipped),
+        ("parse_error_files", parse_error_files),
+    ]);
+    for (key, count) in &denominator {
+        if *key != "observed_edges" && *count > 0 {
+            reasons.insert((*key).to_string());
+        }
+    }
+    if anchor.uncertainty.is_some() {
+        reasons.insert("syntax-anchor-uncertain".to_string());
+    }
+    if unknowns.unresolved > 0 {
+        reasons.insert("unresolved-relations".to_string());
+    }
+    if counts.total == 0 {
+        reasons.insert("empty-result-not-coverage-proof".to_string());
+    }
+    if freshness != "fresh" {
+        reasons.insert("source-not-fresh".to_string());
+    }
+    let complete = reasons.is_empty() && !truncated && edges.len() == counts.total;
+    Ok(EdgeQueryOut {
+        repo: name.to_string(),
+        snapshot,
+        revision,
+        direction: request.direction,
+        anchor,
+        freshness,
+        freshness_reasons,
+        verification,
+        completeness: CompletenessOut {
+            status: if complete { "complete" } else { "partial" }.to_string(),
+            covered: edges.len(),
+            total: counts.total,
+            denominator,
+            unresolved: reasons.into_iter().collect(),
+        },
+        edges,
+        truncated,
+        limit: request.limit,
+        offset: request.offset,
+        next_offset: truncated.then_some(next),
+    })
+}
+
 /// Single-hop live LSP query with an explicit server path. Ephemeral
 /// evidence only: nothing is persisted, every answer is `Unverified`.
 /// Any spawn/query failure becomes an explicit fallback payload (exit 0),
@@ -2459,5 +3258,261 @@ mod tests {
             super::import_verdict(&conn, &snapshot, &live, true, &dir, imp2, &mut memo).unwrap();
         assert_eq!(third.0, "Unverified");
         assert_eq!(memo.len(), 2, "distinct imports resolve distinctly");
+    }
+
+    fn anchor_harness() -> (rusqlite::Connection, i64, std::path::PathBuf) {
+        let dir = tmpdir("idx-anchor");
+        std::fs::write(dir.join("a.py"), b"def foo():\n    pass\n").unwrap();
+        let conn = store::open_memory().unwrap();
+        let snap = store::insert_snapshot(&conn, &fabricated_snapshot("r", &dir)).unwrap();
+        let fid = store::insert_file(
+            &conn,
+            snap,
+            &store::FileRow {
+                path: "a.py".to_string(),
+                language: "python".to_string(),
+                bytes: 20,
+                digest: store::content_digest(b"def foo():\n    pass\n"),
+                errors: 0,
+            },
+        )
+        .unwrap();
+        store::insert_symbol(
+            &conn,
+            snap,
+            &store::SymbolRow {
+                file_id: fid,
+                kind: "function".to_string(),
+                name: Some("foo".to_string()),
+                start_line: 1,
+                start_col: 1,
+                end_line: 2,
+                end_col: 9,
+                byte_start: 0,
+                byte_end: 20,
+                provider: "syntax".to_string(),
+                grammar: "python:0.25.0".to_string(),
+                language: "python".to_string(),
+            },
+        )
+        .unwrap();
+        (conn, snap, dir)
+    }
+
+    /// Semantic anchor: narrowest enclosing occurrence wins, import-scoped.
+    #[test]
+    fn edge_anchor_semantic_picks_narrowest() {
+        let (conn, snap, dir) = anchor_harness();
+        let imp = store::insert_semantic_import(
+            &conn,
+            &store::SemanticImport {
+                snapshot_id: snap,
+                provider_name: "scip-import".to_string(),
+                provider_version: "v".to_string(),
+                capability: "definitions,references".to_string(),
+                project_root: "C:\\r".to_string(),
+                text_encoding: "UTF8".to_string(),
+                artifact_id: "a1b2".to_string(),
+                source_revision: "r".to_string(),
+                claimed_source_digest: String::new(),
+                content_identity: "ci".to_string(),
+                external_symbols: "[]".to_string(),
+                verification: "Unverified".to_string(),
+            },
+        )
+        .unwrap();
+        let fact = |uri: &str, roles: u32, span: (u32, u32, u32, u32), bytes: (usize, usize)| {
+            store::SemanticFact {
+                snapshot_id: snap,
+                import_id: imp,
+                file_id: None,
+                rel_path: "a.py".to_string(),
+                file_digest: store::content_digest(&std::fs::read(dir.join("a.py")).unwrap()),
+                symbol_uri: Some(uri.to_string()),
+                display_name: Some("foo".to_string()),
+                roles,
+                start_line: span.0,
+                start_col: span.1,
+                end_line: span.2,
+                end_col: span.3,
+                byte_start: bytes.0,
+                byte_end: bytes.1,
+                precision: "Heuristic".to_string(),
+                relationships: "[]".to_string(),
+                external: false,
+            }
+        };
+        store::insert_semantic_facts(
+            &conn,
+            &[
+                fact("u-outer", 0x1, (0, 0, 1, 8), (0, 21)),
+                fact("u-inner", 0x0, (0, 4, 0, 7), (4, 7)),
+            ],
+        )
+        .unwrap();
+        let anchor = super::resolve_edge_anchor(&conn, snap, &dir, "a.py", 0, 5, None).unwrap();
+        assert_eq!(anchor.symbol_uri.as_deref(), Some("u-inner"));
+        assert_eq!(anchor.import_id, Some(imp));
+        assert!(anchor.uncertainty.is_none());
+    }
+
+    /// Two distinct identities at the same narrowest span: explicit
+    /// ambiguity, never an arbitrary pick.
+    #[test]
+    fn edge_anchor_ambiguous_distinct_uris() {
+        let (conn, snap, dir) = anchor_harness();
+        let imp = store::insert_semantic_import(
+            &conn,
+            &store::SemanticImport {
+                snapshot_id: snap,
+                provider_name: "scip-import".to_string(),
+                provider_version: "v".to_string(),
+                capability: "definitions,references".to_string(),
+                project_root: "C:\\r".to_string(),
+                text_encoding: "UTF8".to_string(),
+                artifact_id: "a1b2".to_string(),
+                source_revision: "r".to_string(),
+                claimed_source_digest: String::new(),
+                content_identity: "ci".to_string(),
+                external_symbols: "[]".to_string(),
+                verification: "Unverified".to_string(),
+            },
+        )
+        .unwrap();
+        let fact = |uri: &str| store::SemanticFact {
+            snapshot_id: snap,
+            import_id: imp,
+            file_id: None,
+            rel_path: "a.py".to_string(),
+            file_digest: store::content_digest(&std::fs::read(dir.join("a.py")).unwrap()),
+            symbol_uri: Some(uri.to_string()),
+            display_name: Some("x".to_string()),
+            roles: 0x0,
+            start_line: 0,
+            start_col: 4,
+            end_line: 0,
+            end_col: 7,
+            byte_start: 4,
+            byte_end: 7,
+            precision: "Heuristic".to_string(),
+            relationships: "[]".to_string(),
+            external: false,
+        };
+        store::insert_semantic_facts(&conn, &[fact("u-a"), fact("u-b")]).unwrap();
+        let err = super::resolve_edge_anchor(&conn, snap, &dir, "a.py", 0, 5, None).unwrap_err();
+        assert!(err.contains("ambiguous"), "unexpected: {err}");
+        assert!(
+            err.contains("u-a") && err.contains("u-b"),
+            "candidates listed: {err}"
+        );
+    }
+
+    /// No semantic facts: nearest enclosing syntax definition with explicit
+    /// uncertainty, never a fabricated identity.
+    #[test]
+    fn edge_anchor_syntax_fallback_with_uncertainty() {
+        let (conn, snap, dir) = anchor_harness();
+        let anchor = super::resolve_edge_anchor(&conn, snap, &dir, "a.py", 0, 5, None).unwrap();
+        assert_eq!(anchor.kind.as_str(), "syntax-fallback");
+        assert!(anchor.symbol_uri.is_none());
+        assert!(anchor.uncertainty.is_some());
+        let endpoint = super::anchor_endpoint(&anchor).unwrap();
+        assert!(matches!(endpoint, store::EdgeEndpoint::SyntaxDef { .. }));
+    }
+
+    /// `--symbol` contradicting the position identity fails loudly.
+    #[test]
+    fn edge_anchor_symbol_mismatch_errors() {
+        let (conn, snap, dir) = anchor_harness();
+        let err = super::resolve_edge_anchor(&conn, snap, &dir, "a.py", 0, 5, Some("u-else"))
+            .unwrap_err();
+        assert!(
+            err.contains("mismatch") || err.contains("unresolved"),
+            "unexpected: {err}"
+        );
+    }
+
+    /// One read transaction pins the snapshot a query answers from: rows
+    /// written by a later promotion stay invisible inside it (WAL isolation
+    /// the edge queries rely on for snapshot consistency).
+    #[test]
+    fn edge_query_sees_single_snapshot_during_promotion() {
+        let home = tmpdir("idx-edgepin-home");
+        let repo = tmpdir("idx-edgepin");
+        std::fs::write(repo.join("a.py"), b"def f():\n    pass\n").unwrap();
+        super::build_full(&home, "r", &repo).unwrap();
+        let db = store::db_path(&home, "r");
+        let mut conn = store::open_live(&db).unwrap();
+        let tx = conn.transaction().unwrap();
+        // Nonce (never rowid: promotion copies staging rows wholesale, so
+        // ids restart) pins the revision this transaction answers from.
+        let pinned = store::latest_snapshot(&tx).unwrap().unwrap().nonce.clone();
+        std::fs::write(repo.join("a.py"), b"def f():\n    pass\n    pass\n").unwrap();
+        super::build(&home, "r", &repo, false).unwrap();
+        let fresh = store::open_live(&db).unwrap();
+        let moved = store::latest_snapshot(&fresh).unwrap().unwrap().nonce;
+        assert_ne!(moved, pinned, "rebuild must advance the revision");
+        let still = store::latest_snapshot(&tx).unwrap().unwrap().nonce;
+        assert_eq!(still, pinned, "read txn keeps one consistent snapshot");
+    }
+
+    #[test]
+    fn task4_actual_query_pins_anchor_edges_and_evidence_across_promotion() {
+        let home = tmpdir("edge-query-pin-home");
+        let repo = tmpdir("edge-query-pin-repo");
+        std::fs::write(
+            repo.join("a.py"),
+            b"def target():\n    pass\n\ndef caller():\n    target()\n",
+        )
+        .unwrap();
+        super::build_full(&home, "r", &repo).unwrap();
+        let conn = store::open_live(&store::db_path(&home, "r")).unwrap();
+        let old = store::latest_snapshot(&conn).unwrap().unwrap();
+        drop(conn);
+        let request = super::EdgeRequest {
+            anchor: super::SpanQuery {
+                rel: "a.py",
+                line1: 1,
+                col1: 6,
+                refs: false,
+            },
+            symbol: None,
+            direction: super::EdgeDir::Callers,
+            limit: 50,
+            offset: 0,
+        };
+        let pinned = super::edge_query_inner(&home, "r", &repo, &request, || {
+            let writer_home = home.clone();
+            let writer_repo = repo.clone();
+            std::thread::spawn(move || {
+                std::fs::write(
+                    writer_repo.join("b.py"),
+                    b"from a import target\n\ndef second():\n    target()\n",
+                )
+                .unwrap();
+                super::build(&writer_home, "r", &writer_repo, false).unwrap();
+            })
+            .join()
+            .unwrap();
+        })
+        .unwrap();
+        let next = super::edge_query(&home, "r", &repo, &request).unwrap();
+        assert_eq!(pinned.snapshot.nonce, old.nonce);
+        assert_ne!(next.snapshot.nonce, old.nonce);
+        assert_eq!(pinned.completeness.total, 1);
+        assert_eq!(next.completeness.total, 2);
+        assert_eq!(pinned.anchor.path, "a.py");
+        assert_eq!(pinned.edges.len(), 1);
+        assert_eq!(pinned.edges[0].edge.caller_path, "a.py");
+        assert_eq!(pinned.edges[0].edge.snapshot_id, old.id);
+        assert_eq!(
+            pinned.edges[0].evidence.digest,
+            store::content_digest(&std::fs::read(repo.join("a.py")).unwrap())
+        );
+        assert_eq!(
+            pinned.verification, "Stale",
+            "new file invalidates the OLD source snapshot, never upgrades it"
+        );
+        assert_eq!(next.freshness, "fresh");
     }
 }
