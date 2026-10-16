@@ -277,6 +277,16 @@ CREATE TABLE retractions (
   relation_id TEXT PRIMARY KEY,
   author TEXT NOT NULL, reason TEXT NOT NULL, created_unix INTEGER NOT NULL
 );
+CREATE TABLE measurements (
+  id TEXT NOT NULL, revision INTEGER NOT NULL,
+  method TEXT NOT NULL, environment TEXT NOT NULL, sample_count INTEGER NOT NULL,
+  PRIMARY KEY (id, revision)
+);
+CREATE TABLE metric_values (
+  id TEXT NOT NULL, revision INTEGER NOT NULL, name TEXT NOT NULL,
+  value REAL NOT NULL, unit TEXT NOT NULL,
+  PRIMARY KEY (id, revision, name)
+);
 CREATE VIRTUAL TABLE knowledge_fts USING fts5(id UNINDEXED, title, body);
 -- FTS holds exactly the current head revision per record id. Only head moves
 -- (inserts and updates of `heads.current_revision`) maintain the index, in
@@ -347,13 +357,15 @@ fn init_schema(
 /// Objects that must exist for a schema-v1 store to be accepted. A matching
 /// `user_version` and readable `meta` alone are not enough: an existing
 /// database missing any required object fails explicitly here.
-const REQUIRED_TABLES: [&str; 7] = [
+const REQUIRED_TABLES: [&str; 9] = [
     "meta",
     "records",
     "heads",
     "evidence",
     "relations",
     "retractions",
+    "measurements",
+    "metric_values",
     "knowledge_fts",
 ];
 const REQUIRED_TRIGGERS: [&str; 2] = ["heads_fts_sync_insert", "heads_fts_sync_update"];
@@ -517,6 +529,7 @@ fn record_from_row(row: &rusqlite::Row) -> rusqlite::Result<RecordVersion> {
         status: row.get(5)?,
         author: row.get(6)?,
         created_unix: row.get(7)?,
+        measurement: None,
     })
 }
 
@@ -524,8 +537,70 @@ const RECORD_COLS: &str = "id, revision, kind, title, body, status, author, crea
 
 /// Create revision 1 of a new record. Fails on duplicates, invalid input, or
 /// path revalidation; failures commit nothing and bump no generation.
+/// Benchmark records require measurement: use [`create_validated`].
 pub fn create_record(conn: &mut Connection, input: &NewRecord) -> Result<(u64, u64), String> {
+    create_inner(conn, input, None, false)
+}
+
+/// Create revision 1 from strictly validated JSON input, persisting benchmark
+/// measurement atomically with the revision when present.
+pub fn create_validated(
+    conn: &mut Connection,
+    input: &crate::knowledge::ValidatedNew,
+) -> Result<(u64, u64), String> {
+    create_inner(conn, &input.record, input.measurement.as_ref(), false)
+}
+
+/// Test-only fault injector: fails after the records insert to prove the
+/// whole creation rolls back.
+#[cfg(test)]
+pub(crate) fn create_validated_with_fault(
+    conn: &mut Connection,
+    input: &crate::knowledge::ValidatedNew,
+) -> Result<(u64, u64), String> {
+    create_inner(conn, &input.record, input.measurement.as_ref(), true)
+}
+
+fn write_measurement(
+    tx: &Transaction,
+    id: &str,
+    revision: i64,
+    measurement: &crate::knowledge::BenchmarkData,
+) -> Result<(), String> {
+    tx.execute(
+        "INSERT INTO measurements (id, revision, method, environment, sample_count)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![
+            id,
+            revision,
+            measurement.method,
+            measurement.environment,
+            i64::try_from(measurement.sample_count)
+                .map_err(|_| "sample count out of range".to_string())?,
+        ],
+    )
+    .map_err(|e| format!("cannot store measurement: {e}"))?;
+    for metric in &measurement.metrics {
+        tx.execute(
+            "INSERT INTO metric_values (id, revision, name, value, unit)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![id, revision, metric.name, metric.value, metric.unit],
+        )
+        .map_err(|e| format!("cannot store metric: {e}"))?;
+    }
+    Ok(())
+}
+
+fn create_inner(
+    conn: &mut Connection,
+    input: &NewRecord,
+    measurement: Option<&crate::knowledge::BenchmarkData>,
+    inject_fault: bool,
+) -> Result<(u64, u64), String> {
     crate::knowledge::validate_new(input)?;
+    if input.kind == "benchmark" && measurement.is_none() {
+        return Err("benchmark records require measurement".to_string());
+    }
     revalidate_open_paths(conn)?;
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -554,11 +629,19 @@ pub fn create_record(conn: &mut Connection, input: &NewRecord) -> Result<(u64, u
         ],
     )
     .map_err(|e| format!("cannot insert record revision: {e}"))?;
+    if inject_fault {
+        // Test hook: drop the transaction here to prove partial writes roll
+        // back fully (no head, FTS, measurement or generation survives).
+        return Err("injected write failure".to_string());
+    }
     tx.execute(
         "INSERT INTO heads (id, current_revision) VALUES (?1, 1)",
         [&input.id],
     )
     .map_err(|e| format!("cannot advance record head: {e}"))?;
+    if let Some(data) = measurement {
+        write_measurement(&tx, &input.id, 1, data)?;
+    }
     let generation = bump_generation(&tx)?;
     tx.commit()
         .map_err(|e| format!("cannot commit record creation: {e}"))?;
@@ -573,6 +656,81 @@ pub fn update_record(
     id: &str,
     expected_revision: u64,
     input: &UpdateRecord,
+) -> Result<(u64, u64), String> {
+    update_inner(conn, id, expected_revision, input, None, false)
+}
+
+/// Update from strictly validated JSON input. A supplied measurement replaces
+/// the claim on the new revision; when absent on a benchmark revision, the
+/// previous revision's measurement is carried forward unchanged so reads stay
+/// complete. Evidence refs are validated at parse time; capture belongs to
+/// Task 4.
+pub fn update_validated(
+    conn: &mut Connection,
+    id: &str,
+    expected_revision: u64,
+    input: &crate::knowledge::ValidatedUpdate,
+) -> Result<(u64, u64), String> {
+    update_inner(
+        conn,
+        id,
+        expected_revision,
+        &input.record,
+        input.measurement.as_ref(),
+        false,
+    )
+}
+
+/// Test-only fault injector: fails after the records insert to prove the
+/// whole update rolls back.
+#[cfg(test)]
+pub(crate) fn update_validated_with_fault(
+    conn: &mut Connection,
+    id: &str,
+    expected_revision: u64,
+    input: &crate::knowledge::ValidatedUpdate,
+) -> Result<(u64, u64), String> {
+    update_inner(
+        conn,
+        id,
+        expected_revision,
+        &input.record,
+        input.measurement.as_ref(),
+        true,
+    )
+}
+
+/// Carry a benchmark claim forward to a new revision unchanged.
+fn carry_measurement(tx: &Transaction, id: &str, from_rev: i64, to_rev: i64) -> Result<(), String> {
+    let copied = tx
+        .execute(
+            "INSERT INTO measurements (id, revision, method, environment, sample_count)
+             SELECT ?1, ?2, method, environment, sample_count FROM measurements
+             WHERE id = ?1 AND revision = ?3",
+            rusqlite::params![id, to_rev, from_rev],
+        )
+        .map_err(|e| format!("cannot carry measurement: {e}"))?;
+    if copied != 1 {
+        return Err(format!("benchmark revision without measurement: '{id}'"));
+    }
+    tx.execute(
+        "INSERT INTO metric_values (id, revision, name, value, unit)
+         SELECT ?1, ?2, name, value, unit FROM metric_values
+         WHERE id = ?1 AND revision = ?3",
+        rusqlite::params![id, to_rev, from_rev],
+    )
+    .map_err(|e| format!("cannot carry metrics: {e}"))?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn update_inner(
+    conn: &mut Connection,
+    id: &str,
+    expected_revision: u64,
+    input: &UpdateRecord,
+    measurement: Option<&crate::knowledge::BenchmarkData>,
+    inject_fault: bool,
 ) -> Result<(u64, u64), String> {
     crate::knowledge::validate_update(input)?;
     revalidate_open_paths(conn)?;
@@ -628,15 +786,70 @@ pub fn update_record(
         ],
     )
     .map_err(|e| format!("cannot insert record revision: {e}"))?;
+    if inject_fault {
+        // Test hook: drop the transaction here to prove partial writes roll
+        // back fully (no head, FTS, measurement or generation survives).
+        return Err("injected write failure".to_string());
+    }
     tx.execute(
         "UPDATE heads SET current_revision = ?1 WHERE id = ?2",
         rusqlite::params![next_i64, id],
     )
     .map_err(|e| format!("cannot advance record head: {e}"))?;
+    match measurement {
+        Some(data) => write_measurement(&tx, id, next_i64, data)?,
+        None if kind == "benchmark" => carry_measurement(&tx, id, current, next_i64)?,
+        None => {}
+    }
     let generation = bump_generation(&tx)?;
     tx.commit()
         .map_err(|e| format!("cannot commit record update: {e}"))?;
     Ok((next, generation))
+}
+
+/// Measurement attached to one revision, if any. Metrics order by insertion.
+fn read_measurement(
+    conn: &Connection,
+    id: &str,
+    revision: i64,
+) -> Result<Option<crate::knowledge::BenchmarkData>, String> {
+    let row: Option<(String, String, i64)> = conn
+        .query_row(
+            "SELECT method, environment, sample_count FROM measurements
+             WHERE id = ?1 AND revision = ?2",
+            rusqlite::params![id, revision],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()
+        .map_err(|e| format!("cannot read measurement: {e}"))?;
+    let Some((method, environment, sample)) = row else {
+        return Ok(None);
+    };
+    let sample_count = u64::try_from(sample)
+        .map_err(|_| "corrupt knowledge store: sample count out of range".to_string())?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT name, value, unit FROM metric_values
+             WHERE id = ?1 AND revision = ?2 ORDER BY rowid",
+        )
+        .map_err(|e| format!("cannot read measurement: {e}"))?;
+    let metrics = stmt
+        .query_map(rusqlite::params![id, revision], |r| {
+            Ok(crate::knowledge::MetricData {
+                name: r.get(0)?,
+                value: r.get(1)?,
+                unit: r.get(2)?,
+            })
+        })
+        .map_err(|e| format!("cannot read measurement: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("cannot read measurement: {e}"))?;
+    Ok(Some(crate::knowledge::BenchmarkData {
+        method,
+        environment,
+        sample_count,
+        metrics,
+    }))
 }
 
 /// Read one revision (`None` = current head). Never creates anything.
@@ -660,17 +873,20 @@ pub fn show_record(
         }
     };
     let rev_i64 = i64::try_from(rev).map_err(|_| format!("record revision out of range: {rev}"))?;
-    conn.query_row(
-        &format!("SELECT {RECORD_COLS} FROM records WHERE id = ?1 AND revision = ?2"),
-        rusqlite::params![id, rev_i64],
-        record_from_row,
-    )
-    .map_err(|e| match e {
-        rusqlite::Error::FromSqlConversionFailure(..) => {
-            "corrupt knowledge store: stored revision out of range".to_string()
-        }
-        _ => format!("unknown record revision: '{id}' rev {rev}"),
-    })
+    let mut record = conn
+        .query_row(
+            &format!("SELECT {RECORD_COLS} FROM records WHERE id = ?1 AND revision = ?2"),
+            rusqlite::params![id, rev_i64],
+            record_from_row,
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::FromSqlConversionFailure(..) => {
+                "corrupt knowledge store: stored revision out of range".to_string()
+            }
+            _ => format!("unknown record revision: '{id}' rev {rev}"),
+        })?;
+    record.measurement = read_measurement(conn, id, rev_i64)?;
+    Ok(record)
 }
 
 /// Deterministic history by revision with a generation guard: a supplied
@@ -745,7 +961,7 @@ fn history_inner(
                  ORDER BY revision ASC LIMIT ?2 OFFSET ?3"
             ))
             .map_err(|e| format!("cannot read record history: {e}"))?;
-        let revisions = stmt
+        let mut revisions = stmt
             .query_map(
                 rusqlite::params![id, limit_i64, offset_i64],
                 record_from_row,
@@ -753,6 +969,11 @@ fn history_inner(
             .map_err(|e| map_row_error(e, "cannot read record history"))?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| map_row_error(e, "cannot read record history"))?;
+        for record in &mut revisions {
+            let rev_i64 = i64::try_from(record.revision)
+                .map_err(|_| "corrupt knowledge store: stored revision out of range".to_string())?;
+            record.measurement = read_measurement(conn, id, rev_i64)?;
+        }
         let end = offset.saturating_add(revisions.len());
         Ok(HistoryPage {
             truncated: end < total_usize,
@@ -1372,7 +1593,7 @@ mod tests {
         );
     }
 
-    use crate::knowledge::{NewRecord, UpdateRecord};
+    use crate::knowledge::{validate_create_json, validate_update_json, NewRecord, UpdateRecord};
 
     fn new_record(id: &str, title: &str) -> NewRecord {
         NewRecord {
@@ -1773,5 +1994,136 @@ mod tests {
             .unwrap();
         assert_eq!(winner_hits, 1, "index must reflect exactly the winner");
         check.close().unwrap();
+    }
+
+    #[test]
+    fn knowledge_records_invalid_json_fails_atomically() {
+        let (home, repo) = setup("jsonatomic");
+        let conn = open_rw(&home, &repo);
+        let bad_title = "t".repeat(513);
+        let bad_payloads = [
+            // Duplicate top-level key.
+            r#"{"id":"d1","kind":"decision","title":"t","title":"t2","body":"b","status":"active","author":"r","evidence":[]}"#.to_string(),
+            // Unknown field.
+            r#"{"id":"d1","kind":"decision","title":"t","body":"b","status":"active","author":"r","evidence":[],"zzz":1}"#.to_string(),
+            // Missing author.
+            r#"{"id":"d1","kind":"decision","title":"t","body":"b","status":"active","evidence":[]}"#.to_string(),
+            // Oversize title (513 bytes).
+            format!(
+                "{{\"id\":\"d1\",\"kind\":\"decision\",\"title\":\"{bad_title}\",\"body\":\"b\",\"status\":\"active\",\"author\":\"r\",\"evidence\":[]}}"
+            ),
+            // Benchmark without measurement.
+            r#"{"id":"b1","kind":"benchmark","title":"t","body":"b","status":"active","author":"r","evidence":[]}"#.to_string(),
+        ];
+        for raw in &bad_payloads {
+            assert!(
+                validate_create_json(raw.as_bytes()).is_err(),
+                "must fail: {raw}"
+            );
+        }
+        // Nothing was written by any rejected input.
+        assert!(show_record(&conn, "d1", None).is_err());
+        assert!(show_record(&conn, "b1", None).is_err());
+        assert_eq!(read_generation(&conn).unwrap(), 0);
+        conn.close().unwrap();
+    }
+
+    #[test]
+    fn knowledge_records_benchmark_roundtrip() {
+        let (home, repo) = setup("benchrt");
+        let mut conn = open_rw(&home, &repo);
+        let raw = r#"{"id":"b1","kind":"benchmark","title":"speed zqxb","body":"faster","status":"active","author":"r","evidence":[],
+            "measurement":{"method":"criterion","environment":"lab-pc","sample_count":100,
+            "metrics":{"latency":{"value":1.25,"unit":"ms"},"throughput":{"value":800,"unit":"ops"}}}}"#;
+        let input = validate_create_json(raw.as_bytes()).unwrap();
+        let (rev, _) = create_validated(&mut conn, &input).unwrap();
+        assert_eq!(rev, 1);
+        let shown = show_record(&conn, "b1", None).unwrap();
+        let measurement = shown
+            .measurement
+            .expect("benchmark show must carry measurement");
+        assert_eq!(measurement.method, "criterion");
+        assert_eq!(measurement.sample_count, 100);
+        assert_eq!(measurement.metrics.len(), 2);
+        assert!(measurement
+            .metrics
+            .iter()
+            .any(|m| m.name == "latency" && m.unit == "ms"));
+        // Update with a new measurement replaces it on the new revision only.
+        let raw2 = r#"{"title":"speed zqxb2","body":"faster","status":"active","author":"r","evidence":[],
+            "measurement":{"method":"criterion","environment":"lab-pc","sample_count":200,
+            "metrics":{"latency":{"value":1.0,"unit":"ms"}}}}"#;
+        let update = validate_update_json(raw2.as_bytes()).unwrap();
+        update_validated(&mut conn, "b1", 1, &update).unwrap();
+        let shown2 = show_record(&conn, "b1", None).unwrap();
+        assert_eq!(shown2.revision, 2);
+        assert_eq!(shown2.measurement.as_ref().unwrap().sample_count, 200);
+        let shown1 = show_record(&conn, "b1", Some(1)).unwrap();
+        assert_eq!(shown1.measurement.as_ref().unwrap().sample_count, 100);
+        conn.close().unwrap();
+    }
+
+    #[test]
+    fn knowledge_records_benchmark_update_carries_forward() {
+        let (home, repo) = setup("benchcarry");
+        let mut conn = open_rw(&home, &repo);
+        let raw = r#"{"id":"b1","kind":"benchmark","title":"t","body":"b","status":"active","author":"r","evidence":[],
+            "measurement":{"method":"m","environment":"e","sample_count":10,
+            "metrics":{"m":{"value":1.0,"unit":"ms"}}}}"#;
+        let input = validate_create_json(raw.as_bytes()).unwrap();
+        create_validated(&mut conn, &input).unwrap();
+        // Title-only update without measurement keeps the claim intact.
+        let raw2 = r#"{"title":"t2","body":"b","status":"active","author":"r","evidence":[]}"#;
+        let update = validate_update_json(raw2.as_bytes()).unwrap();
+        update_validated(&mut conn, "b1", 1, &update).unwrap();
+        let shown = show_record(&conn, "b1", None).unwrap();
+        assert_eq!(shown.measurement.as_ref().unwrap().sample_count, 10);
+        conn.close().unwrap();
+    }
+
+    #[test]
+    fn knowledge_records_mid_write_fault_rolls_back() {
+        // Create path: fault after the records insert.
+        let (home, repo) = setup("faultcreate");
+        let mut conn = open_rw(&home, &repo);
+        let raw = r#"{"id":"d1","kind":"decision","title":"fault zqff","body":"b","status":"active","author":"r","evidence":[]}"#;
+        let input = validate_create_json(raw.as_bytes()).unwrap();
+        let err = create_validated_with_fault(&mut conn, &input).unwrap_err();
+        assert!(err.contains("injected"), "unexpected: {err}");
+        assert!(show_record(&conn, "d1", None).is_err());
+        assert!(history(&conn, "d1", 50, 0, None).is_err());
+        assert_eq!(read_generation(&conn).unwrap(), 0);
+        let hits: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM knowledge_fts WHERE knowledge_fts MATCH 'zqff'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(hits, 0);
+        conn.close().unwrap();
+        // Update path: fault after the records insert; head and index intact.
+        let (home, repo) = setup("faultupdate");
+        let mut conn = open_rw(&home, &repo);
+        let raw = r#"{"id":"d1","kind":"decision","title":"base zqfb","body":"b","status":"active","author":"r","evidence":[]}"#;
+        let input = validate_create_json(raw.as_bytes()).unwrap();
+        create_validated(&mut conn, &input).unwrap();
+        let gen_before = read_generation(&conn).unwrap();
+        let raw2 =
+            r#"{"title":"new zqfn","body":"b","status":"active","author":"r","evidence":[]}"#;
+        let update = validate_update_json(raw2.as_bytes()).unwrap();
+        let err = update_validated_with_fault(&mut conn, "d1", 1, &update).unwrap_err();
+        assert!(err.contains("injected"), "unexpected: {err}");
+        assert_eq!(show_record(&conn, "d1", None).unwrap().revision, 1);
+        assert_eq!(read_generation(&conn).unwrap(), gen_before);
+        let hits: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM knowledge_fts WHERE knowledge_fts MATCH 'zqfn'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(hits, 0);
+        conn.close().unwrap();
     }
 }
