@@ -306,6 +306,42 @@ struct DecodedSource {
     raw_map: Option<Vec<usize>>,
 }
 
+/// Task 4 CLI positions are 0-based UTF-8 byte columns in decoded text.
+/// Reuse the importer decoder so UTF-16 disk bytes (BOM included) keep their
+/// original raw offsets; producer occurrence column encodings are irrelevant.
+pub(crate) fn query_byte_offset(
+    raw: &[u8],
+    encoding: &str,
+    line0: u32,
+    col0: u32,
+) -> Result<usize, String> {
+    let encoding = match encoding {
+        "UTF8" => TextEncoding::UTF8,
+        "UTF16" => TextEncoding::UTF16,
+        _ => return Err("unsupported source text encoding".to_string()),
+    };
+    let decoded = decode_source(raw, encoding, "anchor")?;
+    let mut start = 0;
+    let line = decoded
+        .text
+        .split('\n')
+        .nth(line0 as usize)
+        .ok_or("position outside source")?;
+    for line in decoded.text.split('\n').take(line0 as usize) {
+        start += line.len() + 1;
+    }
+    let line = line.strip_suffix('\r').unwrap_or(line);
+    let col = col0 as usize;
+    if col > line.len() || !line.is_char_boundary(col) {
+        return Err("position outside source or mid-character".to_string());
+    }
+    let offset = start + col;
+    Ok(match decoded.raw_map {
+        Some(map) => map.get(offset).copied().unwrap_or(raw.len()),
+        None => offset,
+    })
+}
+
 /// Decode on-disk bytes per the index `text_document_encoding`. UTF-16
 /// requires a BOM (LE `FF FE` / BE `FE FF`); BOM-less or odd-length input
 /// is rejected rather than guessed. Digests always cover the RAW bytes
@@ -384,6 +420,12 @@ fn parse_project_root(s: &str) -> Result<PathBuf, String> {
 
 /// Split a symbol URI on single spaces; double spaces are escaped literals.
 /// Returns `None` for document-scoped `local` symbols and malformed URIs.
+/// A `local ...` symbol is document-scoped: definition and reference must
+/// share the document path to link. Anything else is a global URI.
+pub fn is_local_symbol(symbol: &str) -> bool {
+    symbol == "local" || symbol.starts_with("local ")
+}
+
 fn split_symbol(symbol: &str) -> Option<Vec<String>> {
     if symbol == "local" || symbol.starts_with("local ") {
         return None;
@@ -950,8 +992,19 @@ pub fn import_file(
         ],
     )
     .map_err(|e| e.to_string())?;
+    let graph_was_proven = store::graph_proof_current(conn, snapshot_id)?;
     let generation = store::semantic_generation(conn)?;
     store::meta_set(conn, "semantic_generation", &(generation + 1).to_string())?;
+    // Task7 source-proof validation may reparse digest-matching source during
+    // derivation. Certification shares this transaction with facts and edges;
+    // any failure rolls back all of them, including the generation counter.
+    if graph_was_proven {
+        crate::edges::upsert_semantic_edges(conn, snapshot_id, import_id)?;
+        store::mark_graph_proof(conn, snapshot_id)?;
+    } else {
+        // A single refreshed import cannot certify untouched legacy rows.
+        crate::edges::rederive_after_carry(conn, snapshot_id)?;
+    }
     if state.extra_skips > 0 {
         state.skipped.push(format!("…({} more)", state.extra_skips));
     }

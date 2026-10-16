@@ -1,0 +1,48 @@
+{
+  "file": "unresolved.ts",
+  "symbols": [
+    {
+      "id": "t",
+      "name": "target",
+      "uri": "scip-test test corpus 1.0.0 unresolved.ts/t()."
+    },
+    {
+      "id": "c",
+      "name": "caller",
+      "uri": "scip-test test corpus 1.0.0 unresolved.ts/c()."
+    }
+  ],
+  "occurrences": [
+    {
+      "id": "t",
+      "definition": true,
+      "line": 1,
+      "col": 9,
+      "end": 15,
+      "text": "target"
+    },
+    {
+      "id": "c",
+      "definition": true,
+      "line": 4,
+      "col": 9,
+      "end": 15,
+      "text": "caller"
+    },
+    {
+      "id": "t",
+      "definition": false,
+      "line": 7,
+      "col": 0,
+      "end": 6,
+      "text": "target"
+    }
+  ],
+  "target": "t",
+  "callees_calls": 0,
+  "inbound_calls": 0,
+  "inbound_references": 0,
+  "impact": "UNKNOWN",
+  "stale": false,
+  "notes": "Execution outside a named callable has no proven owner."
+}

@@ -1,0 +1,61 @@
+{
+  "file": "same_name_binding.cpp",
+  "symbols": [
+    {
+      "id": "t",
+      "name": "target",
+      "uri": "scip-test test corpus 1.0.0 same_name_binding.cpp/t()."
+    },
+    {
+      "id": "a",
+      "name": "target",
+      "uri": "scip-test test corpus 1.0.0 same_name_binding.cpp/a()."
+    },
+    {
+      "id": "c",
+      "name": "caller",
+      "uri": "scip-test test corpus 1.0.0 same_name_binding.cpp/c()."
+    }
+  ],
+  "occurrences": [
+    {
+      "id": "t",
+      "definition": true,
+      "line": 1,
+      "col": 4,
+      "end": 10,
+      "text": "target"
+    },
+    {
+      "id": "a",
+      "definition": true,
+      "line": 1,
+      "col": 17,
+      "end": 23,
+      "text": "target"
+    },
+    {
+      "id": "a",
+      "definition": false,
+      "line": 2,
+      "col": 11,
+      "end": 17,
+      "text": "target"
+    },
+    {
+      "id": "c",
+      "definition": true,
+      "line": 4,
+      "col": 4,
+      "end": 10,
+      "text": "caller"
+    }
+  ],
+  "target": "a",
+  "callees_calls": 0,
+  "inbound_calls": 0,
+  "inbound_references": 0,
+  "impact": "UNKNOWN",
+  "stale": false,
+  "notes": "A same-name parameter is not the function declaration. Producer definition span must identify the actual callable name token."
+}

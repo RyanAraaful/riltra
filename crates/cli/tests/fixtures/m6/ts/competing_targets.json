@@ -1,0 +1,69 @@
+{
+  "file": "competing_targets.ts",
+  "symbols": [
+    {
+      "id": "t",
+      "name": "target",
+      "uri": "scip-test test corpus 1.0.0 competing_targets.ts/t()."
+    },
+    {
+      "id": "other",
+      "name": "target",
+      "uri": "scip-test test corpus 1.0.0 competing_targets.ts/other()."
+    },
+    {
+      "id": "c",
+      "name": "caller",
+      "uri": "scip-test test corpus 1.0.0 competing_targets.ts/c()."
+    }
+  ],
+  "occurrences": [
+    {
+      "id": "t",
+      "definition": true,
+      "line": 1,
+      "col": 10,
+      "end": 16,
+      "text": "target"
+    },
+    {
+      "id": "other",
+      "definition": true,
+      "line": 2,
+      "col": 10,
+      "end": 16,
+      "text": "target"
+    },
+    {
+      "id": "c",
+      "definition": true,
+      "line": 3,
+      "col": 9,
+      "end": 15,
+      "text": "caller"
+    },
+    {
+      "id": "t",
+      "definition": false,
+      "line": 4,
+      "col": 15,
+      "end": 21,
+      "text": "target"
+    },
+    {
+      "id": "other",
+      "definition": false,
+      "line": 4,
+      "col": 15,
+      "end": 21,
+      "text": "target"
+    }
+  ],
+  "target": "t",
+  "callees_calls": 0,
+  "inbound_calls": 0,
+  "inbound_references": 0,
+  "impact": "UNKNOWN",
+  "stale": false,
+  "notes": "Two producer target identities overlap one terminal occurrence: explicit ambiguity, not arbitrary selection."
+}

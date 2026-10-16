@@ -1,0 +1,704 @@
+{
+  "callees": {
+    "anchor": {
+      "anchor_uncertainty": null,
+      "col": 5,
+      "endpoint": {
+        "byte_end": null,
+        "byte_start": null,
+        "doc": null,
+        "import_id": 1,
+        "path": null,
+        "symbol_uri": "scip-test test corpus 1.0.0 same_name.c/c().",
+        "type": "scip"
+      },
+      "import_id": 1,
+      "kind": "semantic",
+      "line": 4,
+      "path": "same_name.c",
+      "precision": "Heuristic",
+      "span": [
+        113,
+        119
+      ],
+      "symbol_uri": "scip-test test corpus 1.0.0 same_name.c/c()."
+    },
+    "completeness": {
+      "covered": 1,
+      "denominator": {
+        "ambiguous_calls": 0,
+        "dynamic_calls": 1,
+        "missing_provider_files": 0,
+        "observed_edges": 1,
+        "parse_error_files": 0,
+        "skipped_files": 0,
+        "stale_imports": 0,
+        "truncated_branches": 0,
+        "unresolved_owner": 0,
+        "unresolved_target": 1,
+        "unsupported_files": 0
+      },
+      "status": "partial",
+      "total": 1,
+      "unresolved": [
+        "dynamic",
+        "dynamic_calls",
+        "unresolved-relations",
+        "unresolved_target"
+      ]
+    },
+    "direction": "callees",
+    "edges": [
+      {
+        "callee": null,
+        "callee_name": "target",
+        "caller": {
+          "byte_end": 164,
+          "byte_start": 109,
+          "doc": null,
+          "import_id": null,
+          "path": "same_name.c",
+          "symbol_uri": null,
+          "type": "syntax_def"
+        },
+        "caller_path": "same_name.c",
+        "caller_span": [
+          148,
+          161
+        ],
+        "evidence": {
+          "callee_span": [
+            148,
+            159
+          ],
+          "digest": "f72662e0b4887d0f",
+          "imports": [],
+          "path": "same_name.c",
+          "provider": "syntax",
+          "reference_span": null,
+          "span": [
+            148,
+            161
+          ],
+          "terminal_span": [
+            153,
+            159
+          ]
+        },
+        "import_id": null,
+        "kind": "POTENTIAL_CALL",
+        "precision": "Heuristic",
+        "provider": "syntax",
+        "tool": null,
+        "unresolved": "dynamic",
+        "verification": "Unverified"
+      }
+    ],
+    "freshness": {
+      "reasons": [],
+      "status": "fresh"
+    },
+    "limits": {
+      "limit": 50,
+      "next_offset": null,
+      "offset": 0
+    },
+    "repo": "sem",
+    "schema_version": 1,
+    "snapshot": {
+      "id": 1,
+      "nonce": "<nonce>",
+      "revision": "head=-|branch=-|dirty=false|untracked=0|cfg=1a92ea80d66dd56e|nonce=<nonce>"
+    },
+    "truncated": false,
+    "verification": "Unverified"
+  },
+  "callers": {
+    "anchor": {
+      "anchor_uncertainty": null,
+      "col": 18,
+      "endpoint": {
+        "byte_end": null,
+        "byte_start": null,
+        "doc": null,
+        "import_id": 1,
+        "path": null,
+        "symbol_uri": "scip-test test corpus 1.0.0 same_name.c/t().",
+        "type": "scip"
+      },
+      "import_id": 1,
+      "kind": "semantic",
+      "line": 2,
+      "path": "same_name.c",
+      "precision": "Heuristic",
+      "span": [
+        56,
+        62
+      ],
+      "symbol_uri": "scip-test test corpus 1.0.0 same_name.c/t()."
+    },
+    "completeness": {
+      "covered": 1,
+      "denominator": {
+        "ambiguous_calls": 0,
+        "dynamic_calls": 1,
+        "missing_provider_files": 0,
+        "observed_edges": 1,
+        "parse_error_files": 0,
+        "skipped_files": 0,
+        "stale_imports": 0,
+        "truncated_branches": 0,
+        "unresolved_owner": 0,
+        "unresolved_target": 1,
+        "unsupported_files": 0
+      },
+      "status": "partial",
+      "total": 1,
+      "unresolved": [
+        "dynamic",
+        "dynamic_calls",
+        "unresolved-relations",
+        "unresolved_target"
+      ]
+    },
+    "direction": "callers",
+    "edges": [
+      {
+        "callee": null,
+        "callee_name": "target",
+        "caller": {
+          "byte_end": 164,
+          "byte_start": 109,
+          "doc": null,
+          "import_id": null,
+          "path": "same_name.c",
+          "symbol_uri": null,
+          "type": "syntax_def"
+        },
+        "caller_path": "same_name.c",
+        "caller_span": [
+          148,
+          161
+        ],
+        "evidence": {
+          "callee_span": [
+            148,
+            159
+          ],
+          "digest": "f72662e0b4887d0f",
+          "imports": [],
+          "path": "same_name.c",
+          "provider": "syntax",
+          "reference_span": null,
+          "span": [
+            148,
+            161
+          ],
+          "terminal_span": [
+            153,
+            159
+          ]
+        },
+        "import_id": null,
+        "kind": "POTENTIAL_CALL",
+        "precision": "Heuristic",
+        "provider": "syntax",
+        "tool": null,
+        "unresolved": "dynamic",
+        "verification": "Unverified"
+      }
+    ],
+    "freshness": {
+      "reasons": [],
+      "status": "fresh"
+    },
+    "limits": {
+      "limit": 50,
+      "next_offset": null,
+      "offset": 0
+    },
+    "repo": "sem",
+    "schema_version": 1,
+    "snapshot": {
+      "id": 1,
+      "nonce": "<nonce>",
+      "revision": "head=-|branch=-|dirty=false|untracked=0|cfg=1a92ea80d66dd56e|nonce=<nonce>"
+    },
+    "truncated": false,
+    "verification": "Unverified"
+  },
+  "impact": {
+    "anchor": {
+      "anchor_uncertainty": null,
+      "col": 18,
+      "endpoint": {
+        "byte_end": null,
+        "byte_start": null,
+        "doc": null,
+        "import_id": 1,
+        "path": null,
+        "symbol_uri": "scip-test test corpus 1.0.0 same_name.c/t().",
+        "type": "scip"
+      },
+      "import_id": 1,
+      "kind": "semantic",
+      "line": 2,
+      "path": "same_name.c",
+      "precision": "Heuristic",
+      "span": [
+        56,
+        62
+      ],
+      "symbol_uri": "scip-test test corpus 1.0.0 same_name.c/t()."
+    },
+    "bridges": [],
+    "budgets": {
+      "depth": 3,
+      "edges": 3000,
+      "mappings": 500,
+      "max_depth": 6,
+      "nodes": 500,
+      "paths": 1000,
+      "time_ms": 2000
+    },
+    "completeness": {
+      "covered": 0,
+      "denominator": {
+        "ambiguous_calls": 0,
+        "dynamic_calls": 1,
+        "missing_provider_files": 0,
+        "observed_edges": 0,
+        "parse_error_files": 0,
+        "skipped_files": 0,
+        "stale_imports": 0,
+        "truncated_branches": 0,
+        "unresolved_owner": 0,
+        "unresolved_target": 1,
+        "unsupported_files": 0
+      },
+      "status": "partial",
+      "total": 0,
+      "total_exact": true,
+      "unresolved": [
+        "dynamic_calls",
+        "empty-result-not-coverage-proof",
+        "graph-completeness-unproven",
+        "insufficient-impact-evidence",
+        "unresolved-relations",
+        "unresolved_target"
+      ]
+    },
+    "cycle": false,
+    "destination": null,
+    "direction": "impact",
+    "disclaimer": "plausible-impact-not-execution",
+    "freshness": {
+      "reasons": [],
+      "status": "fresh"
+    },
+    "limits": {
+      "limit": 50,
+      "next_offset": null,
+      "offset": 0
+    },
+    "paths": [],
+    "repo": "sem",
+    "schema_version": 1,
+    "snapshot": {
+      "id": 1,
+      "nonce": "<nonce>",
+      "revision": "head=-|branch=-|dirty=false|untracked=0|cfg=1a92ea80d66dd56e|nonce=<nonce>"
+    },
+    "truncated": false,
+    "unresolved": [],
+    "verdict": "UNKNOWN",
+    "verification": "Unverified",
+    "visits": {
+      "edges": 0,
+      "nodes": 1
+    }
+  },
+  "syntax_callees": {
+    "anchor": {
+      "anchor_uncertainty": "syntax-only anchor: no semantic identity at this position",
+      "col": 5,
+      "endpoint": {
+        "byte_end": 164,
+        "byte_start": 109,
+        "doc": null,
+        "import_id": null,
+        "path": "same_name.c",
+        "symbol_uri": null,
+        "type": "syntax_def"
+      },
+      "import_id": null,
+      "kind": "syntax-fallback",
+      "line": 4,
+      "path": "same_name.c",
+      "precision": "Heuristic",
+      "span": [
+        109,
+        164
+      ],
+      "symbol_uri": null
+    },
+    "completeness": {
+      "covered": 1,
+      "denominator": {
+        "ambiguous_calls": 0,
+        "dynamic_calls": 1,
+        "missing_provider_files": 1,
+        "observed_edges": 1,
+        "parse_error_files": 0,
+        "skipped_files": 0,
+        "stale_imports": 0,
+        "truncated_branches": 0,
+        "unresolved_owner": 0,
+        "unresolved_target": 1,
+        "unsupported_files": 0
+      },
+      "status": "partial",
+      "total": 1,
+      "unresolved": [
+        "dynamic",
+        "dynamic_calls",
+        "missing_provider_files",
+        "syntax-anchor-uncertain",
+        "unresolved-relations",
+        "unresolved_target"
+      ]
+    },
+    "direction": "callees",
+    "edges": [
+      {
+        "callee": null,
+        "callee_name": "target",
+        "caller": {
+          "byte_end": 164,
+          "byte_start": 109,
+          "doc": null,
+          "import_id": null,
+          "path": "same_name.c",
+          "symbol_uri": null,
+          "type": "syntax_def"
+        },
+        "caller_path": "same_name.c",
+        "caller_span": [
+          148,
+          161
+        ],
+        "evidence": {
+          "callee_span": [
+            148,
+            159
+          ],
+          "digest": "f72662e0b4887d0f",
+          "imports": [],
+          "path": "same_name.c",
+          "provider": "syntax",
+          "reference_span": null,
+          "span": [
+            148,
+            161
+          ],
+          "terminal_span": [
+            153,
+            159
+          ]
+        },
+        "import_id": null,
+        "kind": "POTENTIAL_CALL",
+        "precision": "Heuristic",
+        "provider": "syntax",
+        "tool": null,
+        "unresolved": "dynamic",
+        "verification": "Unverified"
+      }
+    ],
+    "freshness": {
+      "reasons": [],
+      "status": "fresh"
+    },
+    "limits": {
+      "limit": 50,
+      "next_offset": null,
+      "offset": 0
+    },
+    "repo": "sem",
+    "schema_version": 1,
+    "snapshot": {
+      "id": 1,
+      "nonce": "<nonce>",
+      "revision": "head=-|branch=-|dirty=false|untracked=0|cfg=1a92ea80d66dd56e|nonce=<nonce>"
+    },
+    "truncated": false,
+    "verification": "Unverified"
+  },
+  "syntax_impact": {
+    "anchor": {
+      "anchor_uncertainty": "syntax-only anchor: no semantic identity at this position",
+      "col": 18,
+      "endpoint": {
+        "byte_end": 72,
+        "byte_start": 39,
+        "doc": null,
+        "import_id": null,
+        "path": "same_name.c",
+        "symbol_uri": null,
+        "type": "syntax_def"
+      },
+      "import_id": null,
+      "kind": "syntax-fallback",
+      "line": 2,
+      "path": "same_name.c",
+      "precision": "Heuristic",
+      "span": [
+        39,
+        72
+      ],
+      "symbol_uri": null
+    },
+    "bridges": [],
+    "budgets": {
+      "depth": 3,
+      "edges": 3000,
+      "mappings": 500,
+      "max_depth": 6,
+      "nodes": 500,
+      "paths": 1000,
+      "time_ms": 2000
+    },
+    "completeness": {
+      "covered": 0,
+      "denominator": {
+        "ambiguous_calls": 0,
+        "dynamic_calls": 1,
+        "missing_provider_files": 1,
+        "observed_edges": 0,
+        "parse_error_files": 0,
+        "skipped_files": 0,
+        "stale_imports": 0,
+        "truncated_branches": 0,
+        "unresolved_owner": 0,
+        "unresolved_target": 1,
+        "unsupported_files": 0
+      },
+      "status": "partial",
+      "total": 0,
+      "total_exact": true,
+      "unresolved": [
+        "dynamic_calls",
+        "empty-result-not-coverage-proof",
+        "graph-completeness-unproven",
+        "insufficient-impact-evidence",
+        "missing_provider_files",
+        "syntax-anchor-uncertain",
+        "unresolved-relations",
+        "unresolved_target"
+      ]
+    },
+    "cycle": false,
+    "destination": null,
+    "direction": "impact",
+    "disclaimer": "plausible-impact-not-execution",
+    "freshness": {
+      "reasons": [],
+      "status": "fresh"
+    },
+    "limits": {
+      "limit": 50,
+      "next_offset": null,
+      "offset": 0
+    },
+    "paths": [],
+    "repo": "sem",
+    "schema_version": 1,
+    "snapshot": {
+      "id": 1,
+      "nonce": "<nonce>",
+      "revision": "head=-|branch=-|dirty=false|untracked=0|cfg=1a92ea80d66dd56e|nonce=<nonce>"
+    },
+    "truncated": false,
+    "unresolved": [],
+    "verdict": "UNKNOWN",
+    "verification": "Unverified",
+    "visits": {
+      "edges": 0,
+      "nodes": 1
+    }
+  },
+  "trace": {
+    "anchor": {
+      "anchor_uncertainty": null,
+      "col": 5,
+      "endpoint": {
+        "byte_end": null,
+        "byte_start": null,
+        "doc": null,
+        "import_id": 1,
+        "path": null,
+        "symbol_uri": "scip-test test corpus 1.0.0 same_name.c/c().",
+        "type": "scip"
+      },
+      "import_id": 1,
+      "kind": "semantic",
+      "line": 4,
+      "path": "same_name.c",
+      "precision": "Heuristic",
+      "span": [
+        113,
+        119
+      ],
+      "symbol_uri": "scip-test test corpus 1.0.0 same_name.c/c()."
+    },
+    "bridges": [
+      {
+        "definition_span": [
+          113,
+          119
+        ],
+        "digest": "f72662e0b4887d0f",
+        "semantic": {
+          "byte_end": null,
+          "byte_start": null,
+          "doc": null,
+          "import_id": 1,
+          "path": null,
+          "symbol_uri": "scip-test test corpus 1.0.0 same_name.c/c().",
+          "type": "scip"
+        },
+        "syntax": {
+          "byte_end": 164,
+          "byte_start": 109,
+          "doc": null,
+          "import_id": null,
+          "path": "same_name.c",
+          "symbol_uri": null,
+          "type": "syntax_def"
+        }
+      }
+    ],
+    "budgets": {
+      "depth": 3,
+      "edges": 3000,
+      "mappings": 500,
+      "max_depth": 6,
+      "nodes": 500,
+      "paths": 1000,
+      "time_ms": 2000
+    },
+    "completeness": {
+      "covered": 1,
+      "denominator": {
+        "ambiguous_calls": 0,
+        "dynamic_calls": 1,
+        "missing_provider_files": 0,
+        "observed_edges": 1,
+        "parse_error_files": 0,
+        "skipped_files": 0,
+        "stale_imports": 0,
+        "truncated_branches": 0,
+        "unresolved_owner": 0,
+        "unresolved_target": 1,
+        "unsupported_files": 0
+      },
+      "status": "partial",
+      "total": 1,
+      "total_exact": true,
+      "unresolved": [
+        "dynamic",
+        "dynamic_calls",
+        "unresolved-relations",
+        "unresolved-target",
+        "unresolved_target"
+      ]
+    },
+    "cycle": false,
+    "destination": null,
+    "direction": "trace",
+    "disclaimer": "plausible-path-not-execution",
+    "freshness": {
+      "reasons": [],
+      "status": "fresh"
+    },
+    "limits": {
+      "limit": 50,
+      "next_offset": null,
+      "offset": 0
+    },
+    "paths": [
+      {
+        "cycle": false,
+        "edges": [
+          {
+            "callee": null,
+            "callee_name": "target",
+            "caller": {
+              "byte_end": 164,
+              "byte_start": 109,
+              "doc": null,
+              "import_id": null,
+              "path": "same_name.c",
+              "symbol_uri": null,
+              "type": "syntax_def"
+            },
+            "caller_path": "same_name.c",
+            "caller_span": [
+              148,
+              161
+            ],
+            "evidence": {
+              "callee_span": [
+                148,
+                159
+              ],
+              "digest": "f72662e0b4887d0f",
+              "imports": [],
+              "path": "same_name.c",
+              "provider": "syntax",
+              "reference_span": null,
+              "span": [
+                148,
+                161
+              ],
+              "terminal_span": [
+                153,
+                159
+              ]
+            },
+            "import_id": null,
+            "kind": "POTENTIAL_CALL",
+            "precision": "Heuristic",
+            "provider": "syntax",
+            "tool": null,
+            "unresolved": "dynamic",
+            "verification": "Unverified"
+          }
+        ],
+        "truncated": false,
+        "unresolved": [
+          "unresolved-target",
+          "dynamic"
+        ],
+        "verification": "Unverified"
+      }
+    ],
+    "repo": "sem",
+    "schema_version": 1,
+    "snapshot": {
+      "id": 1,
+      "nonce": "<nonce>",
+      "revision": "head=-|branch=-|dirty=false|untracked=0|cfg=1a92ea80d66dd56e|nonce=<nonce>"
+    },
+    "truncated": false,
+    "unresolved": [
+      "dynamic",
+      "unresolved-target"
+    ],
+    "verification": "Unverified",
+    "visits": {
+      "edges": 1,
+      "nodes": 1
+    }
+  }
+}

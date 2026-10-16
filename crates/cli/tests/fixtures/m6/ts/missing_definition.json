@@ -1,0 +1,53 @@
+{
+  "file": "missing_definition.ts",
+  "symbols": [
+    {
+      "id": "t",
+      "name": "target",
+      "uri": "scip-test test corpus 1.0.0 missing_definition.ts/t()."
+    },
+    {
+      "id": "c",
+      "name": "caller",
+      "uri": "scip-test test corpus 1.0.0 missing_definition.ts/c()."
+    },
+    {
+      "id": "missing",
+      "name": "missing",
+      "uri": "scip-test test corpus 1.0.0 missing_definition.ts/missing()."
+    }
+  ],
+  "occurrences": [
+    {
+      "id": "t",
+      "definition": true,
+      "line": 1,
+      "col": 9,
+      "end": 15,
+      "text": "target"
+    },
+    {
+      "id": "c",
+      "definition": true,
+      "line": 4,
+      "col": 9,
+      "end": 15,
+      "text": "caller"
+    },
+    {
+      "id": "missing",
+      "definition": false,
+      "line": 5,
+      "col": 11,
+      "end": 18,
+      "text": "missing"
+    }
+  ],
+  "target": "t",
+  "callees_calls": 0,
+  "inbound_calls": 0,
+  "inbound_references": 0,
+  "impact": "UNKNOWN",
+  "stale": false,
+  "notes": "Reference URI has no definition in this import; the unrelated target definition cannot substitute."
+}

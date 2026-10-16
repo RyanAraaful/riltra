@@ -1,0 +1,1940 @@
+// SPDX-License-Identifier: Apache-2.0
+//! M6 graph lifecycle CLI tests (Task 3): import rollback, incremental
+//! modes, and re-import after rebuild. Edge *content* is asserted in
+//! `src/edges.rs` unit tests (in-crate store access); these tests pin the
+//! CLI-observable lifecycle and Task 4 callers/callees evidence contract.
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static COUNTER: AtomicU64 = AtomicU64::new(20_000);
+
+#[path = "m6_corpus/mod.rs"]
+mod task7;
+#[path = "m6_corpus/upgrade.rs"]
+mod task7_upgrade;
+
+fn home(tag: &str) -> PathBuf {
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let mut p = std::env::temp_dir();
+    p.push(format!("riltra-edges-{tag}-{}-{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&p);
+    std::fs::create_dir_all(&p).unwrap();
+    p
+}
+
+fn run(home: &Path, args: &[&str]) -> (i32, String, String) {
+    let output = Command::new(env!("CARGO_BIN_EXE_riltra"))
+        .args(args)
+        .env("RILTRA_HOME", home)
+        .output()
+        .expect("spawn riltra");
+    (
+        output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+fn repo_with(home: &Path, name: &str, files: &[(&str, &str)]) -> PathBuf {
+    let d = home.join(name);
+    for (rel, content) in files {
+        let p = d.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, content).unwrap();
+    }
+    let (code, _, err) = run(
+        home,
+        &["init", "--repo", &d.to_string_lossy(), "--name", name],
+    );
+    assert_eq!(code, 0, "init failed: {err}");
+    d
+}
+
+fn do_index(home: &Path) -> String {
+    let (code, out, err) = run(home, &["index", "--repo", "sem"]);
+    assert_eq!(code, 0, "index failed: {err}");
+    out
+}
+
+// Minimal proto3 writer for exactly the fields the importer reads (field
+// numbers pinned by scip.proto; same shape as tests/semantic.rs).
+fn varint(mut v: u64, out: &mut Vec<u8>) {
+    loop {
+        let mut b = (v & 0x7f) as u8;
+        v >>= 7;
+        if v != 0 {
+            b |= 0x80;
+        }
+        out.push(b);
+        if v == 0 {
+            break;
+        }
+    }
+}
+
+fn tag(field: u32, wire: u32, out: &mut Vec<u8>) {
+    varint(((field << 3) | wire) as u64, out);
+}
+
+fn len_field(field: u32, bytes: &[u8], out: &mut Vec<u8>) {
+    tag(field, 2, out);
+    varint(bytes.len() as u64, out);
+    out.extend_from_slice(bytes);
+}
+
+fn str_field(field: u32, value: &str, out: &mut Vec<u8>) {
+    len_field(field, value.as_bytes(), out);
+}
+
+fn varint_field(field: u32, value: u64, out: &mut Vec<u8>) {
+    tag(field, 0, out);
+    varint(value, out);
+}
+
+fn occurrence(symbol: &str, roles: u64, line: i64, start: i64, end: i64) -> Vec<u8> {
+    let mut r = Vec::new();
+    varint_field(1, line as u64, &mut r);
+    varint_field(2, start as u64, &mut r);
+    varint_field(3, end as u64, &mut r);
+    let mut o = Vec::new();
+    str_field(2, symbol, &mut o);
+    varint_field(3, roles, &mut o);
+    len_field(8, &r, &mut o);
+    o
+}
+
+const T_URI: &str = "scip-test test test-pkg 1.0.0 lib.py/target().";
+const C_URI: &str = "scip-test test test-pkg 1.0.0 main.py/caller().";
+
+fn scip_for(dir: &Path) -> String {
+    let mut sym = Vec::new();
+    str_field(1, T_URI, &mut sym);
+    str_field(6, "target", &mut sym);
+    let lib_occ = occurrence(T_URI, 0x1, 0, 4, 10);
+    let mut doc_lib_full = Vec::new();
+    str_field(1, "lib.py", &mut doc_lib_full);
+    len_field(2, &lib_occ, &mut doc_lib_full);
+    len_field(3, &sym, &mut doc_lib_full);
+    varint_field(6, 1, &mut doc_lib_full);
+
+    let mut sym_c = Vec::new();
+    str_field(1, C_URI, &mut sym_c);
+    str_field(6, "caller", &mut sym_c);
+    let mut doc_main = Vec::new();
+    str_field(1, "main.py", &mut doc_main);
+    for o in [
+        occurrence(C_URI, 0x1, 2, 4, 10),
+        occurrence(T_URI, 0x0, 3, 11, 17),
+    ] {
+        len_field(2, &o, &mut doc_main);
+    }
+    len_field(3, &sym_c, &mut doc_main);
+    len_field(3, &sym, &mut doc_main);
+    varint_field(6, 1, &mut doc_main);
+
+    let mut md = Vec::new();
+    let mut tool = Vec::new();
+    str_field(1, "scip-test", &mut tool);
+    str_field(2, "1.0", &mut tool);
+    len_field(2, &tool, &mut md);
+    str_field(
+        3,
+        &format!("file://{}", dir.to_string_lossy().replace('\\', "/")),
+        &mut md,
+    );
+    varint_field(4, 1, &mut md);
+    let mut out = Vec::new();
+    len_field(1, &md, &mut out);
+    len_field(2, &doc_lib_full, &mut out);
+    len_field(2, &doc_main, &mut out);
+    let scip = dir.join("index.scip");
+    std::fs::write(&scip, &out).unwrap();
+    scip.to_string_lossy().to_string()
+}
+
+fn edge_repo(h: &Path) -> PathBuf {
+    repo_with(
+        h,
+        "sem",
+        &[
+            ("lib.py", "def target():\n    return 1\n"),
+            (
+                "main.py",
+                "from lib import target\n\ndef caller():\n    return target()\n",
+            ),
+        ],
+    )
+}
+
+#[test]
+fn cli_graph_import_failure_rolls_back() {
+    let h = home("rollback");
+    edge_repo(&h);
+    do_index(&h);
+    let bad = h.join("sem").join("bad.scip");
+    std::fs::write(&bad, b"not a scip payload").unwrap();
+    let (code, _, _) = run(
+        &h,
+        &[
+            "semantic",
+            "import",
+            "--repo",
+            "sem",
+            "--scip",
+            &bad.to_string_lossy(),
+        ],
+    );
+    assert_ne!(code, 0, "corrupt SCIP must fail the import");
+    let (code, out, _) = run(&h, &["semantic", "status", "--repo", "sem"]);
+    assert_eq!(code, 0);
+    assert!(
+        out.contains("\"imports\":[]"),
+        "failed import stores nothing: {out}"
+    );
+}
+
+#[test]
+fn cli_graph_incremental_modes_hold_with_edges() {
+    let h = home("modes");
+    edge_repo(&h);
+    do_index(&h);
+    let (code, out, err) = run(&h, &["index", "--repo", "sem"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("\"mode\":\"incremental\""), "{out}");
+    std::fs::write(
+        h.join("sem").join("lib.py"),
+        "def target():\n    return 2\n",
+    )
+    .unwrap();
+    let (code, out, err) = run(&h, &["index", "--repo", "sem"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("\"mode\":\"incremental\""), "{out}");
+    let (code, out, err) = run(&h, &["index", "--repo", "sem", "--full"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("\"mode\":\"full\""), "{out}");
+}
+
+#[test]
+fn cli_graph_import_after_rebuild_rebinds() {
+    // Import → rebuild (facts carry) → re-import on the new snapshot: the
+    // lifecycle the graph re-derivation relies on, CLI-observed.
+    // lifecycle the graph re-derivation relies on, CLI-observed.
+    let h = home("rebind");
+    let dir = edge_repo(&h);
+    do_index(&h);
+    let scip = scip_for(&dir);
+    let (code, _, err) = run(
+        &h,
+        &["semantic", "import", "--repo", "sem", "--scip", &scip],
+    );
+    assert_eq!(code, 0, "{err}");
+    std::fs::write(dir.join("lib.py"), "def target():\n    return 2\n").unwrap();
+    let (code, _, err) = run(&h, &["index", "--repo", "sem"]);
+    assert_eq!(code, 0, "{err}");
+    let (code, _, err) = run(
+        &h,
+        &["semantic", "import", "--repo", "sem", "--scip", &scip],
+    );
+    assert_eq!(code, 0, "re-import on the new snapshot: {err}");
+    let (code, out, _) = run(&h, &["semantic", "status", "--repo", "sem"]);
+    assert_eq!(code, 0);
+    assert!(out.contains("\"verification\""), "{out}");
+}
+
+// ---------------------------------------------------------------------------
+// Task 4: callers/callees CLI.
+
+fn scip_imported(h: &Path) -> PathBuf {
+    let dir = edge_repo(h);
+    do_index(h);
+    let scip = scip_for(&dir);
+    let (code, _, err) = run(h, &["semantic", "import", "--repo", "sem", "--scip", &scip]);
+    assert_eq!(code, 0, "{err}");
+    dir
+}
+
+#[test]
+fn cli_callers_finds_scip_callers_without_reindex() {
+    let h = home("callers");
+    scip_imported(&h);
+    // Anchor on the target definition (line 1, col 6 → def occurrence).
+    let (code, out, err) = run(
+        &h,
+        &[
+            "callers", "--repo", "sem", "--path", "lib.py", "--line", "1", "--col", "6",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("\"schema_version\":1"), "{out}");
+    assert!(out.contains("\"direction\":\"callers\""), "{out}");
+    assert!(out.contains("\"kind\":\"CALLS\""), "{out}");
+    assert!(out.contains("\"precision\":\"Exact\""), "{out}");
+    assert!(out.contains("main.py"), "{out}");
+    assert!(out.contains("\"verification\":\"Unverified\""), "{out}");
+    assert!(!out.contains("Current"), "never Current: {out}");
+    assert!(
+        out.contains("\"status\":\"partial\""),
+        "unsupported SCIP artifact: {out}"
+    );
+    assert!(out.contains("\"truncated\":false"), "{out}");
+    // --symbol agreeing with the position identity returns the same answer.
+    let (code, out2, err) = run(
+        &h,
+        &[
+            "callers", "--repo", "sem", "--path", "lib.py", "--line", "1", "--col", "6",
+            "--symbol", T_URI,
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(out, out2, "agreeing --symbol must not change the answer");
+}
+
+#[test]
+fn cli_callees_finds_scip_callees() {
+    let h = home("callees");
+    scip_imported(&h);
+    // Anchor on the caller definition (main.py line 3, col 6).
+    let (code, out, err) = run(
+        &h,
+        &[
+            "callees", "--repo", "sem", "--path", "main.py", "--line", "3", "--col", "6",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("\"direction\":\"callees\""), "{out}");
+    assert!(out.contains("\"kind\":\"CALLS\""), "{out}");
+    assert!(out.contains("lib.py"), "{out}");
+    assert!(out.contains("\"callee_name\":\"target\""), "{out}");
+}
+
+#[test]
+fn cli_syntax_fallback_without_scip() {
+    let h = home("fallback");
+    edge_repo(&h);
+    do_index(&h);
+    // No SCIP import: anchor falls back to the syntax definition, explicit.
+    let (code, out, err) = run(
+        &h,
+        &[
+            "callees", "--repo", "sem", "--path", "main.py", "--line", "3", "--col", "6",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("\"kind\":\"syntax-fallback\""), "{out}");
+    assert!(out.contains("\"precision\":\"Heuristic\""), "{out}");
+    assert!(
+        out.contains("\"anchor_uncertainty\":\"syntax-only"),
+        "{out}"
+    );
+    assert!(out.contains("\"kind\":\"POTENTIAL_CALL\""), "{out}");
+    assert!(out.contains("\"provider\":\"syntax\""), "{out}");
+    assert!(
+        !out.contains("\"kind\":\"CALLS\""),
+        "no proven calls without evidence: {out}"
+    );
+}
+
+#[test]
+fn cli_same_name_no_false_link() {
+    let h = home("samename");
+    repo_with(
+        &h,
+        "sem",
+        &[
+            ("a.py", "def foo():\n    return 1\n"),
+            (
+                "b.py",
+                "def foo():\n    return 2\n\ndef bar():\n    foo()\n",
+            ),
+        ],
+    );
+    do_index(&h);
+    // Callers of a.py/foo: bar calls b.py/foo — must not link by name.
+    let (code, out, err) = run(
+        &h,
+        &[
+            "callers", "--repo", "sem", "--path", "a.py", "--line", "1", "--col", "6",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("\"edges\":[]"), "{out}");
+    assert!(
+        out.contains("\"status\":\"partial\""),
+        "empty is not coverage proof: {out}"
+    );
+    // Callers of b.py/foo: bar, same file, honest POTENTIAL.
+    let (code, out, err) = run(
+        &h,
+        &[
+            "callers", "--repo", "sem", "--path", "b.py", "--line", "1", "--col", "6",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("\"caller_path\":\"b.py\""), "{out}");
+    assert!(out.contains("\"callee_name\":\"foo\""), "{out}");
+    assert!(out.contains("\"kind\":\"POTENTIAL_CALL\""), "{out}");
+    assert!(!out.contains("\"caller_path\":\"a.py\""), "{out}");
+}
+
+#[test]
+fn cli_stale_edit_reports_stale_not_current() {
+    let h = home("stale");
+    scip_imported(&h);
+    std::fs::write(
+        h.join("sem").join("lib.py"),
+        "def target():\n    return 9\n",
+    )
+    .unwrap();
+    let (code, out, err) = run(
+        &h,
+        &[
+            "callers", "--repo", "sem", "--path", "lib.py", "--line", "1", "--col", "6",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("\"verification\":\"Stale\""), "{out}");
+    assert!(!out.contains("Current"), "{out}");
+}
+
+#[test]
+fn cli_pagination_is_deterministic() {
+    let h = home("paging");
+    repo_with(
+        &h,
+        "sem",
+        &[
+            ("t.py", "def target():\n    return 1\n"),
+            ("c1.py", "from t import target\n\ndef c1():\n    target()\n"),
+            ("c2.py", "from t import target\n\ndef c2():\n    target()\n"),
+            ("c3.py", "from t import target\n\ndef c3():\n    target()\n"),
+        ],
+    );
+    do_index(&h);
+    let args = [
+        "callers", "--repo", "sem", "--path", "t.py", "--line", "1", "--col", "6",
+    ];
+    let (code, full, err) = run(&h, &args);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        full.contains("c1") && full.contains("c2") && full.contains("c3"),
+        "{full}"
+    );
+    let (code, p0, err) = run(
+        &h,
+        &[
+            "callers", "--repo", "sem", "--path", "t.py", "--line", "1", "--col", "6", "--limit",
+            "2", "--offset", "0",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert!(p0.contains("\"truncated\":true"), "{p0}");
+    let (code, p1, err) = run(
+        &h,
+        &[
+            "callers", "--repo", "sem", "--path", "t.py", "--line", "1", "--col", "6", "--limit",
+            "2", "--offset", "2",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert!(p1.contains("\"truncated\":false"), "{p1}");
+    // Pages are disjoint and repeatable: same query twice is byte-identical.
+    let (code, p0b, err) = run(
+        &h,
+        &[
+            "callers", "--repo", "sem", "--path", "t.py", "--line", "1", "--col", "6", "--limit",
+            "2", "--offset", "0",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(p0, p0b, "pagination must be deterministic");
+}
+
+#[test]
+fn cli_anchor_errors_are_explicit() {
+    let h = home("anchors");
+    let dir = edge_repo(&h);
+    do_index(&h);
+    // Position with no occurrence and no enclosing definition.
+    std::fs::write(dir.join("empty.py"), "\n\n\n").unwrap();
+    do_index(&h);
+    let (code, _, _) = run(
+        &h,
+        &[
+            "callers", "--repo", "sem", "--path", "empty.py", "--line", "2", "--col", "1",
+        ],
+    );
+    assert_eq!(code, 3, "anchorless position must fail as data error");
+    // --symbol contradicting the position identity.
+    let (code, _, _) = run(
+        &h,
+        &[
+            "callers", "--repo", "sem", "--path", "lib.py", "--line", "1", "--col", "6",
+            "--symbol", C_URI,
+        ],
+    );
+    assert_eq!(
+        code, 3,
+        "contradicting --symbol must fail, never silently switch"
+    );
+}
+
+#[test]
+fn cli_cross_repo_isolation() {
+    let h = home("xrepo");
+    scip_imported(&h);
+    repo_with(&h, "other", &[("q.py", "def qq():\n    pass\n")]);
+    let (code, _, err) = run(&h, &["index", "--repo", "other"]);
+    assert_eq!(code, 0, "{err}");
+    let (code, out, err) = run(
+        &h,
+        &[
+            "callers", "--repo", "other", "--path", "q.py", "--line", "1", "--col", "6",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("\"edges\":[]"), "{out}");
+    assert!(!out.contains("main.py"), "no cross-repo leakage: {out}");
+}
+
+#[test]
+fn cli_local_symbol_stays_in_document() {
+    let h = home("locals");
+    let dir = repo_with(&h, "sem", &[("m.py", "def f():\n    return 1\n")]);
+    do_index(&h);
+    // Hand-built SCIP with a document-local symbol: def + ref in m.py.
+    let local = "local foo";
+    let mut sym = Vec::new();
+    str_field(1, local, &mut sym);
+    str_field(6, "foo", &mut sym);
+    let mut doc = Vec::new();
+    str_field(1, "m.py", &mut doc);
+    for o in [
+        occurrence(local, 0x1, 0, 4, 5),
+        occurrence(local, 0x0, 1, 11, 12),
+    ] {
+        len_field(2, &o, &mut doc);
+    }
+    len_field(3, &sym, &mut doc);
+    varint_field(6, 1, &mut doc);
+    let mut md = Vec::new();
+    let mut tool = Vec::new();
+    str_field(1, "scip-test", &mut tool);
+    str_field(2, "1.0", &mut tool);
+    len_field(2, &tool, &mut md);
+    str_field(
+        3,
+        &format!("file://{}", dir.to_string_lossy().replace('\\', "/")),
+        &mut md,
+    );
+    varint_field(4, 1, &mut md);
+    let mut payload = Vec::new();
+    len_field(1, &md, &mut payload);
+    len_field(2, &doc, &mut payload);
+    let scip = dir.join("index.scip");
+    std::fs::write(&scip, &payload).unwrap();
+    let (code, _, err) = run(
+        &h,
+        &[
+            "semantic",
+            "import",
+            "--repo",
+            "sem",
+            "--scip",
+            &scip.to_string_lossy(),
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    let (code, out, err) = run(
+        &h,
+        &[
+            "callers", "--repo", "sem", "--path", "m.py", "--line", "1", "--col", "5",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("m.py"), "{out}");
+    assert!(out.contains("\"kind\":\"REFERENCES\""), "{out}");
+    assert!(!out.contains("ghost.py"), "{out}");
+}
+
+fn query_json(h: &Path, direction: &str, path: &str, extra: &[&str]) -> serde_json::Value {
+    let mut args = vec![
+        direction, "--repo", "sem", "--path", path, "--line", "1", "--col", "6",
+    ];
+    args.extend_from_slice(extra);
+    let (code, out, err) = run(h, &args);
+    assert_eq!(code, 0, "{err}");
+    serde_json::from_str(&out).expect("valid JSON")
+}
+
+#[test]
+fn task4_json_contract_and_source_evidence() {
+    let h = home("contract");
+    let dir = scip_imported(&h);
+    let v = query_json(&h, "callers", "lib.py", &[]);
+    assert_eq!(v["schema_version"], 1);
+    assert!(v["snapshot"]["revision"].is_string());
+    assert_eq!(v["freshness"]["status"], "fresh");
+    assert_eq!(v["limits"]["limit"], 50);
+    assert!(v["anchor"]["anchor_uncertainty"].is_null());
+    assert_eq!(v["anchor"]["endpoint"]["symbol_uri"], T_URI);
+    let e = &v["edges"][0];
+    assert_eq!(e["kind"], "CALLS");
+    assert_eq!(e["precision"], "Exact");
+    assert_eq!(e["verification"], "Unverified");
+    assert_eq!(e["evidence"]["path"], "main.py");
+    let src = std::fs::read(dir.join("main.py")).unwrap();
+    for (field, expected) in [
+        ("span", "target()"),
+        ("terminal_span", "target"),
+        ("reference_span", "target"),
+    ] {
+        let span = e["evidence"][field].as_array().expect(field);
+        let a = span[0].as_u64().unwrap() as usize;
+        let b = span[1].as_u64().unwrap() as usize;
+        assert_eq!(&src[a..b], expected.as_bytes());
+    }
+    assert!(e["evidence"]["digest"].is_string());
+    assert_eq!(e["evidence"]["imports"][0]["provider"], "scip-test");
+    assert!(e["evidence"]["imports"][0]["source_revision"].is_string());
+    assert!(v["completeness"]["denominator"].is_object());
+    assert_eq!(v, query_json(&h, "callers", "lib.py", &[]));
+}
+
+#[test]
+fn task4_unresolved_and_empty_are_not_complete() {
+    let h = home("unknown");
+    edge_repo(&h);
+    do_index(&h);
+    let v = query_json(&h, "callers", "lib.py", &[]);
+    assert_eq!(v["completeness"]["status"], "partial");
+    assert!(
+        v["completeness"]["denominator"]["unresolved_target"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    assert!(v["edges"][0]["callee"].is_null());
+    let h2 = home("empty-unknown");
+    repo_with(&h2, "sem", &[("a.py", "def unused():\n    pass\n")]);
+    do_index(&h2);
+    let v = query_json(&h2, "callers", "a.py", &[]);
+    assert_eq!(v["edges"], serde_json::json!([]));
+    assert_eq!(v["completeness"]["status"], "partial");
+}
+
+#[test]
+fn task4_syntax_fallback_rejects_changed_source() {
+    let h = home("changed-fallback");
+    let dir = edge_repo(&h);
+    do_index(&h);
+    std::fs::write(
+        dir.join("lib.py"),
+        "# changed offsets\ndef other():\n    pass\n",
+    )
+    .unwrap();
+    let (code, out, err) = run(
+        &h,
+        &[
+            "callers", "--repo", "sem", "--path", "lib.py", "--line", "2", "--col", "6",
+        ],
+    );
+    assert_eq!(code, 3, "{out} {err}");
+    assert!(err.contains("source-changed"), "{err}");
+}
+
+#[test]
+fn task4_rejects_zero_positions_and_limit() {
+    let h = home("bad-args");
+    scip_imported(&h);
+    for extra in [
+        ["--line", "0"],
+        ["--col", "0"],
+        ["--limit", "0"],
+        ["--limit", "1001"],
+        ["--offset", "18446744073709551615"],
+    ] {
+        let mut args = vec![
+            "callers", "--repo", "sem", "--path", "lib.py", "--line", "1", "--col", "6",
+        ];
+        args.extend(extra);
+        let (code, out, err) = run(&h, &args);
+        assert_eq!(code, 2, "{extra:?}: {out} {err}");
+        assert!(
+            err.contains(extra[0]),
+            "error must identify the invalid flag: {err}"
+        );
+    }
+}
+
+#[test]
+fn task4_pagination_beyond_one_thousand() {
+    let h = home("large-page");
+    let mut source = String::from("def target():\n    pass\n\ndef caller():\n");
+    for _ in 0..1005 {
+        source.push_str("    target()\n");
+    }
+    repo_with(&h, "sem", &[("a.py", &source)]);
+    do_index(&h);
+    let p0 = query_json(&h, "callers", "a.py", &["--limit", "1000"]);
+    assert_eq!(p0["completeness"]["total"], 1005);
+    assert_eq!(p0["edges"].as_array().unwrap().len(), 1000);
+    assert_eq!(p0["limits"]["next_offset"], 1000);
+    let p1 = query_json(
+        &h,
+        "callers",
+        "a.py",
+        &["--limit", "1000", "--offset", "1000"],
+    );
+    assert_eq!(p1["edges"].as_array().unwrap().len(), 5);
+    assert_eq!(p1["truncated"], false);
+    assert!(p1["limits"]["next_offset"].is_null());
+    assert_ne!(
+        p0["edges"][999]["caller_span"],
+        p1["edges"][0]["caller_span"]
+    );
+    let end = query_json(&h, "callers", "a.py", &["--offset", "1006"]);
+    assert_eq!(end["edges"], serde_json::json!([]));
+    assert_eq!(end["completeness"]["total"], 1005);
+}
+
+#[test]
+fn task4_import_name_is_not_module_identity() {
+    let h = home("module-binding");
+    repo_with(
+        &h,
+        "sem",
+        &[
+            ("lib.py", "def target():\n    pass\n"),
+            (
+                "other.py",
+                "from unrelated import lib\n\ndef caller():\n    target()\n",
+            ),
+        ],
+    );
+    do_index(&h);
+    let v = query_json(&h, "callers", "lib.py", &[]);
+    assert_eq!(
+        v["edges"],
+        serde_json::json!([]),
+        "imported name is not the imported module"
+    );
+}
+
+fn test_document(path: &str, occurrences: &[Vec<u8>], symbols: &[(&str, &str)]) -> Vec<u8> {
+    let mut doc = Vec::new();
+    str_field(1, path, &mut doc);
+    for o in occurrences {
+        len_field(2, o, &mut doc);
+    }
+    for (uri, name) in symbols {
+        let mut info = Vec::new();
+        str_field(1, uri, &mut info);
+        str_field(6, name, &mut info);
+        len_field(3, &info, &mut doc);
+    }
+    varint_field(6, 1, &mut doc);
+    doc
+}
+
+fn import_documents(h: &Path, dir: &Path, tool_name: &str, docs: &[Vec<u8>]) {
+    import_documents_encoded(h, dir, tool_name, docs, 1);
+}
+
+fn import_documents_encoded(
+    h: &Path,
+    dir: &Path,
+    tool_name: &str,
+    docs: &[Vec<u8>],
+    encoding: u64,
+) {
+    let mut tool = Vec::new();
+    str_field(1, tool_name, &mut tool);
+    str_field(2, "1.0", &mut tool);
+    let mut md = Vec::new();
+    len_field(2, &tool, &mut md);
+    str_field(
+        3,
+        &format!("file://{}", dir.to_string_lossy().replace('\\', "/")),
+        &mut md,
+    );
+    varint_field(4, encoding, &mut md);
+    let mut payload = Vec::new();
+    len_field(1, &md, &mut payload);
+    for doc in docs {
+        len_field(2, doc, &mut payload);
+    }
+    let path = h.join(format!("{tool_name}.scip"));
+    std::fs::write(&path, payload).unwrap();
+    let (code, _, err) = run(
+        h,
+        &[
+            "semantic",
+            "import",
+            "--repo",
+            "sem",
+            "--scip",
+            &path.to_string_lossy(),
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+}
+
+#[test]
+fn task4_cross_import_identity_and_ambiguous_anchor() {
+    let h = home("import-isolation");
+    let dir = edge_repo(&h);
+    do_index(&h);
+    let target = || {
+        test_document(
+            "lib.py",
+            &[occurrence(T_URI, 1, 0, 4, 10)],
+            &[(T_URI, "target")],
+        )
+    };
+    import_documents(&h, &dir, "tool-a", &[target()]);
+    let main = test_document(
+        "main.py",
+        &[
+            occurrence(C_URI, 1, 2, 4, 10),
+            occurrence(T_URI, 0, 3, 11, 17),
+        ],
+        &[(T_URI, "target"), (C_URI, "caller")],
+    );
+    import_documents(&h, &dir, "tool-b", &[main]);
+    let v = query_json(&h, "callers", "lib.py", &[]);
+    assert!(
+        v["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|e| e["kind"] != "CALLS"),
+        "definition from another import must not prove CALLS: {v}"
+    );
+    assert!(
+        v["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|e| e["provider"] == "syntax" || e["import_id"] == v["anchor"]["import_id"]),
+        "semantic candidates must preserve the anchor's import scope: {v}"
+    );
+    import_documents(&h, &dir, "tool-c", &[target()]);
+    let (code, out, err) = run(
+        &h,
+        &[
+            "callers", "--repo", "sem", "--path", "lib.py", "--line", "1", "--col", "6",
+            "--symbol", T_URI,
+        ],
+    );
+    assert_eq!(code, 3, "{out} {err}");
+    assert!(err.contains("ambiguous"), "{err}");
+}
+
+#[test]
+fn task4_last_page_is_not_full_coverage() {
+    let h = home("coverage-page");
+    let src = "def target():\n    pass\n\ndef caller():\n    target()\n    target()\n";
+    let dir = repo_with(&h, "sem", &[("a.py", src)]);
+    do_index(&h);
+    let doc = test_document(
+        "a.py",
+        &[
+            occurrence(T_URI, 1, 0, 4, 10),
+            occurrence(C_URI, 1, 3, 4, 10),
+            occurrence(T_URI, 0, 4, 4, 10),
+            occurrence(T_URI, 0, 5, 4, 10),
+        ],
+        &[(T_URI, "target"), (C_URI, "caller")],
+    );
+    import_documents(&h, &dir, "coverage", &[doc]);
+    let full = query_json(&h, "callers", "a.py", &[]);
+    assert_eq!(
+        full["completeness"]["status"], "complete",
+        "bounded observed closure can be complete: {full}"
+    );
+    let last = query_json(&h, "callers", "a.py", &["--limit", "1", "--offset", "1"]);
+    assert_eq!(last["truncated"], false);
+    assert_eq!(last["completeness"]["covered"], 1);
+    assert_eq!(last["completeness"]["total"], 2);
+    assert_eq!(
+        last["completeness"]["status"], "partial",
+        "earlier page is still omitted"
+    );
+}
+
+#[test]
+fn task4_unresolved_elsewhere_is_not_proof_of_complete_callers() {
+    let h = home("unknown-closure");
+    let src = "def target():\n    pass\n\ndef caller():\n    target()\n    mystery()\n";
+    let dir = repo_with(&h, "sem", &[("a.py", src)]);
+    do_index(&h);
+    let doc = test_document(
+        "a.py",
+        &[
+            occurrence(T_URI, 1, 0, 4, 10),
+            occurrence(C_URI, 1, 3, 4, 10),
+            occurrence(T_URI, 0, 4, 4, 10),
+        ],
+        &[(T_URI, "target"), (C_URI, "caller")],
+    );
+    import_documents(&h, &dir, "unknown", &[doc]);
+    let v = query_json(&h, "callers", "a.py", &[]);
+    assert_eq!(
+        v["completeness"]["status"], "partial",
+        "a missing callee might target this anchor: {v}"
+    );
+    assert!(
+        v["completeness"]["denominator"]["unresolved_target"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+}
+
+#[test]
+fn task4_local_identity_never_crosses_documents() {
+    let h = home("local-isolation");
+    let source = "def foo():\n    foo()\n";
+    let dir = repo_with(&h, "sem", &[("a.py", source), ("b.py", source)]);
+    do_index(&h);
+    let doc = |path| {
+        test_document(
+            path,
+            &[
+                occurrence("local foo", 1, 0, 4, 7),
+                occurrence("local foo", 0, 1, 4, 7),
+            ],
+            &[("local foo", "foo")],
+        )
+    };
+    import_documents(&h, &dir, "locals", &[doc("a.py"), doc("b.py")]);
+    for path in ["a.py", "b.py"] {
+        let v = query_json(&h, "callers", path, &[]);
+        assert_eq!(v["anchor"]["endpoint"]["doc"], path);
+        assert_eq!(v["edges"].as_array().unwrap().len(), 1);
+        for e in v["edges"].as_array().unwrap() {
+            assert_eq!(e["callee"]["doc"], path);
+            assert_eq!(e["caller_path"], path);
+        }
+    }
+}
+
+#[test]
+fn task4_stale_empty_page_keeps_anchor_verdict() {
+    let h = home("stale-empty");
+    let dir = scip_imported(&h);
+    std::fs::write(dir.join("lib.py"), "def target():\n    return 99\n").unwrap();
+    let v = query_json(&h, "callers", "lib.py", &["--offset", "99"]);
+    assert_eq!(v["edges"], serde_json::json!([]));
+    assert_eq!(v["verification"], "Stale");
+    assert_eq!(v["freshness"]["status"], "stale");
+    assert_eq!(v["completeness"]["status"], "partial");
+    assert!(
+        v["completeness"]["denominator"]["stale_imports"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+}
+
+#[test]
+fn task4_unicode_terminal_and_unknown_owner_have_no_fabrication() {
+    let h = home("unicode-owner");
+    let source = "def caller():\n    obj.méthod()\n\nobj.méthod()\n";
+    let dir = repo_with(&h, "sem", &[("a.py", source)]);
+    do_index(&h);
+    // Query the enclosing caller: syntax candidate, no target identity.
+    let v = query_json(&h, "callees", "a.py", &[]);
+    assert_eq!(v["edges"].as_array().unwrap().len(), 1);
+    let e = &v["edges"][0];
+    let span = &e["evidence"]["terminal_span"];
+    assert_eq!(
+        &source.as_bytes()[span[0].as_u64().unwrap() as usize..span[1].as_u64().unwrap() as usize],
+        "méthod".as_bytes()
+    );
+    assert!(e["callee"].is_null());
+    assert_eq!(e["kind"], "POTENTIAL_CALL");
+    // A reference to an actual definition at module scope cannot gain a caller.
+    let uri = "scip-test test pkg 1 a.py/méthod().";
+    let doc = test_document(
+        "a.py",
+        &[occurrence(uri, 1, 0, 4, 10), occurrence(uri, 0, 3, 4, 11)],
+        &[(uri, "méthod")],
+    );
+    import_documents(&h, &dir, "owner", &[doc]);
+    let v = query_json(&h, "callers", "a.py", &[]);
+    assert!(v["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|e| e["kind"] != "CALLS"));
+    assert!(v["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|e| e["caller"].is_null()
+            && e["callee"].is_null()
+            && e["unresolved"] == "owner-unproven"));
+    let unresolved = v["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["unresolved"] == "owner-unproven")
+        .unwrap();
+    assert_eq!(
+        unresolved["evidence"]["imports"].as_array().unwrap().len(),
+        1,
+        "unknown endpoints must retain their proven producer import"
+    );
+}
+
+#[test]
+fn task4_lsp_is_ephemeral_for_graph_queries() {
+    let h = home("ephemeral");
+    let source = "fn main() {\n    let x = 1;\n    println!(\"{x}\");\n}\nfn helper() {}\nfn a() {}\nfn b() {}\nfn c() {}\nfn d() {}\n";
+    let dir = repo_with(&h, "sem", &[("main.rs", source)]);
+    do_index(&h);
+    let before = query_json(&h, "callees", "main.rs", &[]);
+    let status = Command::new("cargo")
+        .args(["build", "--offline", "--example", "mock_lsp"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let mut mock = std::env::current_exe().unwrap();
+    mock.pop();
+    mock.pop();
+    mock.push("examples");
+    mock.push(format!("mock_lsp{}", std::env::consts::EXE_SUFFIX));
+    let result = Command::new(env!("CARGO_BIN_EXE_riltra"))
+        .args([
+            "semantic",
+            "query",
+            "--repo",
+            "sem",
+            "--path",
+            "main.rs",
+            "--line",
+            "2",
+            "--col",
+            "5",
+            "--lsp-server",
+            &mock.to_string_lossy(),
+        ])
+        .env("RILTRA_HOME", &h)
+        .env("RILTRA_MOCK_LSP", "success")
+        .env("RILTRA_MOCK_ROOT", dir.to_string_lossy().replace('\\', "/"))
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let live: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert!(live["fallback"].is_null(), "{live}");
+    assert_eq!(live["verification"], "Unverified");
+    let after = query_json(&h, "callees", "main.rs", &[]);
+    assert_eq!(
+        before, after,
+        "LSP query must not persist graph identity or edges"
+    );
+    assert_eq!(after["anchor"]["kind"], "syntax-fallback");
+    let (code, out, err) = run(&h, &["semantic", "status", "--repo", "sem"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        !out.contains("lsp-subprocess"),
+        "ephemeral provider cannot persist: {out}"
+    );
+}
+
+fn normalized_edge_json(mut value: serde_json::Value) -> serde_json::Value {
+    let nonce = value["snapshot"]["nonce"].as_str().unwrap().to_string();
+    fn visit(value: &mut serde_json::Value, nonce: &str) {
+        match value {
+            serde_json::Value::String(s) => *s = s.replace(nonce, "<nonce>"),
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    visit(value, nonce);
+                }
+            }
+            serde_json::Value::Object(fields) => {
+                for (key, value) in fields {
+                    if key == "artifact_id" {
+                        *value = serde_json::json!("<artifact>");
+                    } else {
+                        visit(value, nonce);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    visit(&mut value, &nonce);
+    value
+}
+
+#[test]
+fn task4_full_json_goldens() {
+    let h = home("golden");
+    let dir = edge_repo(&h);
+    do_index(&h);
+    let check = |direction, path, extra: &[&str], golden: &str| {
+        let actual = normalized_edge_json(query_json(&h, direction, path, extra));
+        let expected: serde_json::Value = serde_json::from_str(golden).unwrap();
+        assert_eq!(actual, expected, "{direction} {path}");
+    };
+    check(
+        "callers",
+        "lib.py",
+        &[],
+        include_str!("golden/m6-callers-syntax.json"),
+    );
+    check(
+        "callees",
+        "main.py",
+        &["--line", "3"],
+        include_str!("golden/m6-callees-syntax.json"),
+    );
+    let scip = scip_for(&dir);
+    let (code, _, err) = run(
+        &h,
+        &["semantic", "import", "--repo", "sem", "--scip", &scip],
+    );
+    assert_eq!(code, 0, "{err}");
+    check(
+        "callers",
+        "lib.py",
+        &[],
+        include_str!("golden/m6-callers-scip.json"),
+    );
+    check(
+        "callees",
+        "main.py",
+        &["--line", "3"],
+        include_str!("golden/m6-callees-scip.json"),
+    );
+}
+
+#[test]
+fn task4_semantic_callees_keeps_unresolved_syntax_owner_edges() {
+    let h = home("semantic-unresolved");
+    let dir = repo_with(&h, "sem", &[("a.py", "def caller():\n    mystery()\n")]);
+    do_index(&h);
+    let doc = test_document(
+        "a.py",
+        &[occurrence(C_URI, 1, 0, 4, 10)],
+        &[(C_URI, "caller")],
+    );
+    import_documents(&h, &dir, "caller-only", &[doc]);
+    let v = query_json(&h, "callees", "a.py", &[]);
+    assert_eq!(v["anchor"]["kind"], "semantic");
+    assert_eq!(
+        v["edges"].as_array().unwrap().len(),
+        1,
+        "semantic anchor must retain its proven syntax owner's unresolved calls: {v}"
+    );
+    assert_eq!(v["edges"][0]["kind"], "POTENTIAL_CALL");
+    assert_eq!(v["edges"][0]["callee_name"], "mystery");
+    assert!(v["edges"][0]["callee"].is_null());
+}
+
+#[test]
+fn task4_semantic_anchor_uses_byte_columns_for_all_scip_encodings() {
+    for encoding in [1, 2, 3] {
+        let h = home(&format!("encoding-{encoding}"));
+        let dir = repo_with(
+            &h,
+            "sem",
+            &[("a.py", "# prefix\ndef méthod():\n    pass\n")],
+        );
+        do_index(&h);
+        // Identifier raw UTF8 bytes are [13,20); UTF16/UTF32 producer cols end at 10.
+        let end = if encoding == 1 { 11 } else { 10 };
+        let mut doc = test_document(
+            "a.py",
+            &[occurrence(C_URI, 1, 1, 4, end)],
+            &[(C_URI, "méthod")],
+        );
+        varint_field(6, encoding, &mut doc);
+        import_documents(&h, &dir, "positions", &[doc]);
+        let v = query_json(&h, "callees", "a.py", &["--line", "2", "--col", "11"]);
+        assert_eq!(
+            v["anchor"]["kind"], "semantic",
+            "last UTF8 column is still inside the identifier: encoding {encoding}: {v}"
+        );
+        let end = query_json(&h, "callees", "a.py", &["--line", "2", "--col", "12"]);
+        assert_eq!(
+            end["anchor"]["kind"], "syntax-fallback",
+            "half-open byte boundary"
+        );
+        std::fs::write(dir.join("a.py"), "# prefix\ndef méthod():\n    return 99\n").unwrap();
+        let stale = query_json(&h, "callees", "a.py", &["--line", "2", "--col", "11"]);
+        assert_eq!(
+            stale["anchor"]["kind"], "semantic",
+            "snapshot syntax coordinates retain the old byte position"
+        );
+        assert_eq!(stale["verification"], "Stale");
+    }
+}
+
+#[test]
+fn task4_utf16_disk_source_keeps_raw_byte_evidence() {
+    let h = home("utf16-disk");
+    let dir = repo_with(&h, "sem", &[("a.py", "placeholder")]);
+    let text = "# prefix\ndef méthod():\n    pass\n";
+    let raw: Vec<u8> = [0xff, 0xfe]
+        .into_iter()
+        .chain(text.encode_utf16().flat_map(u16::to_le_bytes))
+        .collect();
+    std::fs::write(dir.join("a.py"), &raw).unwrap();
+    do_index(&h);
+    let mut doc = test_document(
+        "a.py",
+        &[occurrence(C_URI, 1, 1, 4, 10)],
+        &[(C_URI, "méthod")],
+    );
+    varint_field(6, 2, &mut doc);
+    import_documents_encoded(&h, &dir, "utf16", &[doc], 2);
+    let v = query_json(&h, "callees", "a.py", &["--line", "2", "--col", "11"]);
+    assert_eq!(v["anchor"]["kind"], "semantic");
+    let start = v["anchor"]["span"][0].as_u64().unwrap() as usize;
+    let end = v["anchor"]["span"][1].as_u64().unwrap() as usize;
+    let units: Vec<u16> = raw[start..end]
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .copied()
+        .map(u16::from_le_bytes)
+        .collect();
+    assert_eq!(String::from_utf16(&units).unwrap(), "méthod");
+}
+
+#[test]
+fn task4_binary_source_is_an_explicit_coverage_gap() {
+    let h = home("binary-coverage");
+    let src = "def target():\n    pass\n\ndef caller():\n    target()\n";
+    let dir = repo_with(&h, "sem", &[("a.py", src)]);
+    std::fs::write(dir.join("binary.py"), b"\0not inspectable code").unwrap();
+    do_index(&h);
+    let doc = test_document(
+        "a.py",
+        &[
+            occurrence(T_URI, 1, 0, 4, 10),
+            occurrence(C_URI, 1, 3, 4, 10),
+            occurrence(T_URI, 0, 4, 4, 10),
+        ],
+        &[(T_URI, "target"), (C_URI, "caller")],
+    );
+    import_documents(&h, &dir, "binary", &[doc]);
+    let v = query_json(&h, "callers", "a.py", &[]);
+    assert_eq!(
+        v["completeness"]["status"], "partial",
+        "skipped code prevents completeness proof: {v}"
+    );
+    assert!(
+        v["completeness"]["denominator"]["skipped_files"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+}
+
+fn trace_fixture(h: &Path, graph: &[Vec<usize>]) -> Vec<usize> {
+    let names: Vec<String> = (0..graph.len()).map(|i| format!("f{i}")).collect();
+    let uris: Vec<String> = names
+        .iter()
+        .map(|n| format!("scip-test test test-pkg 1.0.0 graph.py/{n}()."))
+        .collect();
+    let mut src = String::new();
+    let mut occurrences = Vec::new();
+    let mut lines = Vec::new();
+    let mut line = 0;
+    for (i, targets) in graph.iter().enumerate() {
+        lines.push(line + 1);
+        src.push_str(&format!("def {}():\n", names[i]));
+        occurrences.push(occurrence(
+            &uris[i],
+            1,
+            line as i64,
+            4,
+            (4 + names[i].len()) as i64,
+        ));
+        line += 1;
+        if targets.is_empty() {
+            src.push_str("    pass\n");
+            line += 1;
+        }
+        for target in targets {
+            src.push_str(&format!("    {}()\n", names[*target]));
+            occurrences.push(occurrence(
+                &uris[*target],
+                0,
+                line as i64,
+                4,
+                (4 + names[*target].len()) as i64,
+            ));
+            line += 1;
+        }
+        src.push('\n');
+        line += 1;
+    }
+    let dir = repo_with(h, "sem", &[("graph.py", &src)]);
+    do_index(h);
+    let symbols: Vec<_> = uris
+        .iter()
+        .zip(names.iter())
+        .map(|(u, n)| (u.as_str(), n.as_str()))
+        .collect();
+    import_documents(
+        h,
+        &dir,
+        "trace",
+        &[test_document("graph.py", &occurrences, &symbols)],
+    );
+    lines
+}
+
+fn trace_json(h: &Path, line: usize, extra: &[&str]) -> serde_json::Value {
+    let line = line.to_string();
+    let mut args = vec![
+        "trace", "--repo", "sem", "--path", "graph.py", "--line", &line, "--col", "6",
+    ];
+    args.extend_from_slice(extra);
+    let (code, out, err) = run(h, &args);
+    assert_eq!(code, 0, "{out} {err}");
+    serde_json::from_str(&out).expect("trace JSON")
+}
+
+#[test]
+fn task5_trace_destination_and_outbound_chain() {
+    let h = home("trace-chain");
+    let lines = trace_fixture(&h, &[vec![1], vec![2], vec![]]);
+    let target = format!("graph.py:{}:6", lines[2]);
+    let v = trace_json(&h, lines[0], &["--to", &target]);
+    assert_eq!(v["disclaimer"], "plausible-path-not-execution");
+    assert_eq!(v["paths"].as_array().unwrap().len(), 1);
+    assert_eq!(v["paths"][0]["edges"].as_array().unwrap().len(), 2);
+    assert_eq!(v["paths"][0]["edges"][0]["kind"], "CALLS");
+    assert_eq!(
+        v["paths"][0]["edges"][1]["evidence"]["imports"][0]["provider"],
+        "trace"
+    );
+    assert_eq!(v["verification"], "Unverified");
+    let enumeration = trace_json(&h, lines[0], &["--depth", "2"]);
+    assert_eq!(enumeration["paths"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        enumeration["paths"][0]["edges"].as_array().unwrap().len(),
+        2
+    );
+    assert_eq!(enumeration["truncated"], false);
+}
+
+#[test]
+fn task5_trace_cycle_depth_and_unreachable_are_explicit() {
+    let h = home("trace-cycle");
+    let lines = trace_fixture(&h, &[vec![1], vec![0], vec![]]);
+    let cycle = trace_json(&h, lines[0], &[]);
+    assert_eq!(cycle["paths"][0]["cycle"], true);
+    assert!(cycle["visits"]["nodes"].as_u64().unwrap() <= 500);
+    let target = format!("graph.py:{}:6", lines[2]);
+    let absent = trace_json(&h, lines[0], &["--to", &target]);
+    assert_eq!(absent["paths"], serde_json::json!([]));
+    assert!(absent["unresolved"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|r| r == "target-unreachable"));
+    let short = trace_json(&h, lines[0], &["--depth", "1"]);
+    assert_eq!(short["truncated"], true);
+    assert!(short["unresolved"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|r| r == "depth-budget"));
+}
+
+#[test]
+fn task5_trace_diamond_pagination_and_repeatability() {
+    let h = home("trace-diamond");
+    let lines = trace_fixture(&h, &[vec![1, 2], vec![3], vec![3], vec![]]);
+    let target = format!("graph.py:{}:6", lines[3]);
+    let full = trace_json(&h, lines[0], &["--to", &target]);
+    assert_eq!(
+        full["paths"].as_array().unwrap().len(),
+        2,
+        "shared endpoint is not a cycle"
+    );
+    let p0 = trace_json(&h, lines[0], &["--to", &target, "--limit", "1"]);
+    let p1 = trace_json(
+        &h,
+        lines[0],
+        &["--to", &target, "--limit", "1", "--offset", "1"],
+    );
+    assert_eq!(p0["paths"][0], full["paths"][0]);
+    assert_eq!(p1["paths"][0], full["paths"][1]);
+    assert_eq!(p0["limits"]["next_offset"], 1);
+    assert!(p1["limits"]["next_offset"].is_null());
+    assert_eq!(full, trace_json(&h, lines[0], &["--to", &target]));
+}
+
+#[test]
+fn task5_trace_syntax_unknown_target_is_not_a_path_to_another_name() {
+    let h = home("trace-syntax");
+    repo_with(
+        &h,
+        "sem",
+        &[("graph.py", "def f0():\n    f1()\n\ndef f1():\n    pass\n")],
+    );
+    do_index(&h);
+    let v = trace_json(&h, 1, &[]);
+    assert_eq!(v["anchor"]["kind"], "syntax-fallback");
+    assert_eq!(v["paths"][0]["edges"][0]["kind"], "POTENTIAL_CALL");
+    assert!(v["paths"][0]["edges"][0]["callee"].is_null());
+    let to = trace_json(&h, 1, &["--to", "graph.py:4:6"]);
+    assert_eq!(to["paths"], serde_json::json!([]));
+    assert!(to["unresolved"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|r| r == "unresolved-target"));
+}
+
+#[test]
+fn task5_trace_verified_syntax_bridge_and_stale_label() {
+    let h = home("trace-bridge");
+    let lines = trace_fixture(&h, &[vec![1], vec![2], vec![]]);
+    // Whitespace in f0's body has no semantic occurrence: a syntax fallback
+    // can connect to the persisted semantic owner only by validated mapping.
+    let v = trace_json(
+        &h,
+        lines[0],
+        &["--line", &(lines[0] + 1).to_string(), "--col", "1"],
+    );
+    assert_eq!(v["anchor"]["kind"], "syntax-fallback");
+    assert_eq!(v["paths"][0]["edges"].as_array().unwrap().len(), 2);
+    assert!(!v["bridges"].as_array().unwrap().is_empty());
+    let file = h.join("sem/graph.py");
+    let mut source = std::fs::read_to_string(&file).unwrap();
+    source.push_str("# edit\n");
+    std::fs::write(file, source).unwrap();
+    let stale = trace_json(&h, lines[0], &[]);
+    assert_eq!(stale["verification"], "Stale");
+}
+
+#[test]
+fn task5_trace_rejects_invalid_depth_and_destination() {
+    let h = home("trace-invalid");
+    trace_fixture(&h, &[vec![]]);
+    for extra in [
+        ["--depth", "0"],
+        ["--depth", "7"],
+        ["--to", "bad-position"],
+        ["--to", "graph.py:0:1"],
+        ["--limit", "0"],
+    ] {
+        let mut args = vec![
+            "trace", "--repo", "sem", "--path", "graph.py", "--line", "1", "--col", "6",
+        ];
+        args.extend(extra);
+        let (code, out, err) = run(&h, &args);
+        assert_eq!(code, 2, "{extra:?}: {out} {err}");
+    }
+}
+
+#[test]
+fn task5_trace_destination_fallback_and_max_depth_boundary() {
+    let h = home("trace-max-depth");
+    let lines = trace_fixture(
+        &h,
+        &[
+            vec![1],
+            vec![2],
+            vec![3],
+            vec![4],
+            vec![5],
+            vec![6],
+            vec![7],
+            vec![],
+        ],
+    );
+    let target = format!("graph.py:{}:6", lines[6]);
+    let exact = trace_json(&h, lines[0], &["--depth", "6", "--to", &target]);
+    assert_eq!(exact["paths"][0]["edges"].as_array().unwrap().len(), 6);
+    assert_eq!(
+        exact["truncated"], false,
+        "reached destination needs no expansion beyond depth"
+    );
+    let later = format!("graph.py:{}:6", lines[7]);
+    let bounded = trace_json(&h, lines[0], &["--depth", "6", "--to", &later]);
+    assert_eq!(bounded["paths"], serde_json::json!([]));
+    assert_eq!(bounded["truncated"], true);
+    assert!(!bounded["unresolved"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|r| r == "target-unreachable"));
+    let whitespace = format!("graph.py:{}:1", lines[6] + 1);
+    let fallback = trace_json(&h, lines[0], &["--depth", "6", "--to", &whitespace]);
+    assert_eq!(fallback["destination"]["kind"], "syntax-fallback");
+    assert_eq!(fallback["paths"][0]["edges"].as_array().unwrap().len(), 6);
+}
+
+#[test]
+fn task5_trace_ambiguous_import_mapping_does_not_join() {
+    let h = home("trace-imports");
+    let lines = trace_fixture(&h, &[vec![1], vec![]]);
+    let f0 = "scip-test test test-pkg 1.0.0 graph.py/f0().";
+    let f1 = "scip-test test test-pkg 1.0.0 graph.py/f1().";
+    let doc = test_document(
+        "graph.py",
+        &[
+            occurrence(f0, 1, 0, 4, 6),
+            occurrence(f1, 0, 1, 4, 6),
+            occurrence(f1, 1, 3, 4, 6),
+        ],
+        &[(f0, "f0"), (f1, "f1")],
+    );
+    import_documents(&h, &h.join("sem"), "trace-second", &[doc]);
+    let v = trace_json(&h, lines[0], &["--line", "2", "--col", "1"]);
+    assert_eq!(v["anchor"]["kind"], "syntax-fallback");
+    assert_eq!(v["paths"], serde_json::json!([]));
+    assert!(v["unresolved"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|r| r == "ambiguous-owner-mapping"));
+    let (code, _, err) = run(
+        &h,
+        &[
+            "trace", "--repo", "sem", "--path", "graph.py", "--line", "1", "--col", "6",
+        ],
+    );
+    assert_eq!(code, 3);
+    assert!(err.contains("ambiguous"));
+}
+
+#[test]
+fn task5_trace_local_cycles_stay_in_document() {
+    let h = home("trace-locals");
+    let src = "def f0():\n    f0()\n";
+    let dir = repo_with(&h, "sem", &[("graph.py", src), ("other.py", src)]);
+    do_index(&h);
+    let doc = |path| {
+        test_document(
+            path,
+            &[
+                occurrence("local f0", 1, 0, 4, 6),
+                occurrence("local f0", 0, 1, 4, 6),
+            ],
+            &[("local f0", "f0")],
+        )
+    };
+    import_documents(&h, &dir, "local-trace", &[doc("graph.py"), doc("other.py")]);
+    let v = trace_json(&h, 1, &[]);
+    assert_eq!(v["visits"]["nodes"], 1);
+    assert_eq!(v["paths"][0]["cycle"], true);
+    assert_eq!(v["paths"][0]["edges"][0]["callee"]["doc"], "graph.py");
+    assert!(v["bridges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|b| b["syntax"]["path"] == "graph.py"));
+}
+
+#[test]
+fn task5_trace_full_json_goldens() {
+    let syntax_home = home("trace-golden-syntax");
+    repo_with(
+        &syntax_home,
+        "sem",
+        &[(
+            "graph.py",
+            "def f0():\n    f1()\n\ndef f1():\n    f2()\n\ndef f2():\n    pass\n\n",
+        )],
+    );
+    do_index(&syntax_home);
+    let syntax = normalized_edge_json(trace_json(&syntax_home, 1, &[]));
+    let expected: serde_json::Value =
+        serde_json::from_str(include_str!("golden/m6-trace-syntax.json")).unwrap();
+    assert_eq!(syntax, expected);
+
+    let semantic_home = home("trace-golden-scip");
+    trace_fixture(&semantic_home, &[vec![1], vec![2], vec![]]);
+    let semantic = normalized_edge_json(trace_json(&semantic_home, 1, &["--to", "graph.py:7:6"]));
+    let expected: serde_json::Value =
+        serde_json::from_str(include_str!("golden/m6-trace-scip.json")).unwrap();
+    assert_eq!(semantic, expected);
+}
+
+fn impact_json(h: &Path, line: usize, extra: &[&str]) -> serde_json::Value {
+    let line = line.to_string();
+    let mut args = vec![
+        "impact", "--repo", "sem", "--path", "graph.py", "--line", &line, "--col", "6",
+    ];
+    args.extend_from_slice(extra);
+    let (code, out, err) = run(h, &args);
+    assert_eq!(code, 0, "{out} {err}");
+    serde_json::from_str(&out).expect("impact JSON")
+}
+
+fn assert_unknown_impact(v: &serde_json::Value) {
+    assert_eq!(v["verdict"], "UNKNOWN", "{v}");
+    assert_eq!(v["completeness"]["status"], "partial", "{v}");
+    assert!(!v.to_string().contains("\"SAFE\""));
+    assert!(!v.to_string().contains("\"LOW\""));
+}
+
+#[test]
+fn task6_impact_direct_and_transitive_are_proven_without_reindex() {
+    let h = home("impact-chain");
+    let lines = trace_fixture(&h, &[vec![1], vec![2], vec![]]);
+    let v = impact_json(&h, lines[2], &[]);
+    assert_eq!(v["direction"], "impact");
+    assert_eq!(v["verdict"], "HIGH");
+    assert_eq!(v["verification"], "Unverified");
+    assert_eq!(v["completeness"]["status"], "partial");
+    assert_eq!(v["paths"].as_array().unwrap().len(), 2);
+    assert_eq!(v["paths"][0]["edges"].as_array().unwrap().len(), 1);
+    assert_eq!(v["paths"][1]["edges"].as_array().unwrap().len(), 2);
+    assert_eq!(v["paths"][0]["scope"], "direct");
+    assert_eq!(v["paths"][1]["scope"], "transitive");
+    assert_eq!(v["paths"][1]["distance"], 2);
+    assert_eq!(v["paths"][0]["edges"][0]["callee_name"], "f2");
+    assert_eq!(v["paths"][1]["edges"][1]["callee_name"], "f1");
+    for path in v["paths"].as_array().unwrap() {
+        for edge in path["edges"].as_array().unwrap() {
+            assert_eq!(edge["kind"], "CALLS");
+            assert_eq!(edge["precision"], "Exact");
+            assert_eq!(edge["evidence"]["imports"][0]["provider"], "trace");
+        }
+    }
+    assert_eq!(v["disclaimer"], "plausible-impact-not-execution");
+    assert_eq!(v, impact_json(&h, lines[2], &[]));
+}
+
+#[test]
+fn task6_impact_zero_false_safe_syntax_corpus() {
+    let cases = [
+        ("leaf", "def f0():\n    pass\n"),
+        ("recursion", "def f0():\n    f0()\n"),
+        ("cycle", "def f0():\n    f1()\n\ndef f1():\n    f0()\n"),
+        ("dynamic", "def f0():\n    obj.run()\n"),
+        ("missing", "def f0():\n    missing()\n"),
+        (
+            "same-name",
+            "def f0():\n    pass\n\nclass C:\n    def f0(self):\n        pass\n",
+        ),
+        ("owner-unproven", "def f0():\n    pass\n\nf0()\n"),
+        ("alias", "def f0():\n    pass\n\na = f0\na()\n"),
+    ];
+    for (name, source) in cases {
+        let h = home(&format!("impact-corpus-{name}"));
+        repo_with(&h, "sem", &[("graph.py", source)]);
+        do_index(&h);
+        let v = impact_json(&h, 1, &[]);
+        assert_unknown_impact(&v);
+        assert_eq!(v["anchor"]["kind"], "syntax-fallback");
+        assert!(
+            v["paths"].as_array().unwrap().is_empty(),
+            "no name linking: {v}"
+        );
+    }
+}
+
+#[test]
+fn task6_impact_unknown_for_stale_depth_and_coverage_gaps() {
+    for kind in ["stale", "depth", "unsupported", "missing-provider", "leaf"] {
+        let h = home(&format!("impact-unknown-{kind}"));
+        let lines = trace_fixture(&h, &[vec![1], vec![2], vec![]]);
+        let dir = h.join("sem");
+        match kind {
+            "stale" => {
+                let mut source = std::fs::read_to_string(dir.join("graph.py")).unwrap();
+                source.push_str("# edited\n");
+                std::fs::write(dir.join("graph.py"), source).unwrap();
+            }
+            "unsupported" => {
+                std::fs::write(dir.join("unknown.xyz"), "unsupported code").unwrap();
+                do_index(&h);
+            }
+            "missing-provider" => {
+                std::fs::write(dir.join("extra.py"), "def extra():\n    pass\n").unwrap();
+                do_index(&h);
+            }
+            _ => {}
+        }
+        let extra = if kind == "depth" {
+            vec!["--depth", "1"]
+        } else {
+            vec![]
+        };
+        let line = if kind == "leaf" { lines[0] } else { lines[2] };
+        let v = impact_json(&h, line, &extra);
+        assert_unknown_impact(&v);
+        if kind == "stale" {
+            assert_eq!(v["verification"], "Stale");
+        }
+        if kind == "depth" {
+            assert_eq!(v["truncated"], true);
+        }
+        if kind == "unsupported" || kind == "missing-provider" {
+            let field = if kind == "unsupported" {
+                "unsupported_files"
+            } else {
+                "missing_provider_files"
+            };
+            assert_eq!(v["completeness"]["denominator"][field], 1, "{v}");
+        }
+    }
+}
+
+#[test]
+fn task6_impact_cycles_diamond_pagination_and_empty_pages() {
+    let h = home("impact-diamond");
+    let lines = trace_fixture(&h, &[vec![1, 2], vec![3], vec![3], vec![]]);
+    let full = impact_json(&h, lines[3], &[]);
+    assert_eq!(full["verdict"], "HIGH");
+    assert_eq!(full["paths"].as_array().unwrap().len(), 4);
+    let first = impact_json(&h, lines[3], &["--limit", "1"]);
+    assert_unknown_impact(&first);
+    assert_eq!(first["limits"]["next_offset"], 1);
+    let next = impact_json(&h, lines[3], &["--offset", "1"]);
+    assert_eq!(first["paths"][0], full["paths"][0]);
+    assert_eq!(next["paths"][0], full["paths"][1]);
+    let empty = impact_json(&h, lines[3], &["--offset", "4"]);
+    assert_unknown_impact(&empty);
+    assert_eq!(empty["paths"], serde_json::json!([]));
+    let h = home("impact-cycle");
+    trace_fixture(&h, &[vec![1], vec![0]]);
+    let cycle = impact_json(&h, 1, &[]);
+    assert_eq!(cycle["cycle"], true);
+    assert_eq!(cycle["verdict"], "HIGH");
+    assert!(cycle["visits"]["nodes"].as_u64().unwrap() <= 500);
+}
+
+#[test]
+fn task6_impact_reference_unknown_owner_retains_site_evidence() {
+    let h = home("impact-reference");
+    let dir = repo_with(
+        &h,
+        "sem",
+        &[("graph.py", "def f0():\n    pass\n\nx = f0\n")],
+    );
+    do_index(&h);
+    let uri = "scip-test test test-pkg 1.0.0 graph.py/f0().";
+    import_documents(
+        &h,
+        &dir,
+        "refs",
+        &[test_document(
+            "graph.py",
+            &[occurrence(uri, 1, 0, 4, 6), occurrence(uri, 0, 3, 4, 6)],
+            &[(uri, "f0")],
+        )],
+    );
+    let v = impact_json(&h, 1, &[]);
+    assert_unknown_impact(&v);
+    assert_eq!(v["paths"][0]["edges"][0]["kind"], "REFERENCES");
+    assert!(v["paths"][0]["edges"][0]["caller"].is_null());
+    assert_eq!(
+        v["paths"][0]["edges"][0]["evidence"]["span"],
+        serde_json::json!([24, 26])
+    );
+}
+
+#[test]
+fn task6_impact_unmapped_midpoint_is_explicitly_unknown() {
+    let h = home("impact-midpoint");
+    let dir = repo_with(
+        &h,
+        "sem",
+        &[("graph.py", "def f0():\n    f1()\n\ndef f1():\n    pass\n")],
+    );
+    do_index(&h);
+    let uri = "scip-test test test-pkg 1.0.0 graph.py/f1().";
+    // Target proof exists, callable owner has syntax identity only. Its name
+    // cannot bridge to a semantic definition absent from this import.
+    import_documents(
+        &h,
+        &dir,
+        "midpoint",
+        &[test_document(
+            "graph.py",
+            &[occurrence(uri, 0, 1, 4, 6), occurrence(uri, 1, 3, 4, 6)],
+            &[(uri, "f1")],
+        )],
+    );
+    let v = impact_json(&h, 4, &[]);
+    assert_unknown_impact(&v);
+    assert_eq!(v["paths"][0]["edges"][0]["kind"], "CALLS");
+    assert!(v["unresolved"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|r| r == "semantic-midpoint-unavailable"));
+}
+
+#[test]
+fn task6_impact_ambiguous_semantic_dispatch_counts_unknowns() {
+    let h = home("impact-ambiguous");
+    let dir = repo_with(
+        &h,
+        "sem",
+        &[(
+            "graph.py",
+            "def f0():\n    f1()\n\ndef f1():\n    pass\n\ndef f2():\n    pass\n",
+        )],
+    );
+    do_index(&h);
+    let uris: Vec<_> = (0..3)
+        .map(|n| format!("scip-test test test-pkg 1.0.0 graph.py/f{n}()."))
+        .collect();
+    import_documents(
+        &h,
+        &dir,
+        "ambiguous",
+        &[test_document(
+            "graph.py",
+            &[
+                occurrence(&uris[0], 1, 0, 4, 6),
+                occurrence(&uris[1], 0, 1, 4, 6),
+                occurrence(&uris[2], 0, 1, 4, 6),
+                occurrence(&uris[1], 1, 3, 4, 6),
+                occurrence(&uris[2], 1, 6, 4, 6),
+            ],
+            &[(&uris[0], "f0"), (&uris[1], "f1"), (&uris[2], "f2")],
+        )],
+    );
+    let v = impact_json(&h, 4, &[]);
+    assert_unknown_impact(&v);
+    assert_eq!(v["completeness"]["denominator"]["ambiguous_calls"], 1);
+    assert_eq!(v["completeness"]["denominator"]["unresolved_target"], 1);
+    assert_eq!(v["paths"], serde_json::json!([]));
+}
+
+#[test]
+fn task6_impact_owner_mapping_import_and_local_scope() {
+    let h = home("impact-bridge");
+    let lines = trace_fixture(&h, &[vec![1], vec![]]);
+    let fallback = impact_json(&h, lines[1], &["--line", "5", "--col", "1"]);
+    assert_unknown_impact(&fallback);
+    assert_eq!(fallback["paths"][0]["edges"][0]["kind"], "CALLS");
+    assert!(!fallback["bridges"].as_array().unwrap().is_empty());
+    let f0 = "scip-test test test-pkg 1.0.0 graph.py/f0().";
+    let f1 = "scip-test test test-pkg 1.0.0 graph.py/f1().";
+    import_documents(
+        &h,
+        &h.join("sem"),
+        "second",
+        &[test_document(
+            "graph.py",
+            &[
+                occurrence(f0, 1, 0, 4, 6),
+                occurrence(f1, 0, 1, 4, 6),
+                occurrence(f1, 1, 3, 4, 6),
+            ],
+            &[(f0, "f0"), (f1, "f1")],
+        )],
+    );
+    let ambiguous = impact_json(&h, 5, &["--col", "1"]);
+    assert_unknown_impact(&ambiguous);
+    assert_eq!(ambiguous["paths"], serde_json::json!([]));
+    let (code, _, err) = run(
+        &h,
+        &[
+            "impact", "--repo", "sem", "--path", "graph.py", "--line", "4", "--col", "6",
+        ],
+    );
+    assert_eq!(code, 3);
+    assert!(err.contains("ambiguous"));
+
+    let h = home("impact-local");
+    let src = "def f0():\n    f0()\n";
+    let dir = repo_with(&h, "sem", &[("graph.py", src), ("other.py", src)]);
+    do_index(&h);
+    let doc = |p| {
+        test_document(
+            p,
+            &[
+                occurrence("local f0", 1, 0, 4, 6),
+                occurrence("local f0", 0, 1, 4, 6),
+            ],
+            &[("local f0", "f0")],
+        )
+    };
+    import_documents(&h, &dir, "locals", &[doc("graph.py"), doc("other.py")]);
+    let v = impact_json(&h, 1, &[]);
+    assert_eq!(v["verdict"], "HIGH");
+    assert_eq!(v["visits"]["nodes"], 1);
+    assert_eq!(v["paths"].as_array().unwrap().len(), 1);
+    assert_eq!(v["paths"][0]["edges"][0]["caller"]["doc"], "graph.py");
+}
+
+#[test]
+fn task6_impact_rejects_bad_bounds_destination_and_escaping_path() {
+    let h = home("impact-args");
+    trace_fixture(&h, &[vec![]]);
+    for extra in [
+        vec!["--depth", "0"],
+        vec!["--depth", "7"],
+        vec!["--limit", "1001"],
+        vec!["--to", "graph.py:1:6"],
+    ] {
+        let mut args = vec![
+            "impact", "--repo", "sem", "--path", "graph.py", "--line", "1", "--col", "6",
+        ];
+        args.extend(extra);
+        assert_eq!(run(&h, &args).0, 2);
+    }
+    assert_eq!(
+        run(
+            &h,
+            &[
+                "impact",
+                "--repo",
+                "sem",
+                "--path",
+                "../outside.py",
+                "--line",
+                "1",
+                "--col",
+                "6"
+            ]
+        )
+        .0,
+        3
+    );
+}
+
+#[test]
+fn task6_impact_full_json_goldens() {
+    let h = home("impact-golden-syntax");
+    repo_with(
+        &h,
+        "sem",
+        &[(
+            "graph.py",
+            "def f0():\n    f1()\n\ndef f1():\n    f2()\n\ndef f2():\n    pass\n\n",
+        )],
+    );
+    do_index(&h);
+    let syntax = normalized_edge_json(impact_json(&h, 7, &[]));
+    let expected: serde_json::Value =
+        serde_json::from_str(include_str!("golden/m6-impact-syntax.json")).unwrap();
+    assert_eq!(syntax, expected);
+    let h = home("impact-golden-scip");
+    trace_fixture(&h, &[vec![1], vec![2], vec![]]);
+    for (extra, golden) in [
+        (vec![], include_str!("golden/m6-impact-scip.json")),
+        (
+            vec!["--depth", "1"],
+            include_str!("golden/m6-impact-truncated.json"),
+        ),
+    ] {
+        let actual = normalized_edge_json(impact_json(&h, 7, &extra));
+        let expected: serde_json::Value = serde_json::from_str(golden).unwrap();
+        assert_eq!(actual, expected);
+    }
+}

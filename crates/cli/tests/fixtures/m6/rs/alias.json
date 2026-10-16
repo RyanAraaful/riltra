@@ -1,0 +1,69 @@
+{
+  "file": "alias.rs",
+  "symbols": [
+    {
+      "id": "t",
+      "name": "target",
+      "uri": "scip-test test corpus 1.0.0 alias.rs/t()."
+    },
+    {
+      "id": "c",
+      "name": "caller",
+      "uri": "scip-test test corpus 1.0.0 alias.rs/c()."
+    },
+    {
+      "id": "a",
+      "name": "alias",
+      "uri": "scip-test test corpus 1.0.0 alias.rs/a()."
+    }
+  ],
+  "occurrences": [
+    {
+      "id": "t",
+      "definition": true,
+      "line": 1,
+      "col": 3,
+      "end": 9,
+      "text": "target"
+    },
+    {
+      "id": "c",
+      "definition": true,
+      "line": 4,
+      "col": 3,
+      "end": 9,
+      "text": "caller"
+    },
+    {
+      "id": "a",
+      "definition": true,
+      "line": 5,
+      "col": 8,
+      "end": 13,
+      "text": "alias"
+    },
+    {
+      "id": "t",
+      "definition": false,
+      "line": 5,
+      "col": 16,
+      "end": 22,
+      "text": "target"
+    },
+    {
+      "id": "a",
+      "definition": false,
+      "line": 6,
+      "col": 4,
+      "end": 9,
+      "text": "alias"
+    }
+  ],
+  "target": "t",
+  "callees_calls": 0,
+  "inbound_calls": 0,
+  "inbound_references": 1,
+  "impact": "UNKNOWN",
+  "stale": false,
+  "notes": "SCIP reference at invocation points to the alias binding, not the underlying callable. A variable definition is not a resolved function target."
+}

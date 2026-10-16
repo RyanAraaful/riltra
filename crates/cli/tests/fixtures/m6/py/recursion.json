@@ -1,0 +1,56 @@
+{
+  "file": "recursion.py",
+  "symbols": [
+    {
+      "id": "t",
+      "name": "target",
+      "uri": "scip-test test corpus 1.0.0 recursion.py/t()."
+    },
+    {
+      "id": "c",
+      "name": "caller",
+      "uri": "scip-test test corpus 1.0.0 recursion.py/c()."
+    }
+  ],
+  "occurrences": [
+    {
+      "id": "t",
+      "definition": true,
+      "line": 1,
+      "col": 4,
+      "end": 10,
+      "text": "target"
+    },
+    {
+      "id": "t",
+      "definition": false,
+      "line": 2,
+      "col": 11,
+      "end": 17,
+      "text": "target"
+    },
+    {
+      "id": "c",
+      "definition": true,
+      "line": 3,
+      "col": 4,
+      "end": 10,
+      "text": "caller"
+    },
+    {
+      "id": "t",
+      "definition": false,
+      "line": 4,
+      "col": 11,
+      "end": 17,
+      "text": "target"
+    }
+  ],
+  "target": "t",
+  "callees_calls": 1,
+  "inbound_calls": 2,
+  "inbound_references": 0,
+  "impact": "HIGH",
+  "stale": false,
+  "notes": ""
+}

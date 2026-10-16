@@ -1,0 +1,1040 @@
+{
+  "callees": {
+    "anchor": {
+      "anchor_uncertainty": null,
+      "col": 5,
+      "endpoint": {
+        "byte_end": null,
+        "byte_start": null,
+        "doc": null,
+        "import_id": 1,
+        "path": null,
+        "symbol_uri": "scip-test test corpus 1.0.0 nested_calls.c/c().",
+        "type": "scip"
+      },
+      "import_id": 1,
+      "kind": "semantic",
+      "line": 8,
+      "path": "nested_calls.c",
+      "precision": "Heuristic",
+      "span": [
+        121,
+        127
+      ],
+      "symbol_uri": "scip-test test corpus 1.0.0 nested_calls.c/c()."
+    },
+    "completeness": {
+      "covered": 2,
+      "denominator": {
+        "ambiguous_calls": 0,
+        "dynamic_calls": 0,
+        "missing_provider_files": 0,
+        "observed_edges": 2,
+        "parse_error_files": 0,
+        "skipped_files": 0,
+        "stale_imports": 0,
+        "truncated_branches": 0,
+        "unresolved_owner": 0,
+        "unresolved_target": 0,
+        "unsupported_files": 0
+      },
+      "status": "complete",
+      "total": 2,
+      "unresolved": []
+    },
+    "direction": "callees",
+    "edges": [
+      {
+        "callee": {
+          "byte_end": null,
+          "byte_start": null,
+          "doc": null,
+          "import_id": 1,
+          "path": null,
+          "symbol_uri": "scip-test test corpus 1.0.0 nested_calls.c/u().",
+          "type": "scip"
+        },
+        "callee_name": "outer",
+        "caller": {
+          "byte_end": null,
+          "byte_start": null,
+          "doc": null,
+          "import_id": 1,
+          "path": null,
+          "symbol_uri": "scip-test test corpus 1.0.0 nested_calls.c/c().",
+          "type": "scip"
+        },
+        "caller_path": "nested_calls.c",
+        "caller_span": [
+          147,
+          162
+        ],
+        "evidence": {
+          "callee_span": [
+            147,
+            152
+          ],
+          "digest": "4e4ed15c392f1dc9",
+          "imports": [
+            {
+              "artifact_id": "<artifact>",
+              "content_identity": "a74d141ddda37a57",
+              "id": 1,
+              "provider": "corpus",
+              "source_revision": "head=-|branch=-|dirty=false|untracked=0|cfg=1a92ea80d66dd56e|nonce=<nonce>",
+              "version": "1.0"
+            }
+          ],
+          "path": "nested_calls.c",
+          "provider": "scip-import",
+          "reference_span": [
+            147,
+            152
+          ],
+          "span": [
+            147,
+            162
+          ],
+          "terminal_span": [
+            147,
+            152
+          ]
+        },
+        "import_id": 1,
+        "kind": "CALLS",
+        "precision": "Exact",
+        "provider": "scip-import",
+        "tool": "corpus",
+        "unresolved": null,
+        "verification": "Unverified"
+      },
+      {
+        "callee": {
+          "byte_end": null,
+          "byte_start": null,
+          "doc": null,
+          "import_id": 1,
+          "path": null,
+          "symbol_uri": "scip-test test corpus 1.0.0 nested_calls.c/t().",
+          "type": "scip"
+        },
+        "callee_name": "target",
+        "caller": {
+          "byte_end": null,
+          "byte_start": null,
+          "doc": null,
+          "import_id": 1,
+          "path": null,
+          "symbol_uri": "scip-test test corpus 1.0.0 nested_calls.c/c().",
+          "type": "scip"
+        },
+        "caller_path": "nested_calls.c",
+        "caller_span": [
+          153,
+          161
+        ],
+        "evidence": {
+          "callee_span": [
+            153,
+            159
+          ],
+          "digest": "4e4ed15c392f1dc9",
+          "imports": [
+            {
+              "artifact_id": "<artifact>",
+              "content_identity": "a74d141ddda37a57",
+              "id": 1,
+              "provider": "corpus",
+              "source_revision": "head=-|branch=-|dirty=false|untracked=0|cfg=1a92ea80d66dd56e|nonce=<nonce>",
+              "version": "1.0"
+            }
+          ],
+          "path": "nested_calls.c",
+          "provider": "scip-import",
+          "reference_span": [
+            153,
+            159
+          ],
+          "span": [
+            153,
+            161
+          ],
+          "terminal_span": [
+            153,
+            159
+          ]
+        },
+        "import_id": 1,
+        "kind": "CALLS",
+        "precision": "Exact",
+        "provider": "scip-import",
+        "tool": "corpus",
+        "unresolved": null,
+        "verification": "Unverified"
+      }
+    ],
+    "freshness": {
+      "reasons": [],
+      "status": "fresh"
+    },
+    "limits": {
+      "limit": 50,
+      "next_offset": null,
+      "offset": 0
+    },
+    "repo": "sem",
+    "schema_version": 1,
+    "snapshot": {
+      "id": 1,
+      "nonce": "<nonce>",
+      "revision": "head=-|branch=-|dirty=false|untracked=0|cfg=1a92ea80d66dd56e|nonce=<nonce>"
+    },
+    "truncated": false,
+    "verification": "Unverified"
+  },
+  "callers": {
+    "anchor": {
+      "anchor_uncertainty": null,
+      "col": 5,
+      "endpoint": {
+        "byte_end": null,
+        "byte_start": null,
+        "doc": null,
+        "import_id": 1,
+        "path": null,
+        "symbol_uri": "scip-test test corpus 1.0.0 nested_calls.c/t().",
+        "type": "scip"
+      },
+      "import_id": 1,
+      "kind": "semantic",
+      "line": 2,
+      "path": "nested_calls.c",
+      "precision": "Heuristic",
+      "span": [
+        43,
+        49
+      ],
+      "symbol_uri": "scip-test test corpus 1.0.0 nested_calls.c/t()."
+    },
+    "completeness": {
+      "covered": 1,
+      "denominator": {
+        "ambiguous_calls": 0,
+        "dynamic_calls": 0,
+        "missing_provider_files": 0,
+        "observed_edges": 1,
+        "parse_error_files": 0,
+        "skipped_files": 0,
+        "stale_imports": 0,
+        "truncated_branches": 0,
+        "unresolved_owner": 0,
+        "unresolved_target": 0,
+        "unsupported_files": 0
+      },
+      "status": "complete",
+      "total": 1,
+      "unresolved": []
+    },
+    "direction": "callers",
+    "edges": [
+      {
+        "callee": {
+          "byte_end": null,
+          "byte_start": null,
+          "doc": null,
+          "import_id": 1,
+          "path": null,
+          "symbol_uri": "scip-test test corpus 1.0.0 nested_calls.c/t().",
+          "type": "scip"
+        },
+        "callee_name": "target",
+        "caller": {
+          "byte_end": null,
+          "byte_start": null,
+          "doc": null,
+          "import_id": 1,
+          "path": null,
+          "symbol_uri": "scip-test test corpus 1.0.0 nested_calls.c/c().",
+          "type": "scip"
+        },
+        "caller_path": "nested_calls.c",
+        "caller_span": [
+          153,
+          161
+        ],
+        "evidence": {
+          "callee_span": [
+            153,
+            159
+          ],
+          "digest": "4e4ed15c392f1dc9",
+          "imports": [
+            {
+              "artifact_id": "<artifact>",
+              "content_identity": "a74d141ddda37a57",
+              "id": 1,
+              "provider": "corpus",
+              "source_revision": "head=-|branch=-|dirty=false|untracked=0|cfg=1a92ea80d66dd56e|nonce=<nonce>",
+              "version": "1.0"
+            }
+          ],
+          "path": "nested_calls.c",
+          "provider": "scip-import",
+          "reference_span": [
+            153,
+            159
+          ],
+          "span": [
+            153,
+            161
+          ],
+          "terminal_span": [
+            153,
+            159
+          ]
+        },
+        "import_id": 1,
+        "kind": "CALLS",
+        "precision": "Exact",
+        "provider": "scip-import",
+        "tool": "corpus",
+        "unresolved": null,
+        "verification": "Unverified"
+      }
+    ],
+    "freshness": {
+      "reasons": [],
+      "status": "fresh"
+    },
+    "limits": {
+      "limit": 50,
+      "next_offset": null,
+      "offset": 0
+    },
+    "repo": "sem",
+    "schema_version": 1,
+    "snapshot": {
+      "id": 1,
+      "nonce": "<nonce>",
+      "revision": "head=-|branch=-|dirty=false|untracked=0|cfg=1a92ea80d66dd56e|nonce=<nonce>"
+    },
+    "truncated": false,
+    "verification": "Unverified"
+  },
+  "impact": {
+    "anchor": {
+      "anchor_uncertainty": null,
+      "col": 5,
+      "endpoint": {
+        "byte_end": null,
+        "byte_start": null,
+        "doc": null,
+        "import_id": 1,
+        "path": null,
+        "symbol_uri": "scip-test test corpus 1.0.0 nested_calls.c/t().",
+        "type": "scip"
+      },
+      "import_id": 1,
+      "kind": "semantic",
+      "line": 2,
+      "path": "nested_calls.c",
+      "precision": "Heuristic",
+      "span": [
+        43,
+        49
+      ],
+      "symbol_uri": "scip-test test corpus 1.0.0 nested_calls.c/t()."
+    },
+    "bridges": [],
+    "budgets": {
+      "depth": 3,
+      "edges": 3000,
+      "mappings": 500,
+      "max_depth": 6,
+      "nodes": 500,
+      "paths": 1000,
+      "time_ms": 2000
+    },
+    "completeness": {
+      "covered": 1,
+      "denominator": {
+        "ambiguous_calls": 0,
+        "dynamic_calls": 0,
+        "missing_provider_files": 0,
+        "observed_edges": 1,
+        "parse_error_files": 0,
+        "skipped_files": 0,
+        "stale_imports": 0,
+        "truncated_branches": 0,
+        "unresolved_owner": 0,
+        "unresolved_target": 0,
+        "unsupported_files": 0
+      },
+      "status": "partial",
+      "total": 1,
+      "total_exact": true,
+      "unresolved": [
+        "graph-completeness-unproven"
+      ]
+    },
+    "cycle": false,
+    "destination": null,
+    "direction": "impact",
+    "disclaimer": "plausible-impact-not-execution",
+    "freshness": {
+      "reasons": [],
+      "status": "fresh"
+    },
+    "limits": {
+      "limit": 50,
+      "next_offset": null,
+      "offset": 0
+    },
+    "paths": [
+      {
+        "cycle": false,
+        "distance": 1,
+        "edges": [
+          {
+            "callee": {
+              "byte_end": null,
+              "byte_start": null,
+              "doc": null,
+              "import_id": 1,
+              "path": null,
+              "symbol_uri": "scip-test test corpus 1.0.0 nested_calls.c/t().",
+              "type": "scip"
+            },
+            "callee_name": "target",
+            "caller": {
+              "byte_end": null,
+              "byte_start": null,
+              "doc": null,
+              "import_id": 1,
+              "path": null,
+              "symbol_uri": "scip-test test corpus 1.0.0 nested_calls.c/c().",
+              "type": "scip"
+            },
+            "caller_path": "nested_calls.c",
+            "caller_span": [
+              153,
+              161
+            ],
+            "evidence": {
+              "callee_span": [
+                153,
+                159
+              ],
+              "digest": "4e4ed15c392f1dc9",
+              "imports": [
+                {
+                  "artifact_id": "<artifact>",
+                  "content_identity": "a74d141ddda37a57",
+                  "id": 1,
+                  "provider": "corpus",
+                  "source_revision": "head=-|branch=-|dirty=false|untracked=0|cfg=1a92ea80d66dd56e|nonce=<nonce>",
+                  "version": "1.0"
+                }
+              ],
+              "path": "nested_calls.c",
+              "provider": "scip-import",
+              "reference_span": [
+                153,
+                159
+              ],
+              "span": [
+                153,
+                161
+              ],
+              "terminal_span": [
+                153,
+                159
+              ]
+            },
+            "import_id": 1,
+            "kind": "CALLS",
+            "precision": "Exact",
+            "provider": "scip-import",
+            "tool": "corpus",
+            "unresolved": null,
+            "verification": "Unverified"
+          }
+        ],
+        "scope": "direct",
+        "truncated": false,
+        "unresolved": [],
+        "verification": "Unverified"
+      }
+    ],
+    "repo": "sem",
+    "schema_version": 1,
+    "snapshot": {
+      "id": 1,
+      "nonce": "<nonce>",
+      "revision": "head=-|branch=-|dirty=false|untracked=0|cfg=1a92ea80d66dd56e|nonce=<nonce>"
+    },
+    "truncated": false,
+    "unresolved": [],
+    "verdict": "HIGH",
+    "verification": "Unverified",
+    "visits": {
+      "edges": 1,
+      "nodes": 2
+    }
+  },
+  "syntax_callees": {
+    "anchor": {
+      "anchor_uncertainty": "syntax-only anchor: no semantic identity at this position",
+      "col": 5,
+      "endpoint": {
+        "byte_end": 165,
+        "byte_start": 117,
+        "doc": null,
+        "import_id": null,
+        "path": "nested_calls.c",
+        "symbol_uri": null,
+        "type": "syntax_def"
+      },
+      "import_id": null,
+      "kind": "syntax-fallback",
+      "line": 8,
+      "path": "nested_calls.c",
+      "precision": "Heuristic",
+      "span": [
+        117,
+        165
+      ],
+      "symbol_uri": null
+    },
+    "completeness": {
+      "covered": 2,
+      "denominator": {
+        "ambiguous_calls": 0,
+        "dynamic_calls": 0,
+        "missing_provider_files": 1,
+        "observed_edges": 2,
+        "parse_error_files": 0,
+        "skipped_files": 0,
+        "stale_imports": 0,
+        "truncated_branches": 0,
+        "unresolved_owner": 0,
+        "unresolved_target": 2,
+        "unsupported_files": 0
+      },
+      "status": "partial",
+      "total": 2,
+      "unresolved": [
+        "missing_provider_files",
+        "no-overlap",
+        "syntax-anchor-uncertain",
+        "unresolved-relations",
+        "unresolved_target"
+      ]
+    },
+    "direction": "callees",
+    "edges": [
+      {
+        "callee": null,
+        "callee_name": "outer",
+        "caller": {
+          "byte_end": 165,
+          "byte_start": 117,
+          "doc": null,
+          "import_id": null,
+          "path": "nested_calls.c",
+          "symbol_uri": null,
+          "type": "syntax_def"
+        },
+        "caller_path": "nested_calls.c",
+        "caller_span": [
+          147,
+          162
+        ],
+        "evidence": {
+          "callee_span": [
+            147,
+            152
+          ],
+          "digest": "4e4ed15c392f1dc9",
+          "imports": [],
+          "path": "nested_calls.c",
+          "provider": "syntax",
+          "reference_span": null,
+          "span": [
+            147,
+            162
+          ],
+          "terminal_span": [
+            147,
+            152
+          ]
+        },
+        "import_id": null,
+        "kind": "POTENTIAL_CALL",
+        "precision": "Heuristic",
+        "provider": "syntax",
+        "tool": null,
+        "unresolved": "no-overlap",
+        "verification": "Unverified"
+      },
+      {
+        "callee": null,
+        "callee_name": "target",
+        "caller": {
+          "byte_end": 165,
+          "byte_start": 117,
+          "doc": null,
+          "import_id": null,
+          "path": "nested_calls.c",
+          "symbol_uri": null,
+          "type": "syntax_def"
+        },
+        "caller_path": "nested_calls.c",
+        "caller_span": [
+          153,
+          161
+        ],
+        "evidence": {
+          "callee_span": [
+            153,
+            159
+          ],
+          "digest": "4e4ed15c392f1dc9",
+          "imports": [],
+          "path": "nested_calls.c",
+          "provider": "syntax",
+          "reference_span": null,
+          "span": [
+            153,
+            161
+          ],
+          "terminal_span": [
+            153,
+            159
+          ]
+        },
+        "import_id": null,
+        "kind": "POTENTIAL_CALL",
+        "precision": "Heuristic",
+        "provider": "syntax",
+        "tool": null,
+        "unresolved": "no-overlap",
+        "verification": "Unverified"
+      }
+    ],
+    "freshness": {
+      "reasons": [],
+      "status": "fresh"
+    },
+    "limits": {
+      "limit": 50,
+      "next_offset": null,
+      "offset": 0
+    },
+    "repo": "sem",
+    "schema_version": 1,
+    "snapshot": {
+      "id": 1,
+      "nonce": "<nonce>",
+      "revision": "head=-|branch=-|dirty=false|untracked=0|cfg=1a92ea80d66dd56e|nonce=<nonce>"
+    },
+    "truncated": false,
+    "verification": "Unverified"
+  },
+  "syntax_impact": {
+    "anchor": {
+      "anchor_uncertainty": "syntax-only anchor: no semantic identity at this position",
+      "col": 5,
+      "endpoint": {
+        "byte_end": 73,
+        "byte_start": 39,
+        "doc": null,
+        "import_id": null,
+        "path": "nested_calls.c",
+        "symbol_uri": null,
+        "type": "syntax_def"
+      },
+      "import_id": null,
+      "kind": "syntax-fallback",
+      "line": 2,
+      "path": "nested_calls.c",
+      "precision": "Heuristic",
+      "span": [
+        39,
+        73
+      ],
+      "symbol_uri": null
+    },
+    "bridges": [],
+    "budgets": {
+      "depth": 3,
+      "edges": 3000,
+      "mappings": 500,
+      "max_depth": 6,
+      "nodes": 500,
+      "paths": 1000,
+      "time_ms": 2000
+    },
+    "completeness": {
+      "covered": 0,
+      "denominator": {
+        "ambiguous_calls": 0,
+        "dynamic_calls": 0,
+        "missing_provider_files": 1,
+        "observed_edges": 0,
+        "parse_error_files": 0,
+        "skipped_files": 0,
+        "stale_imports": 0,
+        "truncated_branches": 0,
+        "unresolved_owner": 0,
+        "unresolved_target": 2,
+        "unsupported_files": 0
+      },
+      "status": "partial",
+      "total": 0,
+      "total_exact": true,
+      "unresolved": [
+        "empty-result-not-coverage-proof",
+        "graph-completeness-unproven",
+        "insufficient-impact-evidence",
+        "missing_provider_files",
+        "syntax-anchor-uncertain",
+        "unresolved-relations",
+        "unresolved_target"
+      ]
+    },
+    "cycle": false,
+    "destination": null,
+    "direction": "impact",
+    "disclaimer": "plausible-impact-not-execution",
+    "freshness": {
+      "reasons": [],
+      "status": "fresh"
+    },
+    "limits": {
+      "limit": 50,
+      "next_offset": null,
+      "offset": 0
+    },
+    "paths": [],
+    "repo": "sem",
+    "schema_version": 1,
+    "snapshot": {
+      "id": 1,
+      "nonce": "<nonce>",
+      "revision": "head=-|branch=-|dirty=false|untracked=0|cfg=1a92ea80d66dd56e|nonce=<nonce>"
+    },
+    "truncated": false,
+    "unresolved": [],
+    "verdict": "UNKNOWN",
+    "verification": "Unverified",
+    "visits": {
+      "edges": 0,
+      "nodes": 1
+    }
+  },
+  "trace": {
+    "anchor": {
+      "anchor_uncertainty": null,
+      "col": 5,
+      "endpoint": {
+        "byte_end": null,
+        "byte_start": null,
+        "doc": null,
+        "import_id": 1,
+        "path": null,
+        "symbol_uri": "scip-test test corpus 1.0.0 nested_calls.c/c().",
+        "type": "scip"
+      },
+      "import_id": 1,
+      "kind": "semantic",
+      "line": 8,
+      "path": "nested_calls.c",
+      "precision": "Heuristic",
+      "span": [
+        121,
+        127
+      ],
+      "symbol_uri": "scip-test test corpus 1.0.0 nested_calls.c/c()."
+    },
+    "bridges": [
+      {
+        "definition_span": [
+          121,
+          127
+        ],
+        "digest": "4e4ed15c392f1dc9",
+        "semantic": {
+          "byte_end": null,
+          "byte_start": null,
+          "doc": null,
+          "import_id": 1,
+          "path": null,
+          "symbol_uri": "scip-test test corpus 1.0.0 nested_calls.c/c().",
+          "type": "scip"
+        },
+        "syntax": {
+          "byte_end": 165,
+          "byte_start": 117,
+          "doc": null,
+          "import_id": null,
+          "path": "nested_calls.c",
+          "symbol_uri": null,
+          "type": "syntax_def"
+        }
+      },
+      {
+        "definition_span": [
+          78,
+          83
+        ],
+        "digest": "4e4ed15c392f1dc9",
+        "semantic": {
+          "byte_end": null,
+          "byte_start": null,
+          "doc": null,
+          "import_id": 1,
+          "path": null,
+          "symbol_uri": "scip-test test corpus 1.0.0 nested_calls.c/u().",
+          "type": "scip"
+        },
+        "syntax": {
+          "byte_end": 116,
+          "byte_start": 74,
+          "doc": null,
+          "import_id": null,
+          "path": "nested_calls.c",
+          "symbol_uri": null,
+          "type": "syntax_def"
+        }
+      },
+      {
+        "definition_span": [
+          43,
+          49
+        ],
+        "digest": "4e4ed15c392f1dc9",
+        "semantic": {
+          "byte_end": null,
+          "byte_start": null,
+          "doc": null,
+          "import_id": 1,
+          "path": null,
+          "symbol_uri": "scip-test test corpus 1.0.0 nested_calls.c/t().",
+          "type": "scip"
+        },
+        "syntax": {
+          "byte_end": 73,
+          "byte_start": 39,
+          "doc": null,
+          "import_id": null,
+          "path": "nested_calls.c",
+          "symbol_uri": null,
+          "type": "syntax_def"
+        }
+      }
+    ],
+    "budgets": {
+      "depth": 3,
+      "edges": 3000,
+      "mappings": 500,
+      "max_depth": 6,
+      "nodes": 500,
+      "paths": 1000,
+      "time_ms": 2000
+    },
+    "completeness": {
+      "covered": 2,
+      "denominator": {
+        "ambiguous_calls": 0,
+        "dynamic_calls": 0,
+        "missing_provider_files": 0,
+        "observed_edges": 2,
+        "parse_error_files": 0,
+        "skipped_files": 0,
+        "stale_imports": 0,
+        "truncated_branches": 0,
+        "unresolved_owner": 0,
+        "unresolved_target": 0,
+        "unsupported_files": 0
+      },
+      "status": "complete",
+      "total": 2,
+      "total_exact": true,
+      "unresolved": []
+    },
+    "cycle": false,
+    "destination": null,
+    "direction": "trace",
+    "disclaimer": "plausible-path-not-execution",
+    "freshness": {
+      "reasons": [],
+      "status": "fresh"
+    },
+    "limits": {
+      "limit": 50,
+      "next_offset": null,
+      "offset": 0
+    },
+    "paths": [
+      {
+        "cycle": false,
+        "edges": [
+          {
+            "callee": {
+              "byte_end": null,
+              "byte_start": null,
+              "doc": null,
+              "import_id": 1,
+              "path": null,
+              "symbol_uri": "scip-test test corpus 1.0.0 nested_calls.c/u().",
+              "type": "scip"
+            },
+            "callee_name": "outer",
+            "caller": {
+              "byte_end": null,
+              "byte_start": null,
+              "doc": null,
+              "import_id": 1,
+              "path": null,
+              "symbol_uri": "scip-test test corpus 1.0.0 nested_calls.c/c().",
+              "type": "scip"
+            },
+            "caller_path": "nested_calls.c",
+            "caller_span": [
+              147,
+              162
+            ],
+            "evidence": {
+              "callee_span": [
+                147,
+                152
+              ],
+              "digest": "4e4ed15c392f1dc9",
+              "imports": [
+                {
+                  "artifact_id": "<artifact>",
+                  "content_identity": "a74d141ddda37a57",
+                  "id": 1,
+                  "provider": "corpus",
+                  "source_revision": "head=-|branch=-|dirty=false|untracked=0|cfg=1a92ea80d66dd56e|nonce=<nonce>",
+                  "version": "1.0"
+                }
+              ],
+              "path": "nested_calls.c",
+              "provider": "scip-import",
+              "reference_span": [
+                147,
+                152
+              ],
+              "span": [
+                147,
+                162
+              ],
+              "terminal_span": [
+                147,
+                152
+              ]
+            },
+            "import_id": 1,
+            "kind": "CALLS",
+            "precision": "Exact",
+            "provider": "scip-import",
+            "tool": "corpus",
+            "unresolved": null,
+            "verification": "Unverified"
+          }
+        ],
+        "truncated": false,
+        "unresolved": [],
+        "verification": "Unverified"
+      },
+      {
+        "cycle": false,
+        "edges": [
+          {
+            "callee": {
+              "byte_end": null,
+              "byte_start": null,
+              "doc": null,
+              "import_id": 1,
+              "path": null,
+              "symbol_uri": "scip-test test corpus 1.0.0 nested_calls.c/t().",
+              "type": "scip"
+            },
+            "callee_name": "target",
+            "caller": {
+              "byte_end": null,
+              "byte_start": null,
+              "doc": null,
+              "import_id": 1,
+              "path": null,
+              "symbol_uri": "scip-test test corpus 1.0.0 nested_calls.c/c().",
+              "type": "scip"
+            },
+            "caller_path": "nested_calls.c",
+            "caller_span": [
+              153,
+              161
+            ],
+            "evidence": {
+              "callee_span": [
+                153,
+                159
+              ],
+              "digest": "4e4ed15c392f1dc9",
+              "imports": [
+                {
+                  "artifact_id": "<artifact>",
+                  "content_identity": "a74d141ddda37a57",
+                  "id": 1,
+                  "provider": "corpus",
+                  "source_revision": "head=-|branch=-|dirty=false|untracked=0|cfg=1a92ea80d66dd56e|nonce=<nonce>",
+                  "version": "1.0"
+                }
+              ],
+              "path": "nested_calls.c",
+              "provider": "scip-import",
+              "reference_span": [
+                153,
+                159
+              ],
+              "span": [
+                153,
+                161
+              ],
+              "terminal_span": [
+                153,
+                159
+              ]
+            },
+            "import_id": 1,
+            "kind": "CALLS",
+            "precision": "Exact",
+            "provider": "scip-import",
+            "tool": "corpus",
+            "unresolved": null,
+            "verification": "Unverified"
+          }
+        ],
+        "truncated": false,
+        "unresolved": [],
+        "verification": "Unverified"
+      }
+    ],
+    "repo": "sem",
+    "schema_version": 1,
+    "snapshot": {
+      "id": 1,
+      "nonce": "<nonce>",
+      "revision": "head=-|branch=-|dirty=false|untracked=0|cfg=1a92ea80d66dd56e|nonce=<nonce>"
+    },
+    "truncated": false,
+    "unresolved": [],
+    "verification": "Unverified",
+    "visits": {
+      "edges": 2,
+      "nodes": 3
+    }
+  }
+}

@@ -1,0 +1,56 @@
+{
+  "file": "cycle.rs",
+  "symbols": [
+    {
+      "id": "t",
+      "name": "target",
+      "uri": "scip-test test corpus 1.0.0 cycle.rs/t()."
+    },
+    {
+      "id": "c",
+      "name": "caller",
+      "uri": "scip-test test corpus 1.0.0 cycle.rs/c()."
+    }
+  ],
+  "occurrences": [
+    {
+      "id": "t",
+      "definition": true,
+      "line": 1,
+      "col": 3,
+      "end": 9,
+      "text": "target"
+    },
+    {
+      "id": "c",
+      "definition": false,
+      "line": 2,
+      "col": 4,
+      "end": 10,
+      "text": "caller"
+    },
+    {
+      "id": "c",
+      "definition": true,
+      "line": 4,
+      "col": 3,
+      "end": 9,
+      "text": "caller"
+    },
+    {
+      "id": "t",
+      "definition": false,
+      "line": 5,
+      "col": 4,
+      "end": 10,
+      "text": "target"
+    }
+  ],
+  "target": "t",
+  "callees_calls": 1,
+  "inbound_calls": 1,
+  "inbound_references": 0,
+  "impact": "HIGH",
+  "stale": false,
+  "notes": ""
+}
