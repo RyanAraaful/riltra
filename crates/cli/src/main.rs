@@ -14,6 +14,7 @@ mod git;
 mod ignore;
 mod index;
 mod json;
+mod knowledge_store;
 mod lsp;
 mod paths;
 mod registry;
