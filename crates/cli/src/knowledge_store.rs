@@ -36,6 +36,25 @@ pub fn open_knowledge_at(
     repo: &RepoEntry,
     create: bool,
 ) -> Result<Connection, String> {
+    open_inner(home, repo, create, false)
+}
+
+/// Test-only init-failure injector: fails schema initialization after the DDL
+/// batch to prove the whole init rolls back atomically.
+#[cfg(test)]
+pub(crate) fn open_knowledge_at_inject_init_failure(
+    home: &Path,
+    repo: &RepoEntry,
+) -> Result<Connection, String> {
+    open_inner(home, repo, true, true)
+}
+
+fn open_inner(
+    home: &Path,
+    repo: &RepoEntry,
+    create: bool,
+    inject_init_failure: bool,
+) -> Result<Connection, String> {
     if !paths::validate_name(&repo.name) {
         return Err(format!("invalid repository name: '{}'", repo.name));
     }
@@ -53,13 +72,15 @@ pub fn open_knowledge_at(
     if !existed && !create {
         return Err(format!("no knowledge store for repository '{}'", repo.name));
     }
-    if existed && !db.is_file() {
+    if !existed && create && db.exists() {
+        // Present but not a file (directory, fifo, …). Links were rejected
+        // above, so this is never a dangling link.
         return Err(format!(
             "knowledge store path is not a file for repository '{}'",
             repo.name
         ));
     }
-    let conn = if create {
+    let mut conn = if create {
         Connection::open(&db)
     } else {
         Connection::open_with_flags(&db, OpenFlags::SQLITE_OPEN_READ_ONLY)
@@ -96,7 +117,7 @@ pub fn open_knowledge_at(
         ));
     }
     if !existed {
-        init_schema(&conn, repo, &croot)?;
+        init_schema(&mut conn, repo, &croot, inject_init_failure)?;
     } else {
         if version != KNOWLEDGE_SCHEMA_VERSION {
             return Err(format!(
@@ -104,33 +125,50 @@ pub fn open_knowledge_at(
                 repo.name
             ));
         }
+        check_schema_complete(&conn, repo)?;
         check_meta(&conn, repo, &croot)?;
     }
     // Best-effort like the code index: exotic filesystems fall back to
     // rollback mode (still correct, less concurrent). Read-only opens ignore
     // the result as well.
+    //
+    // NOTE (Task 2): WAL mode activates here, after the scans above. Later
+    // SQLite accesses can create or touch `-wal`/`-shm` files, so every write
+    // transaction must re-validate companions before committing; the checks in
+    // this function cover the open instant only. No TOCTOU protection beyond
+    // SQLite transactions and bounded writer waits is claimed.
     let _ = conn.execute_batch("PRAGMA journal_mode=WAL;");
     Ok(conn)
 }
 
 fn companion_paths(db: &Path) -> [PathBuf; 3] {
-    let base = db.to_string_lossy().into_owned();
+    fn with_suffix(db: &Path, suffix: &str) -> PathBuf {
+        let mut os = db.as_os_str().to_os_string();
+        os.push(suffix);
+        PathBuf::from(os)
+    }
     [
-        PathBuf::from(format!("{base}-wal")),
-        PathBuf::from(format!("{base}-shm")),
-        PathBuf::from(format!("{base}-journal")),
+        with_suffix(db, "-wal"),
+        with_suffix(db, "-shm"),
+        with_suffix(db, "-journal"),
     ]
 }
 
 /// Any symlink at a store-controlled path is an escape, including dangling
-/// links (`symlink_metadata` succeeds on those). Missing paths are fine.
+/// links (`symlink_metadata` succeeds on those). A missing path is absent;
+/// any other I/O error fails closed instead of being treated as absent.
 fn reject_link(p: &Path) -> Result<(), String> {
     match std::fs::symlink_metadata(p) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!(
+            "cannot inspect knowledge store path '{}': {e}",
+            p.display()
+        )),
         Ok(md) if md.file_type().is_symlink() => Err(format!(
             "knowledge store path escapes via link: '{}'",
             p.display()
         )),
-        _ => Ok(()),
+        Ok(_) => Ok(()),
     }
 }
 
@@ -233,43 +271,114 @@ CREATE TABLE retractions (
   relation_id TEXT PRIMARY KEY,
   author TEXT NOT NULL, reason TEXT NOT NULL, created_unix INTEGER NOT NULL
 );
-CREATE VIRTUAL TABLE knowledge_fts USING fts5(title, body);
-CREATE TRIGGER records_fts_insert AFTER INSERT ON records BEGIN
-  INSERT INTO knowledge_fts(rowid, title, body)
-  VALUES (new.rowid, new.title, new.body);
+CREATE VIRTUAL TABLE knowledge_fts USING fts5(id UNINDEXED, title, body);
+-- FTS mirrors the latest-inserted revision per record id. Revisions for one
+-- id are inserted in increasing order (record writers uphold this), so the
+-- newest insert is the head; immutable historical revisions never appear in
+-- the index. Deletion keeps the invariant for symmetry (records are never
+-- deleted, but a delete must not leave a stale FTS row behind).
+CREATE TRIGGER records_fts_head AFTER INSERT ON records BEGIN
+  DELETE FROM knowledge_fts WHERE id = new.id;
+  INSERT INTO knowledge_fts(id, title, body)
+  VALUES (new.id, new.title, new.body);
 END;
 CREATE TRIGGER records_fts_delete AFTER DELETE ON records BEGIN
-  DELETE FROM knowledge_fts WHERE rowid = old.rowid;
+  DELETE FROM knowledge_fts WHERE id = old.id;
 END;
 ";
 
-/// Build schema v1 on a file that did not exist before open. Existing files
-/// are never initialized here: garbage or version-0 files fail closed.
-fn init_schema(conn: &Connection, repo: &RepoEntry, croot: &Path) -> Result<(), String> {
-    conn.execute_batch(SCHEMA_SQL)
+/// Build schema v1 on a file that did not exist before open, inside one
+/// SQLite transaction: DDL, metadata binding, generation init and the version
+/// stamp commit together or roll back together. Existing files are never
+/// initialized here: garbage or version-0 files fail closed.
+fn init_schema(
+    conn: &mut Connection,
+    repo: &RepoEntry,
+    croot: &Path,
+    inject_init_failure: bool,
+) -> Result<(), String> {
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("cannot begin knowledge schema transaction: {e}"))?;
+    tx.execute_batch(SCHEMA_SQL)
         .map_err(|e| format!("cannot create knowledge schema: {e}"))?;
-    conn.execute(
+    if inject_init_failure {
+        // Test hook: drop the transaction without committing to prove no
+        // partial schema or metadata survives initialization failure.
+        return Err("injected init failure".to_string());
+    }
+    tx.execute(
         "INSERT INTO meta (key, value) VALUES ('repo_name', ?1)",
         [repo.name.as_str()],
     )
     .map_err(|e| format!("cannot bind knowledge metadata: {e}"))?;
-    conn.execute(
+    tx.execute(
         "INSERT INTO meta (key, value) VALUES ('canonical_root', ?1)",
         [croot.to_string_lossy().as_ref()],
     )
     .map_err(|e| format!("cannot bind knowledge metadata: {e}"))?;
-    conn.execute(
+    tx.execute(
         "INSERT INTO meta (key, value) VALUES ('knowledge_schema_version', '1')",
         [],
     )
     .map_err(|e| format!("cannot bind knowledge metadata: {e}"))?;
-    conn.execute(
+    tx.execute(
         "INSERT INTO meta (key, value) VALUES ('knowledge_generation', '0')",
         [],
     )
     .map_err(|e| format!("cannot bind knowledge metadata: {e}"))?;
-    conn.execute_batch("PRAGMA user_version = 1")
+    tx.execute_batch("PRAGMA user_version = 1")
         .map_err(|e| format!("cannot stamp knowledge schema version: {e}"))?;
+    tx.commit()
+        .map_err(|e| format!("cannot commit knowledge schema: {e}"))?;
+    Ok(())
+}
+
+/// Objects that must exist for a schema-v1 store to be accepted. A matching
+/// `user_version` and readable `meta` alone are not enough: an existing
+/// database missing any required object fails explicitly here.
+const REQUIRED_TABLES: [&str; 7] = [
+    "meta",
+    "records",
+    "heads",
+    "evidence",
+    "relations",
+    "retractions",
+    "knowledge_fts",
+];
+const REQUIRED_TRIGGERS: [&str; 2] = ["records_fts_head", "records_fts_delete"];
+
+fn check_schema_complete(conn: &Connection, repo: &RepoEntry) -> Result<(), String> {
+    for table in REQUIRED_TABLES {
+        let n: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                [table],
+                |row| row.get(0),
+            )
+            .map_err(|_| "corrupt knowledge store: schema unreadable".to_string())?;
+        if n != 1 {
+            return Err(format!(
+                "incomplete knowledge schema for '{}': missing table '{table}'",
+                repo.name
+            ));
+        }
+    }
+    for trigger in REQUIRED_TRIGGERS {
+        let n: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'trigger' AND name = ?1",
+                [trigger],
+                |row| row.get(0),
+            )
+            .map_err(|_| "corrupt knowledge store: schema unreadable".to_string())?;
+        if n != 1 {
+            return Err(format!(
+                "incomplete knowledge schema for '{}': missing trigger '{trigger}'",
+                repo.name
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -281,14 +390,20 @@ fn meta_value(conn: &Connection, key: &str) -> Result<String, String> {
 }
 
 /// The store belongs to exactly one registered repository: name, canonical
-/// root and schema marker must all match on every open.
+/// root and schema marker must all match on every open. The stored root must
+/// also still resolve to itself, so a moved or deleted root fails instead of
+/// being accepted on a stale string comparison.
 fn check_meta(conn: &Connection, repo: &RepoEntry, croot: &Path) -> Result<(), String> {
     let name = meta_value(conn, "repo_name")?;
     let root = meta_value(conn, "canonical_root")?;
     let marker = meta_value(conn, "knowledge_schema_version")?;
+    let root_alive = paths::canonical_root(Path::new(&root))
+        .map(|live| live.to_string_lossy().into_owned() == root)
+        .unwrap_or(false);
     if name != repo.name
         || root != croot.to_string_lossy().as_ref()
         || marker != KNOWLEDGE_SCHEMA_VERSION.to_string()
+        || !root_alive
     {
         return Err(format!(
             "knowledge metadata mismatch for repository '{}'",
@@ -447,6 +562,144 @@ mod tests {
         };
         let err = open_knowledge_at(&home, &moved, false).unwrap_err();
         assert!(err.contains("mismatch"), "root: unexpected: {err}");
+    }
+
+    #[test]
+    fn knowledge_store_open_fts_represents_head_only() {
+        let (home, repo) = setup("ftshead");
+        let conn = open_knowledge_at(&home, &repo, true).unwrap();
+        for (rev, title) in [
+            (1, "zqxalpha first decision"),
+            (2, "zqxbeta revised decision"),
+        ] {
+            conn.execute(
+                "INSERT INTO records (id, revision, kind, title, body, status, author, created_unix)
+                 VALUES ('r1', ?1, 'decision', ?2, 'body', 'active', 't', 1)",
+                rusqlite::params![rev, title],
+            )
+            .unwrap();
+        }
+        let stale: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM knowledge_fts WHERE knowledge_fts MATCH 'zqxalpha'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stale, 0, "historical revision must not be indexed");
+        let head: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM knowledge_fts WHERE knowledge_fts MATCH 'zqxbeta'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(head, 1, "head revision must be indexed");
+        let total: i64 = conn
+            .query_row("SELECT count(*) FROM knowledge_fts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(total, 1, "exactly one head row per record id");
+        conn.close().unwrap();
+    }
+
+    #[test]
+    fn knowledge_store_open_init_failure_rolls_back() {
+        let (home, repo) = setup("initfault");
+        let err = open_knowledge_at_inject_init_failure(&home, &repo).unwrap_err();
+        assert!(err.contains("injected"), "unexpected: {err}");
+        // No partial schema or metadata survived the failed initialization.
+        let raw = rusqlite::Connection::open(knowledge_db_path(&home, "initfault")).unwrap();
+        let objects: i64 = raw
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type IN ('table', 'trigger')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(objects, 0, "failed init must leave no tables or triggers");
+        let version: u32 = raw
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 0, "failed init must not stamp a version");
+        raw.close().unwrap();
+        // The leftover file is not repaired or deleted automatically: the next
+        // open fails explicitly.
+        let err = open_knowledge_at(&home, &repo, true).unwrap_err();
+        assert!(err.contains("corrupt"), "unexpected: {err}");
+        assert!(knowledge_db_path(&home, "initfault").exists());
+    }
+
+    #[test]
+    fn knowledge_store_open_incomplete_schema_rejected() {
+        for drop_sql in ["DROP TABLE heads", "DROP TABLE knowledge_fts"] {
+            let (home, repo) = setup("incomplete");
+            open_knowledge_at(&home, &repo, true)
+                .unwrap()
+                .close()
+                .unwrap();
+            let raw = rusqlite::Connection::open(knowledge_db_path(&home, "incomplete")).unwrap();
+            raw.execute_batch(drop_sql).unwrap();
+            raw.close().unwrap();
+            let err = open_knowledge_at(&home, &repo, false).unwrap_err();
+            assert!(err.contains("incomplete"), "{drop_sql}: unexpected: {err}");
+        }
+    }
+
+    #[test]
+    fn knowledge_store_open_moved_root_mismatch() {
+        let (home, repo) = setup("movedroot");
+        open_knowledge_at(&home, &repo, true)
+            .unwrap()
+            .close()
+            .unwrap();
+        std::fs::remove_dir_all(Path::new(&repo.root)).unwrap();
+        let err = open_knowledge_at(&home, &repo, false).unwrap_err();
+        assert!(
+            err.contains("resolve") || err.contains("mismatch"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn knowledge_store_open_db_path_is_directory() {
+        let (home, repo) = setup("isdir");
+        let db = knowledge_db_path(&home, "isdir");
+        std::fs::create_dir_all(&db).unwrap();
+        let err = open_knowledge_at(&home, &repo, true).unwrap_err();
+        assert!(err.contains("not a file"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn knowledge_store_open_unusable_home_fails() {
+        let (home, repo) = setup("badhome");
+        let file = home.join("file-home");
+        std::fs::write(&file, b"x").unwrap();
+        let err = open_knowledge_at(&file, &repo, true).unwrap_err();
+        assert!(
+            err.contains("cannot create") || err.contains("cannot resolve"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn knowledge_store_open_non_utf8_home_supported() {
+        use std::os::unix::ffi::OsStringExt;
+        let mut raw = std::env::temp_dir().into_os_string();
+        raw.push(format!("/riltra-m7-nonutf-{}-", std::process::id()));
+        raw.extend([0x66u8, 0x6f, 0x80, 0x6f]);
+        let home = PathBuf::from(raw);
+        let _ = std::fs::remove_dir_all(&home);
+        let root = tmpdir("m7-root");
+        let repo = RepoEntry {
+            name: "nonutf".to_string(),
+            root: root.to_string_lossy().into_owned(),
+            added_unix: 1,
+        };
+        let conn = open_knowledge_at(&home, &repo, true).unwrap();
+        conn.close().unwrap();
+        assert!(knowledge_db_path(&home, "nonutf").is_file());
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
