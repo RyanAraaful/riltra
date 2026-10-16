@@ -1372,17 +1372,32 @@ mod tests {
         }
         #[cfg(unix)]
         {
-            std::os::unix::fs::symlink(target, link).is_ok()
+            if std::os::unix::fs::symlink(target, link).is_err() {
+                return false;
+            }
         }
         #[cfg(windows)]
         {
-            plant_link(link, target).is_some()
+            if plant_link(link, target).is_none() {
+                return false;
+            }
         }
         #[cfg(not(any(unix, windows)))]
         {
             let _ = (link, target);
-            false
+            return false;
         }
+        // The link primitive reported success, but some environments leave a
+        // reparse point the OS itself cannot resolve (observed as Access
+        // denied on canonicalize). Only a resolvable link exercises the
+        // retarget path; otherwise report NOT TESTED instead of failing an
+        // environment limitation as a code defect.
+        if link.canonicalize().is_err() {
+            let _ = std::fs::remove_file(link);
+            let _ = std::fs::remove_dir(link);
+            return false;
+        }
+        true
     }
 
     #[test]
@@ -1603,13 +1618,16 @@ mod tests {
                 _ => return None,
             }
         };
+        // mklink cannot consume verbatim (`\\?\`) paths: it reports success
+        // yet leaves a junction Windows cannot resolve (later surfacing as
+        // Access denied). Strip the prefix for the link tool only.
         let ok = std::process::Command::new("cmd")
             .args([
                 "/C",
                 "mklink",
                 "/J",
-                &link.to_string_lossy(),
-                &anchor.to_string_lossy(),
+                &for_mklink(link),
+                &for_mklink(&anchor),
             ])
             .output()
             .map(|o| o.status.success())
@@ -1619,6 +1637,18 @@ mod tests {
         } else {
             None
         }
+    }
+
+    #[cfg(windows)]
+    fn for_mklink(path: &Path) -> String {
+        let text = path.to_string_lossy();
+        if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+            return format!(r"\\{rest}");
+        }
+        if let Some(rest) = text.strip_prefix(r"\\?\") {
+            return rest.to_string();
+        }
+        text.into_owned()
     }
 
     #[cfg(not(windows))]
