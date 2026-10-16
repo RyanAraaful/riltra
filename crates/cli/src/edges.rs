@@ -1151,6 +1151,198 @@ pub fn traverse(
     Ok(out)
 }
 
+/// Reverse BFS. Each emitted path proves one observed dependent, with the
+/// nearest-to-anchor edge first. References with unknown owners stay terminal.
+pub fn traverse_impact(
+    conn: &rusqlite::Connection,
+    snapshot_id: i64,
+    start: &EdgeEndpoint,
+    budget: &TraceBudget,
+) -> Result<Traversal, String> {
+    if !(1..=TRACE_MAX_NODES).contains(&budget.nodes)
+        || !(1..=TRACE_MAX_EDGES).contains(&budget.edges)
+        || !(1..=TRACE_MAX_PATHS).contains(&budget.paths)
+        || !(1..=TRACE_MAX_DEPTH).contains(&budget.depth)
+    {
+        return Err("invalid impact budget".to_string());
+    }
+    let mut out = Traversal {
+        paths: Vec::new(),
+        bridges: Vec::new(),
+        nodes: 0,
+        edges: 0,
+        cycle: false,
+        truncated: false,
+        unresolved: BTreeSet::new(),
+    };
+    let result = (|| -> Result<(), String> {
+        if budget.expired() {
+            return Err("time-budget".to_string());
+        }
+        let (start, bridges, ambiguous) = trace_node(conn, snapshot_id, start, None, budget)?;
+        out.remember(bridges)?;
+        if ambiguous {
+            out.unresolved.insert("ambiguous-owner-mapping".to_string());
+        }
+        let mut known = vec![start.clone()];
+        out.nodes = 1;
+        let mut queue =
+            std::collections::VecDeque::from([(start.clone(), Vec::<EdgeRow>::new(), vec![start])]);
+        while let Some((node, prefix, lineage)) = queue.pop_front() {
+            if budget.expired() {
+                return Err("time-budget".to_string());
+            }
+            let selection = store::EdgeSelection {
+                snapshot_id,
+                endpoint: &node,
+                inbound: true,
+                candidate_name: None,
+                candidate_paths: &[],
+                syntax_aliases: &[],
+            };
+            if prefix.len() == budget.depth {
+                if !store::selected_edge_page(conn, &selection, 1, 0)?.is_empty() {
+                    out.stop("depth-budget");
+                }
+                continue;
+            }
+            let mut offset = 0;
+            loop {
+                if budget.expired() {
+                    return Err("time-budget".to_string());
+                }
+                if out.edges == budget.edges {
+                    out.stop("edge-budget");
+                    return Ok(());
+                }
+                let batch = (budget.edges - out.edges).min(1000);
+                let rows =
+                    store::selected_edge_page(conn, &selection, batch as i64, offset as i64)?;
+                let count = rows.len();
+                for edge in rows {
+                    if budget.expired() {
+                        return Err("time-budget".to_string());
+                    }
+                    if out.paths.len() == budget.paths {
+                        out.stop("path-budget");
+                        return Ok(());
+                    }
+                    out.edges += 1;
+                    let mut reasons = Vec::new();
+                    if let Some(reason) = &edge.unresolved {
+                        reasons.push(reason.clone());
+                    }
+                    let proven = matches!(edge.edge_kind.as_str(), "CALLS" | "REFERENCES")
+                        && edge.precision == "Exact"
+                        && edge.unresolved.is_none();
+                    if !proven {
+                        reasons.push("unproven-relation".to_string());
+                    }
+                    let mut next = None;
+                    if let Some(caller) = &edge.caller {
+                        if endpoint_import(&node)
+                            .zip(endpoint_import(caller))
+                            .is_some_and(|(a, b)| a != b)
+                        {
+                            return Err("impact edge crosses import scope".to_string());
+                        }
+                        let (mapped, bridges, ambiguous) =
+                            trace_node(conn, snapshot_id, caller, endpoint_import(&node), budget)?;
+                        out.remember(bridges)?;
+                        if ambiguous {
+                            reasons.push("ambiguous-owner-mapping".to_string());
+                        }
+                        if matches!(mapped, EdgeEndpoint::SyntaxDef { .. }) {
+                            reasons.push("semantic-midpoint-unavailable".to_string());
+                        } else if proven {
+                            next = Some(mapped);
+                        }
+                    } else {
+                        reasons.push("unresolved-owner".to_string());
+                    }
+                    let cycle = next
+                        .as_ref()
+                        .is_some_and(|n| lineage.iter().any(|old| unify(old, n)));
+                    if let Some(n) = &next {
+                        if !known.iter().any(|old| unify(old, n)) {
+                            if known.len() == budget.nodes {
+                                out.stop("node-budget");
+                                return Ok(());
+                            }
+                            known.push(n.clone());
+                            out.nodes = known.len();
+                        }
+                    }
+                    let mut hops = prefix.clone();
+                    hops.push(edge);
+                    out.emit(
+                        TracePath {
+                            edges: hops.clone(),
+                            cycle,
+                            truncated: false,
+                            unresolved: reasons,
+                        },
+                        false,
+                        false,
+                        budget,
+                    );
+                    if let Some(n) = next.filter(|_| !cycle) {
+                        let mut ancestors = lineage.clone();
+                        ancestors.push(n.clone());
+                        queue.push_back((n, hops, ancestors));
+                    }
+                }
+                offset += count;
+                if count < batch {
+                    break;
+                }
+            }
+        }
+        Ok(())
+    })();
+    if let Err(reason) = result {
+        if reason == "time-budget" || reason == "mapping-budget" {
+            out.stop(&reason);
+        } else {
+            return Err(reason);
+        }
+    }
+    Ok(out)
+}
+
+/// A successful bounded search cannot prove an exhaustive program graph.
+/// The positive levels describe observed static evidence, never safety.
+pub fn impact_verdict(traversal: &Traversal, uncertain: bool) -> &'static str {
+    if uncertain || traversal.truncated || !traversal.unresolved.is_empty() {
+        return "UNKNOWN";
+    }
+    let mut calls = false;
+    let mut references = false;
+    for path in &traversal.paths {
+        for edge in &path.edges {
+            if edge.precision != "Exact"
+                || edge.caller.is_none()
+                || edge.callee.is_none()
+                || edge.unresolved.is_some()
+            {
+                return "UNKNOWN";
+            }
+            match edge.edge_kind.as_str() {
+                "CALLS" => calls = true,
+                "REFERENCES" => references = true,
+                _ => return "UNKNOWN",
+            }
+        }
+    }
+    if calls {
+        "HIGH"
+    } else if references {
+        "MEDIUM"
+    } else {
+        "UNKNOWN"
+    }
+}
+
 /// Full re-derivation after semantic carry-over and `import_id` rebinding.
 /// Edges are never carried or copied: staging always re-derives from its own
 /// facts, so remapped `file_id`/`import_id` values cannot dangle.
@@ -1183,6 +1375,78 @@ pub fn rederive_after_carry(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn task6_impact_budget_guards_and_verdicts_never_claim_safety() {
+        let (conn, snapshot, start) = trace_store(&[(1, 0), (2, 1), (3, 0)]);
+        let full = traverse_impact(
+            &conn,
+            snapshot,
+            &start,
+            &TraceBudget::new(3, std::time::Instant::now()),
+        )
+        .unwrap();
+        assert_eq!(full.paths.len(), 3);
+        assert_eq!(impact_verdict(&full, false), "HIGH");
+        assert_eq!(impact_verdict(&full, true), "UNKNOWN");
+        for cutoff in ["nodes", "edges", "paths", "time", "depth"] {
+            let mut budget = TraceBudget::new(3, std::time::Instant::now());
+            match cutoff {
+                "nodes" => budget.nodes = 1,
+                "edges" => budget.edges = 1,
+                "paths" => budget.paths = 1,
+                "time" => budget.deadline = std::time::Instant::now(),
+                "depth" => budget.depth = 1,
+                _ => unreachable!(),
+            }
+            let result = traverse_impact(&conn, snapshot, &start, &budget).unwrap();
+            assert!(result.truncated, "{cutoff}");
+            assert!(
+                result.nodes <= budget.nodes
+                    && result.edges <= budget.edges
+                    && result.paths.len() <= budget.paths
+            );
+            assert_eq!(impact_verdict(&result, false), "UNKNOWN", "{cutoff}");
+            assert!(result.unresolved.contains(&format!(
+                "{}-budget",
+                if cutoff == "nodes" {
+                    "node"
+                } else if cutoff == "edges" {
+                    "edge"
+                } else if cutoff == "paths" {
+                    "path"
+                } else {
+                    cutoff
+                }
+            )));
+        }
+        let mut invalid = TraceBudget::new(3, std::time::Instant::now());
+        invalid.nodes = 501;
+        assert!(traverse_impact(&conn, snapshot, &start, &invalid).is_err());
+
+        // Policy support for a proven reference owner. The current SCIP
+        // derivation does not infer callable ownership for plain references.
+        conn.execute("UPDATE code_edges SET edge_kind='REFERENCES'", [])
+            .unwrap();
+        let references = traverse_impact(
+            &conn,
+            snapshot,
+            &start,
+            &TraceBudget::new(3, std::time::Instant::now()),
+        )
+        .unwrap();
+        assert_eq!(impact_verdict(&references, false), "MEDIUM");
+        conn.execute("UPDATE code_edges SET precision='Heuristic'", [])
+            .unwrap();
+        let heuristic = traverse_impact(
+            &conn,
+            snapshot,
+            &start,
+            &TraceBudget::new(3, std::time::Instant::now()),
+        )
+        .unwrap();
+        assert_eq!(impact_verdict(&heuristic, false), "UNKNOWN");
+    }
 
     fn trace_store(pairs: &[(usize, usize)]) -> (rusqlite::Connection, i64, EdgeEndpoint) {
         let conn = mem_db();

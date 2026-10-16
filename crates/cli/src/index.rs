@@ -1983,6 +1983,7 @@ pub struct TracePathOut {
 }
 
 pub struct TraceQueryOut {
+    pub impact_verdict: Option<&'static str>,
     pub repo: String,
     pub snapshot: store::Snapshot,
     pub revision: String,
@@ -2021,6 +2022,29 @@ fn trace_query_inner(
     root: &Path,
     request: &TraceRequest<'_>,
     pinned: impl FnOnce(),
+) -> Result<TraceQueryOut, String> {
+    graph_query_inner(home, name, root, request, pinned, false)
+}
+
+pub fn impact_query(
+    home: &Path,
+    name: &str,
+    root: &Path,
+    request: &TraceRequest<'_>,
+) -> Result<TraceQueryOut, String> {
+    if request.destination.is_some() {
+        return Err("impact does not accept a destination".to_string());
+    }
+    graph_query_inner(home, name, root, request, || {}, true)
+}
+
+fn graph_query_inner(
+    home: &Path,
+    name: &str,
+    root: &Path,
+    request: &TraceRequest<'_>,
+    pinned: impl FnOnce(),
+    impact: bool,
 ) -> Result<TraceQueryOut, String> {
     let started = Instant::now();
     if !(1..=crate::edges::TRACE_MAX_DEPTH).contains(&request.depth)
@@ -2088,8 +2112,27 @@ fn trace_query_inner(
         }
     }
     let budget = crate::edges::TraceBudget::new(request.depth, started);
-    let traversal = crate::edges::traverse(&tx, snapshot.id, &start, target.as_ref(), &budget)?;
+    let traversal = if impact {
+        crate::edges::traverse_impact(&tx, snapshot.id, &start, &budget)?
+    } else {
+        crate::edges::traverse(&tx, snapshot.id, &start, target.as_ref(), &budget)?
+    };
     let total = traversal.paths.len();
+    let impact_verdict = impact.then(|| {
+        crate::edges::impact_verdict(
+            &traversal,
+            verification == "Stale"
+                || freshness != "fresh"
+                || anchor.uncertainty.is_some()
+                || !coverage.reasons.is_empty()
+                || coverage
+                    .denominator
+                    .iter()
+                    .any(|(k, v)| *k != "observed_edges" && *v > 0)
+                || request.offset > 0
+                || total > request.limit,
+        )
+    });
     let mut paths = Vec::new();
     for path in traversal
         .paths
@@ -2124,6 +2167,12 @@ fn trace_query_inner(
     let more = next < total;
     let truncated = traversal.truncated || more;
     let mut reasons = coverage.reasons;
+    if impact {
+        reasons.insert("graph-completeness-unproven".to_string());
+        if impact_verdict == Some("UNKNOWN") {
+            reasons.insert("insufficient-impact-evidence".to_string());
+        }
+    }
     reasons.extend(traversal.unresolved.iter().cloned());
     if anchor.uncertainty.is_some() {
         reasons.insert("syntax-anchor-uncertain".to_string());
@@ -2150,6 +2199,7 @@ fn trace_query_inner(
     }
     let complete = reasons.is_empty() && !truncated && paths.len() == total;
     Ok(TraceQueryOut {
+        impact_verdict,
         repo: name.to_string(),
         snapshot,
         revision,
@@ -3855,5 +3905,54 @@ mod tests {
         assert_eq!(old_hit.verification, "Stale");
         assert_eq!(next.freshness, "fresh");
         assert!(old_hit.edge.callee.is_none());
+    }
+
+    #[test]
+    fn task6_impact_pins_coverage_and_verdict_during_promotion() {
+        let home = tmpdir("impact-pin-home");
+        let repo = tmpdir("impact-pin-repo");
+        std::fs::write(repo.join("a.py"), b"def f0():\n    missing()\n").unwrap();
+        super::build_full(&home, "r", &repo).unwrap();
+        let request = super::TraceRequest {
+            source: super::SpanQuery {
+                rel: "a.py",
+                line1: 1,
+                col1: 6,
+                refs: false,
+            },
+            symbol: None,
+            destination: None,
+            depth: 3,
+            limit: 50,
+            offset: 0,
+        };
+        let pinned = super::graph_query_inner(
+            &home,
+            "r",
+            &repo,
+            &request,
+            || {
+                let writer_home = home.clone();
+                let writer_repo = repo.clone();
+                std::thread::spawn(move || {
+                    std::fs::write(writer_repo.join("b.py"), b"def second():\n    other()\n")
+                        .unwrap();
+                    super::build(&writer_home, "r", &writer_repo, false).unwrap();
+                })
+                .join()
+                .unwrap();
+            },
+            true,
+        )
+        .unwrap();
+        let next = super::impact_query(&home, "r", &repo, &request).unwrap();
+        assert_ne!(pinned.snapshot.nonce, next.snapshot.nonce);
+        assert_eq!(pinned.completeness.denominator["unresolved_target"], 1);
+        assert_eq!(next.completeness.denominator["unresolved_target"], 2);
+        assert_eq!(pinned.impact_verdict, Some("UNKNOWN"));
+        assert_eq!(next.impact_verdict, Some("UNKNOWN"));
+        assert_eq!(pinned.verification, "Stale");
+        assert_eq!(next.freshness, "fresh");
+        assert!(pinned.paths.is_empty() && next.paths.is_empty());
     }
 }

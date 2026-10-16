@@ -43,6 +43,7 @@ pub enum Command {
         op: EdgeOp,
     },
     Trace(TraceArgs),
+    Impact(TraceArgs),
 }
 
 #[derive(Debug, PartialEq)]
@@ -322,6 +323,13 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         "callers" => parse_edge_args(args, true).map(|op| Command::Edge { op }),
         "callees" => parse_edge_args(args, false).map(|op| Command::Edge { op }),
         "trace" => parse_trace_args(args).map(Command::Trace),
+        "impact" => {
+            let parsed = parse_trace_args(args)?;
+            if parsed.to.is_some() {
+                return Err(crate::usage());
+            }
+            Ok(Command::Impact(parsed))
+        }
         _ => Err(crate::usage()),
     }
 }

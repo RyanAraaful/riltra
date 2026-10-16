@@ -1562,3 +1562,374 @@ fn task5_trace_full_json_goldens() {
         serde_json::from_str(include_str!("golden/m6-trace-scip.json")).unwrap();
     assert_eq!(semantic, expected);
 }
+
+fn impact_json(h: &Path, line: usize, extra: &[&str]) -> serde_json::Value {
+    let line = line.to_string();
+    let mut args = vec![
+        "impact", "--repo", "sem", "--path", "graph.py", "--line", &line, "--col", "6",
+    ];
+    args.extend_from_slice(extra);
+    let (code, out, err) = run(h, &args);
+    assert_eq!(code, 0, "{out} {err}");
+    serde_json::from_str(&out).expect("impact JSON")
+}
+
+fn assert_unknown_impact(v: &serde_json::Value) {
+    assert_eq!(v["verdict"], "UNKNOWN", "{v}");
+    assert_eq!(v["completeness"]["status"], "partial", "{v}");
+    assert!(!v.to_string().contains("\"SAFE\""));
+    assert!(!v.to_string().contains("\"LOW\""));
+}
+
+#[test]
+fn task6_impact_direct_and_transitive_are_proven_without_reindex() {
+    let h = home("impact-chain");
+    let lines = trace_fixture(&h, &[vec![1], vec![2], vec![]]);
+    let v = impact_json(&h, lines[2], &[]);
+    assert_eq!(v["direction"], "impact");
+    assert_eq!(v["verdict"], "HIGH");
+    assert_eq!(v["verification"], "Unverified");
+    assert_eq!(v["completeness"]["status"], "partial");
+    assert_eq!(v["paths"].as_array().unwrap().len(), 2);
+    assert_eq!(v["paths"][0]["edges"].as_array().unwrap().len(), 1);
+    assert_eq!(v["paths"][1]["edges"].as_array().unwrap().len(), 2);
+    assert_eq!(v["paths"][0]["scope"], "direct");
+    assert_eq!(v["paths"][1]["scope"], "transitive");
+    assert_eq!(v["paths"][1]["distance"], 2);
+    assert_eq!(v["paths"][0]["edges"][0]["callee_name"], "f2");
+    assert_eq!(v["paths"][1]["edges"][1]["callee_name"], "f1");
+    for path in v["paths"].as_array().unwrap() {
+        for edge in path["edges"].as_array().unwrap() {
+            assert_eq!(edge["kind"], "CALLS");
+            assert_eq!(edge["precision"], "Exact");
+            assert_eq!(edge["evidence"]["imports"][0]["provider"], "trace");
+        }
+    }
+    assert_eq!(v["disclaimer"], "plausible-impact-not-execution");
+    assert_eq!(v, impact_json(&h, lines[2], &[]));
+}
+
+#[test]
+fn task6_impact_zero_false_safe_syntax_corpus() {
+    let cases = [
+        ("leaf", "def f0():\n    pass\n"),
+        ("recursion", "def f0():\n    f0()\n"),
+        ("cycle", "def f0():\n    f1()\n\ndef f1():\n    f0()\n"),
+        ("dynamic", "def f0():\n    obj.run()\n"),
+        ("missing", "def f0():\n    missing()\n"),
+        (
+            "same-name",
+            "def f0():\n    pass\n\nclass C:\n    def f0(self):\n        pass\n",
+        ),
+        ("owner-unproven", "def f0():\n    pass\n\nf0()\n"),
+        ("alias", "def f0():\n    pass\n\na = f0\na()\n"),
+    ];
+    for (name, source) in cases {
+        let h = home(&format!("impact-corpus-{name}"));
+        repo_with(&h, "sem", &[("graph.py", source)]);
+        do_index(&h);
+        let v = impact_json(&h, 1, &[]);
+        assert_unknown_impact(&v);
+        assert_eq!(v["anchor"]["kind"], "syntax-fallback");
+        assert!(
+            v["paths"].as_array().unwrap().is_empty(),
+            "no name linking: {v}"
+        );
+    }
+}
+
+#[test]
+fn task6_impact_unknown_for_stale_depth_and_coverage_gaps() {
+    for kind in ["stale", "depth", "unsupported", "missing-provider", "leaf"] {
+        let h = home(&format!("impact-unknown-{kind}"));
+        let lines = trace_fixture(&h, &[vec![1], vec![2], vec![]]);
+        let dir = h.join("sem");
+        match kind {
+            "stale" => {
+                let mut source = std::fs::read_to_string(dir.join("graph.py")).unwrap();
+                source.push_str("# edited\n");
+                std::fs::write(dir.join("graph.py"), source).unwrap();
+            }
+            "unsupported" => {
+                std::fs::write(dir.join("unknown.xyz"), "unsupported code").unwrap();
+                do_index(&h);
+            }
+            "missing-provider" => {
+                std::fs::write(dir.join("extra.py"), "def extra():\n    pass\n").unwrap();
+                do_index(&h);
+            }
+            _ => {}
+        }
+        let extra = if kind == "depth" {
+            vec!["--depth", "1"]
+        } else {
+            vec![]
+        };
+        let line = if kind == "leaf" { lines[0] } else { lines[2] };
+        let v = impact_json(&h, line, &extra);
+        assert_unknown_impact(&v);
+        if kind == "stale" {
+            assert_eq!(v["verification"], "Stale");
+        }
+        if kind == "depth" {
+            assert_eq!(v["truncated"], true);
+        }
+        if kind == "unsupported" || kind == "missing-provider" {
+            let field = if kind == "unsupported" {
+                "unsupported_files"
+            } else {
+                "missing_provider_files"
+            };
+            assert_eq!(v["completeness"]["denominator"][field], 1, "{v}");
+        }
+    }
+}
+
+#[test]
+fn task6_impact_cycles_diamond_pagination_and_empty_pages() {
+    let h = home("impact-diamond");
+    let lines = trace_fixture(&h, &[vec![1, 2], vec![3], vec![3], vec![]]);
+    let full = impact_json(&h, lines[3], &[]);
+    assert_eq!(full["verdict"], "HIGH");
+    assert_eq!(full["paths"].as_array().unwrap().len(), 4);
+    let first = impact_json(&h, lines[3], &["--limit", "1"]);
+    assert_unknown_impact(&first);
+    assert_eq!(first["limits"]["next_offset"], 1);
+    let next = impact_json(&h, lines[3], &["--offset", "1"]);
+    assert_eq!(first["paths"][0], full["paths"][0]);
+    assert_eq!(next["paths"][0], full["paths"][1]);
+    let empty = impact_json(&h, lines[3], &["--offset", "4"]);
+    assert_unknown_impact(&empty);
+    assert_eq!(empty["paths"], serde_json::json!([]));
+    let h = home("impact-cycle");
+    trace_fixture(&h, &[vec![1], vec![0]]);
+    let cycle = impact_json(&h, 1, &[]);
+    assert_eq!(cycle["cycle"], true);
+    assert_eq!(cycle["verdict"], "HIGH");
+    assert!(cycle["visits"]["nodes"].as_u64().unwrap() <= 500);
+}
+
+#[test]
+fn task6_impact_reference_unknown_owner_retains_site_evidence() {
+    let h = home("impact-reference");
+    let dir = repo_with(
+        &h,
+        "sem",
+        &[("graph.py", "def f0():\n    pass\n\nx = f0\n")],
+    );
+    do_index(&h);
+    let uri = "scip-test test test-pkg 1.0.0 graph.py/f0().";
+    import_documents(
+        &h,
+        &dir,
+        "refs",
+        &[test_document(
+            "graph.py",
+            &[occurrence(uri, 1, 0, 4, 6), occurrence(uri, 0, 3, 4, 6)],
+            &[(uri, "f0")],
+        )],
+    );
+    let v = impact_json(&h, 1, &[]);
+    assert_unknown_impact(&v);
+    assert_eq!(v["paths"][0]["edges"][0]["kind"], "REFERENCES");
+    assert!(v["paths"][0]["edges"][0]["caller"].is_null());
+    assert_eq!(
+        v["paths"][0]["edges"][0]["evidence"]["span"],
+        serde_json::json!([24, 26])
+    );
+}
+
+#[test]
+fn task6_impact_unmapped_midpoint_is_explicitly_unknown() {
+    let h = home("impact-midpoint");
+    let dir = repo_with(
+        &h,
+        "sem",
+        &[("graph.py", "def f0():\n    f1()\n\ndef f1():\n    pass\n")],
+    );
+    do_index(&h);
+    let uri = "scip-test test test-pkg 1.0.0 graph.py/f1().";
+    // Target proof exists, callable owner has syntax identity only. Its name
+    // cannot bridge to a semantic definition absent from this import.
+    import_documents(
+        &h,
+        &dir,
+        "midpoint",
+        &[test_document(
+            "graph.py",
+            &[occurrence(uri, 0, 1, 4, 6), occurrence(uri, 1, 3, 4, 6)],
+            &[(uri, "f1")],
+        )],
+    );
+    let v = impact_json(&h, 4, &[]);
+    assert_unknown_impact(&v);
+    assert_eq!(v["paths"][0]["edges"][0]["kind"], "CALLS");
+    assert!(v["unresolved"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|r| r == "semantic-midpoint-unavailable"));
+}
+
+#[test]
+fn task6_impact_ambiguous_semantic_dispatch_counts_unknowns() {
+    let h = home("impact-ambiguous");
+    let dir = repo_with(
+        &h,
+        "sem",
+        &[(
+            "graph.py",
+            "def f0():\n    f1()\n\ndef f1():\n    pass\n\ndef f2():\n    pass\n",
+        )],
+    );
+    do_index(&h);
+    let uris: Vec<_> = (0..3)
+        .map(|n| format!("scip-test test test-pkg 1.0.0 graph.py/f{n}()."))
+        .collect();
+    import_documents(
+        &h,
+        &dir,
+        "ambiguous",
+        &[test_document(
+            "graph.py",
+            &[
+                occurrence(&uris[0], 1, 0, 4, 6),
+                occurrence(&uris[1], 0, 1, 4, 6),
+                occurrence(&uris[2], 0, 1, 4, 6),
+                occurrence(&uris[1], 1, 3, 4, 6),
+                occurrence(&uris[2], 1, 6, 4, 6),
+            ],
+            &[(&uris[0], "f0"), (&uris[1], "f1"), (&uris[2], "f2")],
+        )],
+    );
+    let v = impact_json(&h, 4, &[]);
+    assert_unknown_impact(&v);
+    assert_eq!(v["completeness"]["denominator"]["ambiguous_calls"], 1);
+    assert_eq!(v["completeness"]["denominator"]["unresolved_target"], 1);
+    assert_eq!(v["paths"], serde_json::json!([]));
+}
+
+#[test]
+fn task6_impact_owner_mapping_import_and_local_scope() {
+    let h = home("impact-bridge");
+    let lines = trace_fixture(&h, &[vec![1], vec![]]);
+    let fallback = impact_json(&h, lines[1], &["--line", "5", "--col", "1"]);
+    assert_unknown_impact(&fallback);
+    assert_eq!(fallback["paths"][0]["edges"][0]["kind"], "CALLS");
+    assert!(!fallback["bridges"].as_array().unwrap().is_empty());
+    let f0 = "scip-test test test-pkg 1.0.0 graph.py/f0().";
+    let f1 = "scip-test test test-pkg 1.0.0 graph.py/f1().";
+    import_documents(
+        &h,
+        &h.join("sem"),
+        "second",
+        &[test_document(
+            "graph.py",
+            &[
+                occurrence(f0, 1, 0, 4, 6),
+                occurrence(f1, 0, 1, 4, 6),
+                occurrence(f1, 1, 3, 4, 6),
+            ],
+            &[(f0, "f0"), (f1, "f1")],
+        )],
+    );
+    let ambiguous = impact_json(&h, 5, &["--col", "1"]);
+    assert_unknown_impact(&ambiguous);
+    assert_eq!(ambiguous["paths"], serde_json::json!([]));
+    let (code, _, err) = run(
+        &h,
+        &[
+            "impact", "--repo", "sem", "--path", "graph.py", "--line", "4", "--col", "6",
+        ],
+    );
+    assert_eq!(code, 3);
+    assert!(err.contains("ambiguous"));
+
+    let h = home("impact-local");
+    let src = "def f0():\n    f0()\n";
+    let dir = repo_with(&h, "sem", &[("graph.py", src), ("other.py", src)]);
+    do_index(&h);
+    let doc = |p| {
+        test_document(
+            p,
+            &[
+                occurrence("local f0", 1, 0, 4, 6),
+                occurrence("local f0", 0, 1, 4, 6),
+            ],
+            &[("local f0", "f0")],
+        )
+    };
+    import_documents(&h, &dir, "locals", &[doc("graph.py"), doc("other.py")]);
+    let v = impact_json(&h, 1, &[]);
+    assert_eq!(v["verdict"], "HIGH");
+    assert_eq!(v["visits"]["nodes"], 1);
+    assert_eq!(v["paths"].as_array().unwrap().len(), 1);
+    assert_eq!(v["paths"][0]["edges"][0]["caller"]["doc"], "graph.py");
+}
+
+#[test]
+fn task6_impact_rejects_bad_bounds_destination_and_escaping_path() {
+    let h = home("impact-args");
+    trace_fixture(&h, &[vec![]]);
+    for extra in [
+        vec!["--depth", "0"],
+        vec!["--depth", "7"],
+        vec!["--limit", "1001"],
+        vec!["--to", "graph.py:1:6"],
+    ] {
+        let mut args = vec![
+            "impact", "--repo", "sem", "--path", "graph.py", "--line", "1", "--col", "6",
+        ];
+        args.extend(extra);
+        assert_eq!(run(&h, &args).0, 2);
+    }
+    assert_eq!(
+        run(
+            &h,
+            &[
+                "impact",
+                "--repo",
+                "sem",
+                "--path",
+                "../outside.py",
+                "--line",
+                "1",
+                "--col",
+                "6"
+            ]
+        )
+        .0,
+        3
+    );
+}
+
+#[test]
+fn task6_impact_full_json_goldens() {
+    let h = home("impact-golden-syntax");
+    repo_with(
+        &h,
+        "sem",
+        &[(
+            "graph.py",
+            "def f0():\n    f1()\n\ndef f1():\n    f2()\n\ndef f2():\n    pass\n\n",
+        )],
+    );
+    do_index(&h);
+    let syntax = normalized_edge_json(impact_json(&h, 7, &[]));
+    let expected: serde_json::Value =
+        serde_json::from_str(include_str!("golden/m6-impact-syntax.json")).unwrap();
+    assert_eq!(syntax, expected);
+    let h = home("impact-golden-scip");
+    trace_fixture(&h, &[vec![1], vec![2], vec![]]);
+    for (extra, golden) in [
+        (vec![], include_str!("golden/m6-impact-scip.json")),
+        (
+            vec!["--depth", "1"],
+            include_str!("golden/m6-impact-truncated.json"),
+        ),
+    ] {
+        let actual = normalized_edge_json(impact_json(&h, 7, &extra));
+        let expected: serde_json::Value = serde_json::from_str(golden).unwrap();
+        assert_eq!(actual, expected);
+    }
+}

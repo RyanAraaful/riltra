@@ -155,11 +155,11 @@ Semantics (locked): `trace --to PATH:LINE:COL` = destination-anchored BFS (paths
 
 Rule (locked, early-M6): verdict ∈ {HIGH, MEDIUM, UNKNOWN}; `LOW`/`SAFE` are never returned (no completeness proof exists yet). `UNKNOWN` whenever the closure contains ANY of: POTENTIAL_CALL, unresolved owner/target, dynamic, ambiguous, truncated traversal, stale verification, unsupported-language files, or missing-provider files in scope — AND whenever no observed impact evidence exists at all (a clean leaf with zero observed relations yields `UNKNOWN`, never `MEDIUM`). `HIGH`/`MEDIUM` only on observed `CALLS`/`REFERENCES` relations with partial-but-informative coverage.
 
-- [ ] **Step 1: Write failing tests** — recursion/cycle/dynamic/missing/stale/unsupported-language/missing-provider/truncated cases all yield `HIGH` or `UNKNOWN`, zero yield `SAFE`/`LOW`/`MEDIUM`-without-evidence; clean leaf with zero observed relations yields `UNKNOWN` (not `MEDIUM`); observed-relation cases yield `HIGH`/`MEDIUM`; denominator counts in `completeness.denominator` match the injected unknowns exactly.
-- [ ] **Step 2: Run to verify they fail** — Run: `cargo test --locked --test edges` Expected: FAIL.
-- [ ] **Step 3: Implement reverse-BFS + verdict** with denominator accounting (every unknown class increments its counter; `complete` requires all-zero + fresh + untruncated).
-- [ ] **Step 4: Re-run** — Run: `cargo test --locked --test edges` Expected: PASS, zero false-safe on corpus.
-- [ ] **Step 5: Commit** — `git add crates/cli/src/edges.rs crates/cli/src/index.rs crates/cli/src/main.rs crates/cli/tests/edges.rs && git commit -m "m6: impact analysis with UNKNOWN-first no-false-safe rule"`
+- [x] **Step 1: Write failing tests** — mandatory zero-false-safe corpus, proven direct/transitive paths, plain references with unknown owners, mapping/import/document isolation, exact injected coverage counts, budgets, pagination, full JSON goldens and actual promotion concurrency. Clean leaves explicitly UNKNOWN. See `docs/m6-task6-validation.md`.
+- [x] **Step 2: Run to verify they fail** — five initial CLI cases failed on missing `impact`; subsequent RED/GREEN reproduced HIGH at an unbridged syntax midpoint and missing direct/transitive metadata.
+- [x] **Step 3: Implement reverse-BFS + verdict** — shared Task 5 query transaction/evidence and bounded traversal primitives, UNKNOWN priority, no SAFE/LOW, exact counters for injected gaps. Impact completeness always partial with `graph-completeness-unproven`, even for an exhausted observed graph. Depth/node/time and extra work bounds retain Task 5 semantics; cooperative deadline limitation documented.
+- [x] **Step 4: Re-run** — all 50 edge integration tests and all 312 locked tests pass; fmt/check/Clippy/build, real CLI smoke and independent review pass. Zero SAFE/LOW in the corpus; insufficient evidence cases UNKNOWN.
+- [x] **Step 5: Commit** — signed local checkpoint `m6: impact analysis with UNKNOWN-first no-false-safe rule`, including args, tests, three goldens and `docs/m6-task6-validation.md`. Stop for Task 6 audit; no push or Task 7–8 execution.
 
 ### Task 7: Tier A golden corpus (4 languages × mandatory cases)
 
@@ -190,7 +190,7 @@ Pilot: one TS fixture repo via scip-typescript 0.4.0 (import + `callers` spot-ch
 ## Acceptance Gates
 
 - `cargo fmt/check/clippy/test` green locally + CI Windows/Ubuntu/macOS green.
-- Tier A: full matrix green (py/ts/rs/c mandatory cases); impact corpus zero false-safe (`SAFE`/`LOW` never emitted; clean leaf asserts `MEDIUM`, not `LOW`).
+- Tier A: full matrix green (py/ts/rs/c mandatory cases); impact corpus zero false-safe (`SAFE`/`LOW` never emitted; clean leaf asserts `UNKNOWN`, per the locked Task 6 rule).
 - Tier B: TS SCIP CALLS demonstrated via index → import → callers with no reindex; Rust LSP refs never claimed as CALLS (paired, no contention).
 - Lifecycle: import-failure rollback, noop/delta/full parity, target-change re-derivation, and import-vs-promotion race tests green.
 - Migration: v1/v2/v3→v4 chains green; fresh-DB single-build green (no double-ALTER); NULL-callee re-extraction covered.
@@ -216,5 +216,5 @@ What changed vs the first draft, and which correction each closes:
 2. CALLS proof (P0): terminal-identifier split, matching-occurrence + same-import target definition, callable-owner rule, LSP-never-CALLS — Decisions 1–2, Task 1/3 tests.
 3. Edge identity (P0): `EdgeKey` (SCIP `import_id+uri+doc` / syntax file+range) + inbound/outbound indexes matching query patterns — Interfaces, Decision 5 visited keys.
 4. Migration/incremental (P0): guarded ALTER, v1/v2/v3 chains, NULL-callee re-extraction, safe-recompute default — Task 2, Gates.
-5. Impact/completeness (P0): denominator definition, UNKNOWN-first, no LOW/SAFE in M6, clean-leaf→MEDIUM — Decisions 4/6, Task 6, Gates.
+5. Impact/completeness (P0): denominator definition, UNKNOWN-first, no LOW/SAFE in M6, clean-leaf→UNKNOWN — Decisions 4/6, Task 6, Gates. Corrected the earlier contradictory revision note at the Task 6 checkpoint.
 6. CLI anchor/trace (P0): `syntax-fallback` anchor with explicit uncertainty, `--to` semantics, deterministic pagination, single-filter test commands — Decision 4, Task 4/5.
