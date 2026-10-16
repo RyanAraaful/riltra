@@ -411,10 +411,12 @@ fn parse_measurement(value: &JVal, path: &str) -> Result<BenchmarkData, String> 
     let sample_count = match find(obj, "sample_count") {
         None => return Err(format!("missing required field `{path}.sample_count`")),
         Some(JVal::Int(i)) if *i > 0 => *i as u64,
-        Some(JVal::UInt(u)) if *u > 0 => *u,
+        // SQLite stores integers signed: cap the accepted range before any
+        // write transaction starts rather than failing mid-commit.
+        Some(JVal::UInt(u)) if *u > 0 && *u <= i64::MAX as u64 => *u,
         Some(_) => {
             return Err(format!(
-                "field `{path}.sample_count` must be a positive integer"
+                "field `{path}.sample_count` must be a positive integer in range"
             ));
         }
     };
@@ -756,6 +758,20 @@ mod tests {
             r#"{"method":"m","environment":"e","sample_count":10,"metrics":{"m":{"value":1.0,"unit":"ms"}}}"#,
         );
         assert!(validate_create_json(good.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn knowledge_json_sample_count_range() {
+        let base = |sample: &str| {
+            format!(
+                "{{\"id\":\"b1\",\"kind\":\"benchmark\",\"title\":\"t\",\"body\":\"b\",\"status\":\"active\",\"author\":\"r\",\"evidence\":[],\"measurement\":{{\"method\":\"m\",\"environment\":\"e\",\"sample_count\":{sample},\"metrics\":{{\"m\":{{\"value\":1.0,\"unit\":\"ms\"}}}}}}}}"
+            )
+        };
+        // i64::MAX is representable as a SQLite signed integer: accepted.
+        assert!(validate_create_json(base("9223372036854775807").as_bytes()).is_ok());
+        // i64::MAX + 1 is not: rejected before any write transaction starts.
+        let err = validate_create_json(base("9223372036854775808").as_bytes()).unwrap_err();
+        assert!(err.contains("range"), "unexpected: {err}");
     }
 
     #[test]

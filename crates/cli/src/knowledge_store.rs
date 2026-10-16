@@ -766,6 +766,12 @@ fn update_inner(
             |row| row.get(0),
         )
         .map_err(|e| format!("cannot read record kind: {e}"))?;
+    // The immutable kind decides measurement eligibility inside the
+    // transaction, before any mutation: only benchmark revisions may carry
+    // measurement, whether supplied or carried forward.
+    if kind != "benchmark" && measurement.is_some() {
+        return Err("measurement is only valid for benchmark records".to_string());
+    }
     let next_i64 = current
         .checked_add(1)
         .ok_or_else(|| "knowledge revision counter overflow".to_string())?;
@@ -1375,10 +1381,10 @@ mod tests {
     #[test]
     fn knowledge_store_open_non_utf8_home_supported() {
         use std::os::unix::ffi::OsStringExt;
-        let mut raw = std::env::temp_dir().into_os_string();
-        raw.push(format!("/riltra-m7-nonutf-{}-", std::process::id()));
-        raw.extend([0x66u8, 0x6f, 0x80, 0x6f]);
-        let home = PathBuf::from(raw);
+        let mut bytes = std::env::temp_dir().into_os_string().into_vec();
+        bytes.extend_from_slice(format!("/riltra-m7-nonutf-{}-", std::process::id()).as_bytes());
+        bytes.extend_from_slice(&[0x66u8, 0x6f, 0x80, 0x6f]);
+        let home = PathBuf::from(std::ffi::OsString::from_vec(bytes));
         let _ = std::fs::remove_dir_all(&home);
         let root = tmpdir("m7-root");
         let repo = RepoEntry {
@@ -2079,6 +2085,43 @@ mod tests {
         let shown = show_record(&conn, "b1", None).unwrap();
         assert_eq!(shown.measurement.as_ref().unwrap().sample_count, 10);
         conn.close().unwrap();
+    }
+
+    #[test]
+    fn knowledge_records_measurement_rejected_on_non_benchmark_update() {
+        for kind in ["decision", "constraint"] {
+            let (home, repo) = setup(&format!("nomeasure-{kind}"));
+            let mut conn = open_rw(&home, &repo);
+            let raw = format!(
+                "{{\"id\":\"d1\",\"kind\":\"{kind}\",\"title\":\"t\",\"body\":\"b\",\"status\":\"active\",\"author\":\"r\",\"evidence\":[]}}"
+            );
+            let input = validate_create_json(raw.as_bytes()).unwrap();
+            create_validated(&mut conn, &input).unwrap();
+            let gen_before = read_generation(&conn).unwrap();
+            // A fully valid measurement is still refused on non-benchmarks.
+            let raw2 = r#"{"title":"t2","body":"b","status":"active","author":"r","evidence":[],
+                "measurement":{"method":"m","environment":"e","sample_count":10,
+                "metrics":{"m":{"value":1.0,"unit":"ms"}}}}"#;
+            let update = validate_update_json(raw2.as_bytes()).unwrap();
+            let err = update_validated(&mut conn, "d1", 1, &update).unwrap_err();
+            assert!(err.contains("measurement"), "{kind}: unexpected: {err}");
+            // No head, revision, FTS or generation change.
+            assert_eq!(show_record(&conn, "d1", None).unwrap().revision, 1);
+            assert_eq!(history(&conn, "d1", 50, 0, None).unwrap().total, 1);
+            assert_eq!(read_generation(&conn).unwrap(), gen_before);
+            let hits: i64 = conn
+                .query_row(
+                    "SELECT count(*) FROM knowledge_fts WHERE knowledge_fts MATCH 't2'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                hits, 0,
+                "{kind}: refused update must not leak into the index"
+            );
+            conn.close().unwrap();
+        }
     }
 
     #[test]
