@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! M6 graph edges (Task 3): taxonomy, callable-owner resolution, derivation.
 //! Syntax builds derive `IMPORTS` + syntax-only `POTENTIAL_CALL`; the SCIP
-//! import transaction upserts semantic-backed edges without reparsing;
+//! import transaction upserts semantic-backed edges with source proof;
 //! rebuilds re-derive after semantic carry-over. Traversal (Task 5) and
 //! queries (Task 4) build on the `EdgeEndpoint` identity defined in
 //! `store.rs`: endpoints link only through validated evidence, never names.
@@ -86,6 +86,51 @@ fn owner_of(
         .min_by_key(|s| s.byte_end - s.byte_start)
 }
 
+/// Query code never reparses source. Derivation validates missing declaration
+/// and scope evidence from confined, digest-matching bytes, once per file in
+/// this derivation. Failure is uncertainty, never permission to guess.
+fn source_proofs(
+    conn: &rusqlite::Connection,
+    snapshot: i64,
+) -> Result<BTreeMap<i64, crate::syntax::RelationshipProof>, String> {
+    let root: String = conn
+        .query_row("SELECT root FROM snapshots WHERE id=?1", [snapshot], |r| {
+            r.get(0)
+        })
+        .map_err(|e| e.to_string())?;
+    let mut proofs = BTreeMap::new();
+    let Ok(root) = std::path::Path::new(&root).canonicalize() else {
+        return Ok(proofs);
+    };
+    for (path, (id, digest)) in store::file_id_map(conn, snapshot)? {
+        let crate::syntax::FileKind::Supported(lang) =
+            crate::syntax::classify(std::path::Path::new(&path))
+        else {
+            continue;
+        };
+        if let Ok(raw) = crate::semantic::confined_read(&root, &path, crate::scan::MAX_FILE_BYTES) {
+            if store::content_digest(&raw) == digest {
+                proofs.insert(id, crate::syntax::relationship_proof(lang, &raw));
+            }
+        }
+    }
+    Ok(proofs)
+}
+
+fn call_owner<'a>(
+    symbols: &'a [store::SymbolRow],
+    call: &store::CallRow,
+    proofs: &BTreeMap<i64, crate::syntax::RelationshipProof>,
+) -> Option<&'a store::SymbolRow> {
+    let bounds = proofs
+        .get(&call.file_id)?
+        .owners
+        .get(&(call.byte_start, call.byte_end))?
+        .as_ref()?;
+    owner_of(symbols, call.file_id, call.byte_start)
+        .filter(|s| (s.byte_start, s.byte_end) == *bounds)
+}
+
 /// Terminal identifier/property of a dotted callee name. ASCII separators
 /// only, mirroring `syntax::terminal_span` byte arithmetic.
 fn terminal_of(name: &str) -> &str {
@@ -124,6 +169,7 @@ pub fn derive_syntax_edges(
     snapshot_id: i64,
 ) -> Result<Vec<EdgeRow>, String> {
     let symbols = store::symbols_for(conn, snapshot_id)?;
+    let proofs = source_proofs(conn, snapshot_id)?;
     let calls = store::calls_for(conn, snapshot_id)?;
     let imports = store::imports_for(conn, snapshot_id)?;
     let id_map = store::file_id_map(conn, snapshot_id)?;
@@ -158,7 +204,7 @@ pub fn derive_syntax_edges(
     }
     for call in &calls {
         let path = path_of.get(&call.file_id).copied().unwrap_or("?");
-        let owner = owner_of(&symbols, call.file_id, call.byte_start);
+        let owner = call_owner(&symbols, call, &proofs);
         let caller = owner.map(|o| EdgeEndpoint::SyntaxDef {
             path: path.to_string(),
             byte_start: o.byte_start,
@@ -241,6 +287,7 @@ pub fn upsert_semantic_edges(
         return Ok(EdgeStats::default());
     }
     let facts = store::semantic_facts_of_import(conn, snapshot_id, import_id)?;
+    let proofs = source_proofs(conn, snapshot_id)?;
     let symbols = store::symbols_for(conn, snapshot_id)?;
     let calls = store::calls_for(conn, snapshot_id)?;
     let id_map = store::file_id_map(conn, snapshot_id)?;
@@ -334,7 +381,7 @@ pub fn upsert_semantic_edges(
         if terminal_hits.len() == 1 {
             let call = terminal_hits[0];
             let path = path_of.get(&call.file_id).copied().unwrap_or("?");
-            let owner = owner_of(&symbols, call.file_id, call.byte_start);
+            let owner = call_owner(&symbols, call, &proofs);
             let site = (call.file_id, call.byte_start, call.byte_end);
             if !terminal_sites.insert(site) {
                 continue;
@@ -370,8 +417,21 @@ pub fn upsert_semantic_edges(
             }
             let external = fact.external;
             let def = def_for(uri, &fact.rel_path);
+            // A reference to a variable/alias binding is not proof of the
+            // callable that executes. Require a source-bound callable
+            // definition at the producer's target span, never a name join.
+            let callable_target = def.is_some_and(|d| {
+                fid_of
+                    .get(d.rel_path.as_str())
+                    .and_then(|id| proofs.get(id))
+                    .is_some_and(|p| {
+                        p.declarations.iter().any(|(a, b)| {
+                            *a <= d.byte_start && d.byte_start < d.byte_end && d.byte_end <= *b
+                        })
+                    })
+            });
             match (owner, def, external) {
-                (Some(o), Some(_), false) => {
+                (Some(o), Some(_), false) if callable_target => {
                     // Proven call: overlapping reference of the resolved
                     // target + proven callable owner. The caller endpoint
                     // unifies to the owner's SCIP identity when the owner
@@ -412,6 +472,8 @@ pub fn upsert_semantic_edges(
                         "external"
                     } else if owner.is_none() {
                         "owner-unproven"
+                    } else if def.is_some() && !callable_target {
+                        "target-unproven"
                     } else {
                         "unresolved"
                     };
@@ -438,7 +500,7 @@ pub fn upsert_semantic_edges(
             let n = terminal_hits.len();
             for call in &terminal_hits {
                 let path = path_of.get(&call.file_id).copied().unwrap_or("?");
-                let owner = owner_of(&symbols, call.file_id, call.byte_start);
+                let owner = call_owner(&symbols, call, &proofs);
                 let caller = owner.map(|o| EdgeEndpoint::SyntaxDef {
                     path: path.to_string(),
                     byte_start: o.byte_start,
@@ -460,7 +522,7 @@ pub fn upsert_semantic_edges(
         } else if !callee_hits.is_empty() {
             for call in callee_hits {
                 let path = path_of.get(&call.file_id).copied().unwrap_or("?");
-                let owner = owner_of(&symbols, call.file_id, call.byte_start);
+                let owner = call_owner(&symbols, call, &proofs);
                 let caller = owner.map(|o| EdgeEndpoint::SyntaxDef {
                     path: path.to_string(),
                     byte_start: o.byte_start,
@@ -1377,6 +1439,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn task7_changed_or_missing_source_cannot_prove_callable_owner() {
+        let conn = mem_db();
+        let snapshot = mk_snap(&conn);
+        ingest_py(&conn, snapshot, "a.py", b"def f():\n    missing()\n");
+        let initial = derive_syntax_edges(&conn, snapshot).unwrap();
+        assert!(initial[0].caller.is_some());
+        let root: String = conn
+            .query_row("SELECT root FROM snapshots WHERE id=?1", [snapshot], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let path = std::path::Path::new(&root).join("a.py");
+        std::fs::write(&path, b"def f():\n    different()\n").unwrap();
+        let changed = derive_syntax_edges(&conn, snapshot).unwrap();
+        assert!(changed[0].caller.is_none());
+        assert_eq!(changed[0].unresolved.as_deref(), Some("owner-unproven"));
+        std::fs::remove_file(path).unwrap();
+        let missing = derive_syntax_edges(&conn, snapshot).unwrap();
+        assert!(missing[0].caller.is_none());
+        assert_eq!(missing[0].unresolved.as_deref(), Some("owner-unproven"));
+    }
+
+    #[test]
     fn task6_impact_budget_guards_and_verdicts_never_claim_safety() {
         let (conn, snapshot, start) = trace_store(&[(1, 0), (2, 1), (3, 0)]);
         let full = traverse_impact(
@@ -1572,12 +1657,14 @@ mod tests {
     }
 
     fn mk_snap(conn: &rusqlite::Connection) -> i64 {
+        let root = std::env::temp_dir().join(format!("riltra-edge-source-{}", store::new_nonce()));
+        std::fs::create_dir_all(&root).unwrap();
         store::insert_snapshot(
             conn,
             &store::Snapshot {
                 id: 0,
                 repo: "r".to_string(),
-                root: "C:\\r".to_string(),
+                root: root.to_string_lossy().into_owned(),
                 created_unix: 1,
                 head: None,
                 branch: None,
@@ -1608,6 +1695,14 @@ mod tests {
 
     /// Ingest parsed Python facts exactly like `index::ingest_file`.
     fn ingest_py(conn: &rusqlite::Connection, snap: i64, path: &str, src: &[u8]) -> i64 {
+        let root: String = conn
+            .query_row("SELECT root FROM snapshots WHERE id=?1", [snap], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let source_path = std::path::Path::new(&root).join(path);
+        std::fs::create_dir_all(source_path.parent().unwrap()).unwrap();
+        std::fs::write(source_path, src).unwrap();
         let facts = crate::syntax::parse_source(crate::syntax::Language::Python, src);
         let fid = store::insert_file(
             conn,

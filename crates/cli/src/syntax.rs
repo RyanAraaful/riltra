@@ -187,12 +187,14 @@ fn def_name(node: tree_sitter::Node, src: &[u8]) -> Option<String> {
 /// `qualified_identifier` for `Scope::name` definitions, kept verbatim as an
 /// unresolved candidate). Bounded walk, `None` when anonymous.
 fn c_function_name(node: tree_sitter::Node, src: &[u8]) -> Option<String> {
+    c_name_node(node).and_then(|n| node_text(n, src).map(str::to_string))
+}
+
+fn c_name_node(node: tree_sitter::Node<'_>) -> Option<tree_sitter::Node<'_>> {
     let mut current = node.child_by_field_name("declarator")?;
     for _ in 0..6 {
         match current.kind() {
-            "identifier" | "field_identifier" | "qualified_identifier" => {
-                return node_text(current, src).map(|s| s.to_string())
-            }
+            "identifier" | "field_identifier" | "qualified_identifier" => return Some(current),
             "function_declarator"
             | "parenthesized_declarator"
             | "pointer_declarator"
@@ -223,6 +225,82 @@ fn c_function_name(node: tree_sitter::Node, src: &[u8]) -> Option<String> {
         }
     }
     None
+}
+
+/// Extra validation for relationship derivation, never new syntax facts.
+/// Whole-function ranges cannot identify a declaration token or distinguish
+/// a nested anonymous scope. All ranges index the digest-checked source.
+#[derive(Default)]
+pub struct RelationshipProof {
+    pub declarations: Vec<(usize, usize)>,
+    pub owners: std::collections::BTreeMap<(usize, usize), Option<(usize, usize)>>,
+}
+
+pub fn relationship_proof(lang: Language, src: &[u8]) -> RelationshipProof {
+    fn callable(node: tree_sitter::Node<'_>) -> bool {
+        matches!(
+            node.kind(),
+            "function_definition" | "function_declaration" | "function_item" | "method_definition"
+        )
+    }
+    fn name(node: tree_sitter::Node<'_>) -> Option<tree_sitter::Node<'_>> {
+        node.child_by_field_name("name")
+            .or_else(|| c_name_node(node))
+    }
+    let mut proof = RelationshipProof::default();
+    let mut parser = tree_sitter::Parser::new();
+    if parser.set_language(&ts_language(lang)).is_err() {
+        return proof;
+    }
+    let Some(tree) = parser.parse(src, None) else {
+        return proof;
+    };
+    if tree.root_node().has_error() {
+        return proof;
+    }
+    let mut pending = vec![tree.root_node()];
+    while let Some(node) = pending.pop() {
+        if callable(node) {
+            if let Some(n) = name(node) {
+                proof.declarations.push((n.start_byte(), n.end_byte()));
+            }
+        }
+        if matches!(node.kind(), "call" | "call_expression") {
+            let mut parent = node.parent();
+            let mut owner = None;
+            while let Some(p) = parent {
+                if callable(p) && name(p).is_some() {
+                    owner = Some((p.start_byte(), p.end_byte()));
+                    break;
+                }
+                if matches!(
+                    p.kind(),
+                    "lambda"
+                        | "lambda_expression"
+                        | "arrow_function"
+                        | "closure_expression"
+                        | "function_expression"
+                        | "generator_function"
+                        | "class_definition"
+                        | "class_declaration"
+                        | "class_specifier"
+                        | "struct_specifier"
+                ) {
+                    break;
+                }
+                parent = p.parent();
+            }
+            proof
+                .owners
+                .insert((node.start_byte(), node.end_byte()), owner);
+        }
+        for i in (0..node.named_child_count()).rev() {
+            if let Some(child) = node.named_child(i) {
+                pending.push(child);
+            }
+        }
+    }
+    proof
 }
 
 fn push_def(facts: &mut FileFacts, kind: &'static str, node: tree_sitter::Node, src: &[u8]) {

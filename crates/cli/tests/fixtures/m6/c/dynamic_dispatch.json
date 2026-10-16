@@ -1,0 +1,61 @@
+{
+  "file": "dynamic_dispatch.c",
+  "symbols": [
+    {
+      "id": "t",
+      "name": "target",
+      "uri": "scip-test test corpus 1.0.0 dynamic_dispatch.c/t()."
+    },
+    {
+      "id": "c",
+      "name": "caller",
+      "uri": "scip-test test corpus 1.0.0 dynamic_dispatch.c/c()."
+    },
+    {
+      "id": "o",
+      "name": "obj",
+      "uri": "scip-test test corpus 1.0.0 dynamic_dispatch.c/o()."
+    }
+  ],
+  "occurrences": [
+    {
+      "id": "t",
+      "definition": true,
+      "line": 2,
+      "col": 4,
+      "end": 10,
+      "text": "target"
+    },
+    {
+      "id": "c",
+      "definition": true,
+      "line": 5,
+      "col": 4,
+      "end": 10,
+      "text": "caller"
+    },
+    {
+      "id": "o",
+      "definition": true,
+      "line": 5,
+      "col": 23,
+      "end": 26,
+      "text": "obj"
+    },
+    {
+      "id": "o",
+      "definition": false,
+      "line": 6,
+      "col": 11,
+      "end": 14,
+      "text": "obj"
+    }
+  ],
+  "target": "t",
+  "callees_calls": 0,
+  "inbound_calls": 0,
+  "inbound_references": 0,
+  "impact": "UNKNOWN",
+  "stale": false,
+  "notes": "Only receiver/base occurrence has semantic proof. It must not prove a terminal member call."
+}

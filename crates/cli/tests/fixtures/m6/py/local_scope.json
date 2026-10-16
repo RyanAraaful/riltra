@@ -1,0 +1,48 @@
+{
+  "file": "local_scope.py",
+  "symbols": [
+    {
+      "id": "c",
+      "name": "caller",
+      "uri": "scip-test test corpus 1.0.0 local_scope.py/c()."
+    },
+    {
+      "id": "t",
+      "name": "target",
+      "uri": "local t"
+    }
+  ],
+  "occurrences": [
+    {
+      "id": "c",
+      "definition": true,
+      "line": 1,
+      "col": 4,
+      "end": 10,
+      "text": "caller"
+    },
+    {
+      "id": "t",
+      "definition": true,
+      "line": 2,
+      "col": 8,
+      "end": 14,
+      "text": "target"
+    },
+    {
+      "id": "t",
+      "definition": false,
+      "line": 4,
+      "col": 11,
+      "end": 17,
+      "text": "target"
+    }
+  ],
+  "target": "t",
+  "callees_calls": 1,
+  "inbound_calls": 1,
+  "inbound_references": 0,
+  "impact": "HIGH",
+  "stale": false,
+  "notes": "Target uses a document-scoped local SCIP identity. C/C++ use file-local static functions."
+}

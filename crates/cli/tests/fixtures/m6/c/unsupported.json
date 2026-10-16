@@ -1,0 +1,40 @@
+{
+  "file": "unsupported.c",
+  "symbols": [
+    {
+      "id": "t",
+      "name": "target",
+      "uri": "scip-test test corpus 1.0.0 unsupported.c/t()."
+    },
+    {
+      "id": "c",
+      "name": "caller",
+      "uri": "scip-test test corpus 1.0.0 unsupported.c/c()."
+    }
+  ],
+  "occurrences": [
+    {
+      "id": "t",
+      "definition": true,
+      "line": 1,
+      "col": 4,
+      "end": 10,
+      "text": "target"
+    },
+    {
+      "id": "c",
+      "definition": true,
+      "line": 5,
+      "col": 4,
+      "end": 10,
+      "text": "caller"
+    }
+  ],
+  "target": "t",
+  "callees_calls": 0,
+  "inbound_calls": 0,
+  "inbound_references": 0,
+  "impact": "UNKNOWN",
+  "stale": false,
+  "notes": "Macro expansion is explicitly out of scope. Test the raw syntax, never claim the expanded target call is resolved."
+}

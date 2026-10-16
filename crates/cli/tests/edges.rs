@@ -10,6 +10,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static COUNTER: AtomicU64 = AtomicU64::new(20_000);
 
+#[path = "m6_corpus/mod.rs"]
+mod task7;
+
 fn home(tag: &str) -> PathBuf {
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
     let mut p = std::env::temp_dir();

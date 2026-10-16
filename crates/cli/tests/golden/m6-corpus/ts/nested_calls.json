@@ -1,0 +1,1040 @@
+{
+  "callees": {
+    "anchor": {
+      "anchor_uncertainty": null,
+      "col": 10,
+      "endpoint": {
+        "byte_end": null,
+        "byte_start": null,
+        "doc": null,
+        "import_id": 1,
+        "path": null,
+        "symbol_uri": "scip-test test corpus 1.0.0 nested_calls.ts/c().",
+        "type": "scip"
+      },
+      "import_id": 1,
+      "kind": "semantic",
+      "line": 8,
+      "path": "nested_calls.ts",
+      "precision": "Heuristic",
+      "span": [
+        136,
+        142
+      ],
+      "symbol_uri": "scip-test test corpus 1.0.0 nested_calls.ts/c()."
+    },
+    "completeness": {
+      "covered": 2,
+      "denominator": {
+        "ambiguous_calls": 0,
+        "dynamic_calls": 0,
+        "missing_provider_files": 0,
+        "observed_edges": 2,
+        "parse_error_files": 0,
+        "skipped_files": 0,
+        "stale_imports": 0,
+        "truncated_branches": 0,
+        "unresolved_owner": 0,
+        "unresolved_target": 0,
+        "unsupported_files": 0
+      },
+      "status": "complete",
+      "total": 2,
+      "unresolved": []
+    },
+    "direction": "callees",
+    "edges": [
+      {
+        "callee": {
+          "byte_end": null,
+          "byte_start": null,
+          "doc": null,
+          "import_id": 1,
+          "path": null,
+          "symbol_uri": "scip-test test corpus 1.0.0 nested_calls.ts/u().",
+          "type": "scip"
+        },
+        "callee_name": "outer",
+        "caller": {
+          "byte_end": null,
+          "byte_start": null,
+          "doc": null,
+          "import_id": 1,
+          "path": null,
+          "symbol_uri": "scip-test test corpus 1.0.0 nested_calls.ts/c().",
+          "type": "scip"
+        },
+        "caller_path": "nested_calls.ts",
+        "caller_span": [
+          158,
+          173
+        ],
+        "evidence": {
+          "callee_span": [
+            158,
+            163
+          ],
+          "digest": "e76e6b24c22cd886",
+          "imports": [
+            {
+              "artifact_id": "<artifact>",
+              "content_identity": "afa6cc41595a3f94",
+              "id": 1,
+              "provider": "corpus",
+              "source_revision": "head=-|branch=-|dirty=false|untracked=0|cfg=1a92ea80d66dd56e|nonce=<nonce>",
+              "version": "1.0"
+            }
+          ],
+          "path": "nested_calls.ts",
+          "provider": "scip-import",
+          "reference_span": [
+            158,
+            163
+          ],
+          "span": [
+            158,
+            173
+          ],
+          "terminal_span": [
+            158,
+            163
+          ]
+        },
+        "import_id": 1,
+        "kind": "CALLS",
+        "precision": "Exact",
+        "provider": "scip-import",
+        "tool": "corpus",
+        "unresolved": null,
+        "verification": "Unverified"
+      },
+      {
+        "callee": {
+          "byte_end": null,
+          "byte_start": null,
+          "doc": null,
+          "import_id": 1,
+          "path": null,
+          "symbol_uri": "scip-test test corpus 1.0.0 nested_calls.ts/t().",
+          "type": "scip"
+        },
+        "callee_name": "target",
+        "caller": {
+          "byte_end": null,
+          "byte_start": null,
+          "doc": null,
+          "import_id": 1,
+          "path": null,
+          "symbol_uri": "scip-test test corpus 1.0.0 nested_calls.ts/c().",
+          "type": "scip"
+        },
+        "caller_path": "nested_calls.ts",
+        "caller_span": [
+          164,
+          172
+        ],
+        "evidence": {
+          "callee_span": [
+            164,
+            170
+          ],
+          "digest": "e76e6b24c22cd886",
+          "imports": [
+            {
+              "artifact_id": "<artifact>",
+              "content_identity": "afa6cc41595a3f94",
+              "id": 1,
+              "provider": "corpus",
+              "source_revision": "head=-|branch=-|dirty=false|untracked=0|cfg=1a92ea80d66dd56e|nonce=<nonce>",
+              "version": "1.0"
+            }
+          ],
+          "path": "nested_calls.ts",
+          "provider": "scip-import",
+          "reference_span": [
+            164,
+            170
+          ],
+          "span": [
+            164,
+            172
+          ],
+          "terminal_span": [
+            164,
+            170
+          ]
+        },
+        "import_id": 1,
+        "kind": "CALLS",
+        "precision": "Exact",
+        "provider": "scip-import",
+        "tool": "corpus",
+        "unresolved": null,
+        "verification": "Unverified"
+      }
+    ],
+    "freshness": {
+      "reasons": [],
+      "status": "fresh"
+    },
+    "limits": {
+      "limit": 50,
+      "next_offset": null,
+      "offset": 0
+    },
+    "repo": "sem",
+    "schema_version": 1,
+    "snapshot": {
+      "id": 1,
+      "nonce": "<nonce>",
+      "revision": "head=-|branch=-|dirty=false|untracked=0|cfg=1a92ea80d66dd56e|nonce=<nonce>"
+    },
+    "truncated": false,
+    "verification": "Unverified"
+  },
+  "callers": {
+    "anchor": {
+      "anchor_uncertainty": null,
+      "col": 10,
+      "endpoint": {
+        "byte_end": null,
+        "byte_start": null,
+        "doc": null,
+        "import_id": 1,
+        "path": null,
+        "symbol_uri": "scip-test test corpus 1.0.0 nested_calls.ts/t().",
+        "type": "scip"
+      },
+      "import_id": 1,
+      "kind": "semantic",
+      "line": 2,
+      "path": "nested_calls.ts",
+      "precision": "Heuristic",
+      "span": [
+        48,
+        54
+      ],
+      "symbol_uri": "scip-test test corpus 1.0.0 nested_calls.ts/t()."
+    },
+    "completeness": {
+      "covered": 1,
+      "denominator": {
+        "ambiguous_calls": 0,
+        "dynamic_calls": 0,
+        "missing_provider_files": 0,
+        "observed_edges": 1,
+        "parse_error_files": 0,
+        "skipped_files": 0,
+        "stale_imports": 0,
+        "truncated_branches": 0,
+        "unresolved_owner": 0,
+        "unresolved_target": 0,
+        "unsupported_files": 0
+      },
+      "status": "complete",
+      "total": 1,
+      "unresolved": []
+    },
+    "direction": "callers",
+    "edges": [
+      {
+        "callee": {
+          "byte_end": null,
+          "byte_start": null,
+          "doc": null,
+          "import_id": 1,
+          "path": null,
+          "symbol_uri": "scip-test test corpus 1.0.0 nested_calls.ts/t().",
+          "type": "scip"
+        },
+        "callee_name": "target",
+        "caller": {
+          "byte_end": null,
+          "byte_start": null,
+          "doc": null,
+          "import_id": 1,
+          "path": null,
+          "symbol_uri": "scip-test test corpus 1.0.0 nested_calls.ts/c().",
+          "type": "scip"
+        },
+        "caller_path": "nested_calls.ts",
+        "caller_span": [
+          164,
+          172
+        ],
+        "evidence": {
+          "callee_span": [
+            164,
+            170
+          ],
+          "digest": "e76e6b24c22cd886",
+          "imports": [
+            {
+              "artifact_id": "<artifact>",
+              "content_identity": "afa6cc41595a3f94",
+              "id": 1,
+              "provider": "corpus",
+              "source_revision": "head=-|branch=-|dirty=false|untracked=0|cfg=1a92ea80d66dd56e|nonce=<nonce>",
+              "version": "1.0"
+            }
+          ],
+          "path": "nested_calls.ts",
+          "provider": "scip-import",
+          "reference_span": [
+            164,
+            170
+          ],
+          "span": [
+            164,
+            172
+          ],
+          "terminal_span": [
+            164,
+            170
+          ]
+        },
+        "import_id": 1,
+        "kind": "CALLS",
+        "precision": "Exact",
+        "provider": "scip-import",
+        "tool": "corpus",
+        "unresolved": null,
+        "verification": "Unverified"
+      }
+    ],
+    "freshness": {
+      "reasons": [],
+      "status": "fresh"
+    },
+    "limits": {
+      "limit": 50,
+      "next_offset": null,
+      "offset": 0
+    },
+    "repo": "sem",
+    "schema_version": 1,
+    "snapshot": {
+      "id": 1,
+      "nonce": "<nonce>",
+      "revision": "head=-|branch=-|dirty=false|untracked=0|cfg=1a92ea80d66dd56e|nonce=<nonce>"
+    },
+    "truncated": false,
+    "verification": "Unverified"
+  },
+  "impact": {
+    "anchor": {
+      "anchor_uncertainty": null,
+      "col": 10,
+      "endpoint": {
+        "byte_end": null,
+        "byte_start": null,
+        "doc": null,
+        "import_id": 1,
+        "path": null,
+        "symbol_uri": "scip-test test corpus 1.0.0 nested_calls.ts/t().",
+        "type": "scip"
+      },
+      "import_id": 1,
+      "kind": "semantic",
+      "line": 2,
+      "path": "nested_calls.ts",
+      "precision": "Heuristic",
+      "span": [
+        48,
+        54
+      ],
+      "symbol_uri": "scip-test test corpus 1.0.0 nested_calls.ts/t()."
+    },
+    "bridges": [],
+    "budgets": {
+      "depth": 3,
+      "edges": 3000,
+      "mappings": 500,
+      "max_depth": 6,
+      "nodes": 500,
+      "paths": 1000,
+      "time_ms": 2000
+    },
+    "completeness": {
+      "covered": 1,
+      "denominator": {
+        "ambiguous_calls": 0,
+        "dynamic_calls": 0,
+        "missing_provider_files": 0,
+        "observed_edges": 1,
+        "parse_error_files": 0,
+        "skipped_files": 0,
+        "stale_imports": 0,
+        "truncated_branches": 0,
+        "unresolved_owner": 0,
+        "unresolved_target": 0,
+        "unsupported_files": 0
+      },
+      "status": "partial",
+      "total": 1,
+      "total_exact": true,
+      "unresolved": [
+        "graph-completeness-unproven"
+      ]
+    },
+    "cycle": false,
+    "destination": null,
+    "direction": "impact",
+    "disclaimer": "plausible-impact-not-execution",
+    "freshness": {
+      "reasons": [],
+      "status": "fresh"
+    },
+    "limits": {
+      "limit": 50,
+      "next_offset": null,
+      "offset": 0
+    },
+    "paths": [
+      {
+        "cycle": false,
+        "distance": 1,
+        "edges": [
+          {
+            "callee": {
+              "byte_end": null,
+              "byte_start": null,
+              "doc": null,
+              "import_id": 1,
+              "path": null,
+              "symbol_uri": "scip-test test corpus 1.0.0 nested_calls.ts/t().",
+              "type": "scip"
+            },
+            "callee_name": "target",
+            "caller": {
+              "byte_end": null,
+              "byte_start": null,
+              "doc": null,
+              "import_id": 1,
+              "path": null,
+              "symbol_uri": "scip-test test corpus 1.0.0 nested_calls.ts/c().",
+              "type": "scip"
+            },
+            "caller_path": "nested_calls.ts",
+            "caller_span": [
+              164,
+              172
+            ],
+            "evidence": {
+              "callee_span": [
+                164,
+                170
+              ],
+              "digest": "e76e6b24c22cd886",
+              "imports": [
+                {
+                  "artifact_id": "<artifact>",
+                  "content_identity": "afa6cc41595a3f94",
+                  "id": 1,
+                  "provider": "corpus",
+                  "source_revision": "head=-|branch=-|dirty=false|untracked=0|cfg=1a92ea80d66dd56e|nonce=<nonce>",
+                  "version": "1.0"
+                }
+              ],
+              "path": "nested_calls.ts",
+              "provider": "scip-import",
+              "reference_span": [
+                164,
+                170
+              ],
+              "span": [
+                164,
+                172
+              ],
+              "terminal_span": [
+                164,
+                170
+              ]
+            },
+            "import_id": 1,
+            "kind": "CALLS",
+            "precision": "Exact",
+            "provider": "scip-import",
+            "tool": "corpus",
+            "unresolved": null,
+            "verification": "Unverified"
+          }
+        ],
+        "scope": "direct",
+        "truncated": false,
+        "unresolved": [],
+        "verification": "Unverified"
+      }
+    ],
+    "repo": "sem",
+    "schema_version": 1,
+    "snapshot": {
+      "id": 1,
+      "nonce": "<nonce>",
+      "revision": "head=-|branch=-|dirty=false|untracked=0|cfg=1a92ea80d66dd56e|nonce=<nonce>"
+    },
+    "truncated": false,
+    "unresolved": [],
+    "verdict": "HIGH",
+    "verification": "Unverified",
+    "visits": {
+      "edges": 1,
+      "nodes": 2
+    }
+  },
+  "syntax_callees": {
+    "anchor": {
+      "anchor_uncertainty": "syntax-only anchor: no semantic identity at this position",
+      "col": 10,
+      "endpoint": {
+        "byte_end": 176,
+        "byte_start": 127,
+        "doc": null,
+        "import_id": null,
+        "path": "nested_calls.ts",
+        "symbol_uri": null,
+        "type": "syntax_def"
+      },
+      "import_id": null,
+      "kind": "syntax-fallback",
+      "line": 8,
+      "path": "nested_calls.ts",
+      "precision": "Heuristic",
+      "span": [
+        127,
+        176
+      ],
+      "symbol_uri": null
+    },
+    "completeness": {
+      "covered": 2,
+      "denominator": {
+        "ambiguous_calls": 0,
+        "dynamic_calls": 0,
+        "missing_provider_files": 1,
+        "observed_edges": 2,
+        "parse_error_files": 0,
+        "skipped_files": 0,
+        "stale_imports": 0,
+        "truncated_branches": 0,
+        "unresolved_owner": 0,
+        "unresolved_target": 2,
+        "unsupported_files": 0
+      },
+      "status": "partial",
+      "total": 2,
+      "unresolved": [
+        "missing_provider_files",
+        "no-overlap",
+        "syntax-anchor-uncertain",
+        "unresolved-relations",
+        "unresolved_target"
+      ]
+    },
+    "direction": "callees",
+    "edges": [
+      {
+        "callee": null,
+        "callee_name": "outer",
+        "caller": {
+          "byte_end": 176,
+          "byte_start": 127,
+          "doc": null,
+          "import_id": null,
+          "path": "nested_calls.ts",
+          "symbol_uri": null,
+          "type": "syntax_def"
+        },
+        "caller_path": "nested_calls.ts",
+        "caller_span": [
+          158,
+          173
+        ],
+        "evidence": {
+          "callee_span": [
+            158,
+            163
+          ],
+          "digest": "e76e6b24c22cd886",
+          "imports": [],
+          "path": "nested_calls.ts",
+          "provider": "syntax",
+          "reference_span": null,
+          "span": [
+            158,
+            173
+          ],
+          "terminal_span": [
+            158,
+            163
+          ]
+        },
+        "import_id": null,
+        "kind": "POTENTIAL_CALL",
+        "precision": "Heuristic",
+        "provider": "syntax",
+        "tool": null,
+        "unresolved": "no-overlap",
+        "verification": "Unverified"
+      },
+      {
+        "callee": null,
+        "callee_name": "target",
+        "caller": {
+          "byte_end": 176,
+          "byte_start": 127,
+          "doc": null,
+          "import_id": null,
+          "path": "nested_calls.ts",
+          "symbol_uri": null,
+          "type": "syntax_def"
+        },
+        "caller_path": "nested_calls.ts",
+        "caller_span": [
+          164,
+          172
+        ],
+        "evidence": {
+          "callee_span": [
+            164,
+            170
+          ],
+          "digest": "e76e6b24c22cd886",
+          "imports": [],
+          "path": "nested_calls.ts",
+          "provider": "syntax",
+          "reference_span": null,
+          "span": [
+            164,
+            172
+          ],
+          "terminal_span": [
+            164,
+            170
+          ]
+        },
+        "import_id": null,
+        "kind": "POTENTIAL_CALL",
+        "precision": "Heuristic",
+        "provider": "syntax",
+        "tool": null,
+        "unresolved": "no-overlap",
+        "verification": "Unverified"
+      }
+    ],
+    "freshness": {
+      "reasons": [],
+      "status": "fresh"
+    },
+    "limits": {
+      "limit": 50,
+      "next_offset": null,
+      "offset": 0
+    },
+    "repo": "sem",
+    "schema_version": 1,
+    "snapshot": {
+      "id": 1,
+      "nonce": "<nonce>",
+      "revision": "head=-|branch=-|dirty=false|untracked=0|cfg=1a92ea80d66dd56e|nonce=<nonce>"
+    },
+    "truncated": false,
+    "verification": "Unverified"
+  },
+  "syntax_impact": {
+    "anchor": {
+      "anchor_uncertainty": "syntax-only anchor: no semantic identity at this position",
+      "col": 10,
+      "endpoint": {
+        "byte_end": 74,
+        "byte_start": 39,
+        "doc": null,
+        "import_id": null,
+        "path": "nested_calls.ts",
+        "symbol_uri": null,
+        "type": "syntax_def"
+      },
+      "import_id": null,
+      "kind": "syntax-fallback",
+      "line": 2,
+      "path": "nested_calls.ts",
+      "precision": "Heuristic",
+      "span": [
+        39,
+        74
+      ],
+      "symbol_uri": null
+    },
+    "bridges": [],
+    "budgets": {
+      "depth": 3,
+      "edges": 3000,
+      "mappings": 500,
+      "max_depth": 6,
+      "nodes": 500,
+      "paths": 1000,
+      "time_ms": 2000
+    },
+    "completeness": {
+      "covered": 0,
+      "denominator": {
+        "ambiguous_calls": 0,
+        "dynamic_calls": 0,
+        "missing_provider_files": 1,
+        "observed_edges": 0,
+        "parse_error_files": 0,
+        "skipped_files": 0,
+        "stale_imports": 0,
+        "truncated_branches": 0,
+        "unresolved_owner": 0,
+        "unresolved_target": 2,
+        "unsupported_files": 0
+      },
+      "status": "partial",
+      "total": 0,
+      "total_exact": true,
+      "unresolved": [
+        "empty-result-not-coverage-proof",
+        "graph-completeness-unproven",
+        "insufficient-impact-evidence",
+        "missing_provider_files",
+        "syntax-anchor-uncertain",
+        "unresolved-relations",
+        "unresolved_target"
+      ]
+    },
+    "cycle": false,
+    "destination": null,
+    "direction": "impact",
+    "disclaimer": "plausible-impact-not-execution",
+    "freshness": {
+      "reasons": [],
+      "status": "fresh"
+    },
+    "limits": {
+      "limit": 50,
+      "next_offset": null,
+      "offset": 0
+    },
+    "paths": [],
+    "repo": "sem",
+    "schema_version": 1,
+    "snapshot": {
+      "id": 1,
+      "nonce": "<nonce>",
+      "revision": "head=-|branch=-|dirty=false|untracked=0|cfg=1a92ea80d66dd56e|nonce=<nonce>"
+    },
+    "truncated": false,
+    "unresolved": [],
+    "verdict": "UNKNOWN",
+    "verification": "Unverified",
+    "visits": {
+      "edges": 0,
+      "nodes": 1
+    }
+  },
+  "trace": {
+    "anchor": {
+      "anchor_uncertainty": null,
+      "col": 10,
+      "endpoint": {
+        "byte_end": null,
+        "byte_start": null,
+        "doc": null,
+        "import_id": 1,
+        "path": null,
+        "symbol_uri": "scip-test test corpus 1.0.0 nested_calls.ts/c().",
+        "type": "scip"
+      },
+      "import_id": 1,
+      "kind": "semantic",
+      "line": 8,
+      "path": "nested_calls.ts",
+      "precision": "Heuristic",
+      "span": [
+        136,
+        142
+      ],
+      "symbol_uri": "scip-test test corpus 1.0.0 nested_calls.ts/c()."
+    },
+    "bridges": [
+      {
+        "definition_span": [
+          136,
+          142
+        ],
+        "digest": "e76e6b24c22cd886",
+        "semantic": {
+          "byte_end": null,
+          "byte_start": null,
+          "doc": null,
+          "import_id": 1,
+          "path": null,
+          "symbol_uri": "scip-test test corpus 1.0.0 nested_calls.ts/c().",
+          "type": "scip"
+        },
+        "syntax": {
+          "byte_end": 176,
+          "byte_start": 127,
+          "doc": null,
+          "import_id": null,
+          "path": "nested_calls.ts",
+          "symbol_uri": null,
+          "type": "syntax_def"
+        }
+      },
+      {
+        "definition_span": [
+          84,
+          89
+        ],
+        "digest": "e76e6b24c22cd886",
+        "semantic": {
+          "byte_end": null,
+          "byte_start": null,
+          "doc": null,
+          "import_id": 1,
+          "path": null,
+          "symbol_uri": "scip-test test corpus 1.0.0 nested_calls.ts/u().",
+          "type": "scip"
+        },
+        "syntax": {
+          "byte_end": 126,
+          "byte_start": 75,
+          "doc": null,
+          "import_id": null,
+          "path": "nested_calls.ts",
+          "symbol_uri": null,
+          "type": "syntax_def"
+        }
+      },
+      {
+        "definition_span": [
+          48,
+          54
+        ],
+        "digest": "e76e6b24c22cd886",
+        "semantic": {
+          "byte_end": null,
+          "byte_start": null,
+          "doc": null,
+          "import_id": 1,
+          "path": null,
+          "symbol_uri": "scip-test test corpus 1.0.0 nested_calls.ts/t().",
+          "type": "scip"
+        },
+        "syntax": {
+          "byte_end": 74,
+          "byte_start": 39,
+          "doc": null,
+          "import_id": null,
+          "path": "nested_calls.ts",
+          "symbol_uri": null,
+          "type": "syntax_def"
+        }
+      }
+    ],
+    "budgets": {
+      "depth": 3,
+      "edges": 3000,
+      "mappings": 500,
+      "max_depth": 6,
+      "nodes": 500,
+      "paths": 1000,
+      "time_ms": 2000
+    },
+    "completeness": {
+      "covered": 2,
+      "denominator": {
+        "ambiguous_calls": 0,
+        "dynamic_calls": 0,
+        "missing_provider_files": 0,
+        "observed_edges": 2,
+        "parse_error_files": 0,
+        "skipped_files": 0,
+        "stale_imports": 0,
+        "truncated_branches": 0,
+        "unresolved_owner": 0,
+        "unresolved_target": 0,
+        "unsupported_files": 0
+      },
+      "status": "complete",
+      "total": 2,
+      "total_exact": true,
+      "unresolved": []
+    },
+    "cycle": false,
+    "destination": null,
+    "direction": "trace",
+    "disclaimer": "plausible-path-not-execution",
+    "freshness": {
+      "reasons": [],
+      "status": "fresh"
+    },
+    "limits": {
+      "limit": 50,
+      "next_offset": null,
+      "offset": 0
+    },
+    "paths": [
+      {
+        "cycle": false,
+        "edges": [
+          {
+            "callee": {
+              "byte_end": null,
+              "byte_start": null,
+              "doc": null,
+              "import_id": 1,
+              "path": null,
+              "symbol_uri": "scip-test test corpus 1.0.0 nested_calls.ts/u().",
+              "type": "scip"
+            },
+            "callee_name": "outer",
+            "caller": {
+              "byte_end": null,
+              "byte_start": null,
+              "doc": null,
+              "import_id": 1,
+              "path": null,
+              "symbol_uri": "scip-test test corpus 1.0.0 nested_calls.ts/c().",
+              "type": "scip"
+            },
+            "caller_path": "nested_calls.ts",
+            "caller_span": [
+              158,
+              173
+            ],
+            "evidence": {
+              "callee_span": [
+                158,
+                163
+              ],
+              "digest": "e76e6b24c22cd886",
+              "imports": [
+                {
+                  "artifact_id": "<artifact>",
+                  "content_identity": "afa6cc41595a3f94",
+                  "id": 1,
+                  "provider": "corpus",
+                  "source_revision": "head=-|branch=-|dirty=false|untracked=0|cfg=1a92ea80d66dd56e|nonce=<nonce>",
+                  "version": "1.0"
+                }
+              ],
+              "path": "nested_calls.ts",
+              "provider": "scip-import",
+              "reference_span": [
+                158,
+                163
+              ],
+              "span": [
+                158,
+                173
+              ],
+              "terminal_span": [
+                158,
+                163
+              ]
+            },
+            "import_id": 1,
+            "kind": "CALLS",
+            "precision": "Exact",
+            "provider": "scip-import",
+            "tool": "corpus",
+            "unresolved": null,
+            "verification": "Unverified"
+          }
+        ],
+        "truncated": false,
+        "unresolved": [],
+        "verification": "Unverified"
+      },
+      {
+        "cycle": false,
+        "edges": [
+          {
+            "callee": {
+              "byte_end": null,
+              "byte_start": null,
+              "doc": null,
+              "import_id": 1,
+              "path": null,
+              "symbol_uri": "scip-test test corpus 1.0.0 nested_calls.ts/t().",
+              "type": "scip"
+            },
+            "callee_name": "target",
+            "caller": {
+              "byte_end": null,
+              "byte_start": null,
+              "doc": null,
+              "import_id": 1,
+              "path": null,
+              "symbol_uri": "scip-test test corpus 1.0.0 nested_calls.ts/c().",
+              "type": "scip"
+            },
+            "caller_path": "nested_calls.ts",
+            "caller_span": [
+              164,
+              172
+            ],
+            "evidence": {
+              "callee_span": [
+                164,
+                170
+              ],
+              "digest": "e76e6b24c22cd886",
+              "imports": [
+                {
+                  "artifact_id": "<artifact>",
+                  "content_identity": "afa6cc41595a3f94",
+                  "id": 1,
+                  "provider": "corpus",
+                  "source_revision": "head=-|branch=-|dirty=false|untracked=0|cfg=1a92ea80d66dd56e|nonce=<nonce>",
+                  "version": "1.0"
+                }
+              ],
+              "path": "nested_calls.ts",
+              "provider": "scip-import",
+              "reference_span": [
+                164,
+                170
+              ],
+              "span": [
+                164,
+                172
+              ],
+              "terminal_span": [
+                164,
+                170
+              ]
+            },
+            "import_id": 1,
+            "kind": "CALLS",
+            "precision": "Exact",
+            "provider": "scip-import",
+            "tool": "corpus",
+            "unresolved": null,
+            "verification": "Unverified"
+          }
+        ],
+        "truncated": false,
+        "unresolved": [],
+        "verification": "Unverified"
+      }
+    ],
+    "repo": "sem",
+    "schema_version": 1,
+    "snapshot": {
+      "id": 1,
+      "nonce": "<nonce>",
+      "revision": "head=-|branch=-|dirty=false|untracked=0|cfg=1a92ea80d66dd56e|nonce=<nonce>"
+    },
+    "truncated": false,
+    "unresolved": [],
+    "verification": "Unverified",
+    "visits": {
+      "edges": 2,
+      "nodes": 3
+    }
+  }
+}

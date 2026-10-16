@@ -1,0 +1,48 @@
+{
+  "file": "nested_anonymous.py",
+  "symbols": [
+    {
+      "id": "t",
+      "name": "target",
+      "uri": "scip-test test corpus 1.0.0 nested_anonymous.py/t()."
+    },
+    {
+      "id": "c",
+      "name": "caller",
+      "uri": "scip-test test corpus 1.0.0 nested_anonymous.py/c()."
+    }
+  ],
+  "occurrences": [
+    {
+      "id": "t",
+      "definition": true,
+      "line": 1,
+      "col": 4,
+      "end": 10,
+      "text": "target"
+    },
+    {
+      "id": "c",
+      "definition": true,
+      "line": 3,
+      "col": 4,
+      "end": 10,
+      "text": "caller"
+    },
+    {
+      "id": "t",
+      "definition": false,
+      "line": 4,
+      "col": 19,
+      "end": 25,
+      "text": "target"
+    }
+  ],
+  "target": "t",
+  "callees_calls": 0,
+  "inbound_calls": 0,
+  "inbound_references": 0,
+  "impact": "UNKNOWN",
+  "stale": false,
+  "notes": "Anonymous scope inside a named function cannot borrow the enclosing function as a definite caller."
+}

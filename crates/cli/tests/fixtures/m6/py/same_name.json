@@ -1,0 +1,53 @@
+{
+  "file": "same_name.py",
+  "symbols": [
+    {
+      "id": "t",
+      "name": "target",
+      "uri": "scip-test test corpus 1.0.0 same_name.py/t()."
+    },
+    {
+      "id": "other",
+      "name": "target",
+      "uri": "scip-test test corpus 1.0.0 same_name.py/other()."
+    },
+    {
+      "id": "c",
+      "name": "caller",
+      "uri": "scip-test test corpus 1.0.0 same_name.py/c()."
+    }
+  ],
+  "occurrences": [
+    {
+      "id": "t",
+      "definition": true,
+      "line": 2,
+      "col": 8,
+      "end": 14,
+      "text": "target"
+    },
+    {
+      "id": "other",
+      "definition": true,
+      "line": 6,
+      "col": 8,
+      "end": 14,
+      "text": "target"
+    },
+    {
+      "id": "c",
+      "definition": true,
+      "line": 9,
+      "col": 4,
+      "end": 10,
+      "text": "caller"
+    }
+  ],
+  "target": "t",
+  "callees_calls": 0,
+  "inbound_calls": 0,
+  "inbound_references": 0,
+  "impact": "UNKNOWN",
+  "stale": false,
+  "notes": "Two genuine distinct definitions share a display name. No terminal producer reference: no name-based target inference."
+}

@@ -1,0 +1,8 @@
+// SPDX-License-Identifier: Apache-2.0
+int target(void) {
+    return 1;
+}
+int caller(void) {
+    int (*ref)(void) = target;
+    return 0;
+}

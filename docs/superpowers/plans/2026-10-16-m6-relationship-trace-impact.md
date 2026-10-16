@@ -169,11 +169,11 @@ Rule (locked, early-M6): verdict ∈ {HIGH, MEDIUM, UNKNOWN}; `LOW`/`SAFE` are n
 
 Cases (each as a minimal fixture, direct + golden JSON): direct calls, ref-without-call, nested calls, local scope, same-name symbols, alias, recursion, cycles, missing definitions, dynamic dispatch, unresolved, stale-after-edit.
 
-- [ ] **Step 1: Write all RED goldens** (one test per case per language where the construct exists; C macros-out-of-scope explicitly skipped with reason).
-- [ ] **Step 2: Run** — Run: `cargo test --locked --test edges` Expected: FAIL on new cases.
-- [ ] **Step 3: Fix derivation gaps only** (no taxonomy changes; per-case `unresolved_reason` tuning allowed).
-- [ ] **Step 4: Re-run full suite** — Run: `cargo test --locked` Expected: PASS M0–M6.
-- [ ] **Step 5: Commit** — `git add crates/cli/tests && git commit -m "m6: Tier A golden corpus py/ts/rs/c"`
+- [x] **Step 1: Write all RED goldens** — initial 65 cases, expanded to 79 after review: Python/TS/Rust/C++ 16 each and C 15. Source-truth manifests and 494 full responses. C macro expansion explicitly out of scope; standard C has no nested anonymous counterpart. See `docs/m6-task7-validation.md`.
+- [x] **Step 2: Run** — 65 initial empty goldens failed; truth assertions reproduced five false alias CALLS, then five same-name parameter and four nested-anonymous owner failures before their corrections.
+- [x] **Step 3: Fix derivation gaps only** — exact callable declaration token and nearest named owner proof, fail-closed against digest-matching confined source. No new relationships, semantic capabilities, taxonomy, schema or dependencies. Necessary derivation-time reparse and its per-import cost are explicitly documented; query paths do not reparse.
+- [x] **Step 4: Re-run full suite** — all 79 corpus cases, 129 edge integration tests and 392 total locked tests pass, zero ignored. Fmt/check/Clippy pass locally; independent review regressions closed and corpus rerun without updating goldens.
+- [x] **Step 5: Commit** — signed local checkpoint `m6: Tier A golden corpus py/ts/rs/c`, including the minimal source-proof bug fixes and portable validation evidence. Stop for Task 7 audit; no push or Task 8 pilot/close-out.
 
 ### Task 8: Tier B pilot + perf ledger + close-out doc
 
