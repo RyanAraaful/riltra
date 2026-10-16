@@ -43,7 +43,8 @@ pub(crate) fn usage() -> String {
   {NAME} semantic status --repo <name>
   {NAME} semantic query --repo <name> --path <rel> --line <n> --col <n> [--refs] [--lsp-server <abs-path>]
   {NAME} callers --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--limit <n>] [--offset <n>]
-  {NAME} callees --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--limit <n>] [--offset <n>]\n\nCommands:\n  status       Print deterministic bootstrap status as JSON\n  init         Register a local repository root\n  repo list    List registered repositories as JSON\n  repo status  Git/worktree fingerprint of a registered repository\n  doctor       Path-security and repository health checks as JSON\n  scan         Syntax facts (definitions/imports/calls) as JSON\n  index        Build the durable code index for a repository\n  index status Report index freshness (fresh/stale/unknown) as JSON\n  search       Search indexed symbols as JSON\n  semantic import Import a SCIP index against the live snapshot as JSON\n  semantic status Per-provider binding verification as JSON\n  semantic query Single-hop definition/reference lookup as JSON\n  callers Direct callers of the anchored identity as JSON\n  callees Direct callees of the anchored identity as JSON\n"
+  {NAME} callees --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--limit <n>] [--offset <n>]
+  {NAME} trace --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--to <path:line:col>] [--depth <n>] [--limit <n>] [--offset <n>]\n\nCommands:\n  status       Print deterministic bootstrap status as JSON\n  init         Register a local repository root\n  repo list    List registered repositories as JSON\n  repo status  Git/worktree fingerprint of a registered repository\n  doctor       Path-security and repository health checks as JSON\n  scan         Syntax facts (definitions/imports/calls) as JSON\n  index        Build the durable code index for a repository\n  index status Report index freshness (fresh/stale/unknown) as JSON\n  search       Search indexed symbols as JSON\n  semantic import Import a SCIP index against the live snapshot as JSON\n  semantic status Per-provider binding verification as JSON\n  semantic query Single-hop definition/reference lookup as JSON\n  callers Direct callers of the anchored identity as JSON\n  callees Direct callees of the anchored identity as JSON\n  trace Bounded plausible static paths with per-hop evidence\n"
     )
 }
 
@@ -670,6 +671,7 @@ fn dispatch(cmd: Command, out: &mut String, err: &mut String) -> i32 {
         ),
         Command::Semantic { op } => cmd_semantic(op, out, err),
         Command::Edge { op } => cmd_edge(op, out, err),
+        Command::Trace(args) => cmd_trace(args, out, err),
     }
 }
 
@@ -884,6 +886,123 @@ fn edge_query_json(o: &index::EdgeQueryOut) -> String {
     format!("{{\"schema_version\":1,\"repo\":{},\"snapshot\":{{\"id\":{},\"nonce\":{},\"revision\":{}}},\"direction\":{},\"anchor\":{{\"kind\":{},\"path\":{},\"line\":{},\"col\":{},\"symbol_uri\":{},\"import_id\":{},\"precision\":{},\"anchor_uncertainty\":{},\"span\":{},\"endpoint\":{}}},\"freshness\":{{\"status\":{},\"reasons\":{}}},\"verification\":{},\"completeness\":{{\"status\":{},\"covered\":{},\"total\":{},\"denominator\":{{{denominator}}},\"unresolved\":{}}},\"edges\":[{edges}],\"truncated\":{},\"limits\":{{\"limit\":{},\"offset\":{},\"next_offset\":{}}}}}",
         edge_string(&o.repo), o.snapshot.id, edge_string(&o.snapshot.nonce), edge_string(&o.revision), edge_string(o.direction.as_str()), edge_string(a.kind.as_str()), edge_string(&a.path), a.line1, a.col1, edge_optional(a.symbol_uri.as_deref()), edge_number(a.import_id), edge_string(&a.precision), edge_optional(a.uncertainty.as_deref()), edge_span(a.span_bytes), edge_endpoint_json(&index::anchor_endpoint(a)),
         edge_string(&o.freshness), edge_strings(&o.freshness_reasons), edge_string(&o.verification), edge_string(&o.completeness.status), o.completeness.covered, o.completeness.total, edge_strings(&o.completeness.unresolved), o.truncated, o.limit, o.offset, edge_number(o.next_offset))
+}
+
+fn trace_position(value: &str, flag: &str) -> Result<u32, String> {
+    value
+        .parse::<u32>()
+        .ok()
+        .filter(|n| *n > 0)
+        .ok_or_else(|| format!("invalid {flag} value: '{value}'"))
+}
+
+fn cmd_trace(args: args::TraceArgs, out: &mut String, err: &mut String) -> i32 {
+    let parsed = (|| {
+        let line = trace_position(&args.line, "--line")?;
+        let col = trace_position(&args.col, "--col")?;
+        let depth = parse_count(args.depth.as_deref(), 3, "depth")?;
+        if !(1..=edges::TRACE_MAX_DEPTH).contains(&depth) {
+            return Err("--depth must be between 1 and 6".to_string());
+        }
+        let limit = parse_count(args.limit.as_deref(), index::DEFAULT_SEARCH_LIMIT, "limit")?;
+        if !(1..=index::MAX_SEARCH_LIMIT).contains(&limit) {
+            return Err("--limit must be between 1 and 1000".to_string());
+        }
+        let offset = parse_count(args.offset.as_deref(), 0, "offset")?;
+        if offset > i64::MAX as usize - index::MAX_SEARCH_LIMIT {
+            return Err("--offset exceeds supported range".to_string());
+        }
+        let to = args
+            .to
+            .as_deref()
+            .map(|to| {
+                let (rest, col) = to.rsplit_once(':').ok_or("--to must be PATH:LINE:COL")?;
+                let (path, line) = rest.rsplit_once(':').ok_or("--to must be PATH:LINE:COL")?;
+                if path.is_empty() {
+                    return Err("--to requires a path".to_string());
+                }
+                Ok((
+                    path.to_string(),
+                    trace_position(line, "--to line")?,
+                    trace_position(col, "--to col")?,
+                ))
+            })
+            .transpose()?;
+        Ok((line, col, depth, limit, offset, to))
+    })();
+    let (line, col, depth, limit, offset, to) = match parsed {
+        Ok(p) => p,
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            return 2;
+        }
+    };
+    let (root, _) = match resolve_recorded_root(&args.repo, err) {
+        Ok(p) => p,
+        Err(code) => return code,
+    };
+    let request = index::TraceRequest {
+        source: index::SpanQuery {
+            rel: &args.path,
+            line1: line,
+            col1: col,
+            refs: false,
+        },
+        symbol: args.symbol.as_deref(),
+        destination: to.as_ref().map(|(p, l, c)| index::SpanQuery {
+            rel: p,
+            line1: *l,
+            col1: *c,
+            refs: false,
+        }),
+        depth,
+        limit,
+        offset,
+    };
+    match index::trace_query(&paths::config_dir(), &args.repo, Path::new(&root), &request) {
+        Ok(result) => {
+            *out = trace_query_json(&result) + "\n";
+            0
+        }
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            3
+        }
+    }
+}
+
+fn trace_anchor_json(anchor: &index::EdgeAnchor) -> String {
+    format!("{{\"kind\":{},\"path\":{},\"line\":{},\"col\":{},\"symbol_uri\":{},\"import_id\":{},\"precision\":{},\"anchor_uncertainty\":{},\"span\":{},\"endpoint\":{}}}",edge_string(anchor.kind.as_str()),edge_string(&anchor.path),anchor.line1,anchor.col1,edge_optional(anchor.symbol_uri.as_deref()),edge_number(anchor.import_id),edge_string(&anchor.precision),edge_optional(anchor.uncertainty.as_deref()),edge_span(anchor.span_bytes),edge_endpoint_json(&index::anchor_endpoint(anchor)))
+}
+
+fn trace_query_json(o: &index::TraceQueryOut) -> String {
+    let paths = o.paths.iter().map(|p| {
+        let edges=p.edges.iter().map(edge_hit_json).collect::<Vec<_>>().join(",");
+        format!("{{\"edges\":[{edges}],\"cycle\":{},\"truncated\":{},\"verification\":{},\"unresolved\":{}}}",p.cycle,p.truncated,edge_string(&p.verification),edge_strings(&p.unresolved))
+    }).collect::<Vec<_>>().join(",");
+    let bridges = o
+        .bridges
+        .iter()
+        .map(|b| {
+            format!(
+                "{{\"semantic\":{},\"syntax\":{},\"definition_span\":{},\"digest\":{}}}",
+                edge_endpoint_json(&Some(b.semantic.clone())),
+                edge_endpoint_json(&Some(b.syntax.clone())),
+                edge_span(Some(b.definition_span)),
+                edge_string(&b.digest)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let denominator = o
+        .completeness
+        .denominator
+        .iter()
+        .map(|(k, v)| format!("{}:{v}", edge_string(k)))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("{{\"schema_version\":1,\"repo\":{},\"snapshot\":{{\"id\":{},\"nonce\":{},\"revision\":{}}},\"direction\":\"trace\",\"anchor\":{},\"destination\":{},\"freshness\":{{\"status\":{},\"reasons\":{}}},\"verification\":{},\"completeness\":{{\"status\":{},\"covered\":{},\"total\":{},\"total_exact\":{},\"denominator\":{{{denominator}}},\"unresolved\":{}}},\"paths\":[{paths}],\"bridges\":[{bridges}],\"visits\":{{\"nodes\":{},\"edges\":{}}},\"budgets\":{{\"depth\":{},\"max_depth\":6,\"nodes\":500,\"edges\":3000,\"paths\":1000,\"mappings\":500,\"time_ms\":2000}},\"limits\":{{\"limit\":{},\"offset\":{},\"next_offset\":{}}},\"cycle\":{},\"truncated\":{},\"unresolved\":{},\"disclaimer\":\"plausible-path-not-execution\"}}",
+        edge_string(&o.repo),o.snapshot.id,edge_string(&o.snapshot.nonce),edge_string(&o.revision),trace_anchor_json(&o.anchor),o.destination.as_ref().map(trace_anchor_json).unwrap_or_else(||"null".to_string()),edge_string(&o.freshness),edge_strings(&o.freshness_reasons),edge_string(&o.verification),edge_string(&o.completeness.status),o.completeness.covered,o.completeness.total,o.total_exact,edge_strings(&o.completeness.unresolved),o.nodes,o.edge_visits,o.depth,o.limit,o.offset,edge_number(o.next_offset),o.cycle,o.truncated,edge_strings(&o.unresolved))
 }
 
 fn cmd_semantic_import(

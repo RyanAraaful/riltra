@@ -656,6 +656,75 @@ pub fn semantic_facts_for(
         .map_err(|e| e.to_string())
 }
 
+/// At most two identities: sufficient to prove uniqueness without loading an
+/// import's reference corpus. Source binding predicates match owner bridging.
+pub fn semantic_owner_uris(
+    conn: &Connection,
+    snapshot_id: i64,
+    import_id: i64,
+    owner: &SymbolRow,
+    path: &str,
+    digest: &str,
+) -> Result<Vec<String>, String> {
+    let mut stmt=conn.prepare("SELECT DISTINCT symbol_uri FROM semantic_facts WHERE snapshot_id=?1 AND import_id=?2 AND rel_path=?3 AND display_name=?4 AND (roles & 1)!=0 AND symbol_uri IS NOT NULL AND file_digest=?5 AND (file_id IS NULL OR file_id=?6) AND byte_start>=?7 AND byte_end<=?8 ORDER BY symbol_uri LIMIT 2").map_err(|e|e.to_string())?;
+    let rows = stmt
+        .query_map(
+            params![
+                snapshot_id,
+                import_id,
+                path,
+                owner.name,
+                digest,
+                owner.file_id,
+                owner.byte_start as i64,
+                owner.byte_end as i64
+            ],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())
+}
+
+pub fn semantic_definitions_for(
+    conn: &Connection,
+    snapshot_id: i64,
+    import_id: i64,
+    symbol_uri: &str,
+    doc: Option<&str>,
+    limit: i64,
+) -> Result<Vec<SemanticFact>, String> {
+    let mut stmt=conn.prepare("SELECT import_id, file_id, rel_path, file_digest, symbol_uri, display_name, roles, start_line, start_col, end_line, end_col, byte_start, byte_end, precision, relationships, external FROM semantic_facts WHERE snapshot_id=?1 AND import_id=?2 AND symbol_uri=?3 AND (roles & 1)!=0 AND (?4 IS NULL OR rel_path=?4) ORDER BY rel_path,byte_start,byte_end,id LIMIT ?5").map_err(|e|e.to_string())?;
+    let rows = stmt
+        .query_map(
+            params![snapshot_id, import_id, symbol_uri, doc, limit],
+            |r| semantic_fact_from_row(snapshot_id, r),
+        )
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())
+}
+
+pub fn file_identity(
+    conn: &Connection,
+    snapshot_id: i64,
+    path: &str,
+) -> Result<Option<(i64, String)>, String> {
+    let mut stmt = conn
+        .prepare("SELECT id,digest FROM files WHERE snapshot_id=?1 AND path=?2 ORDER BY id LIMIT 2")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![snapshot_id, path], |r| Ok((r.get(0)?, r.get(1)?)))
+        .map_err(|e| e.to_string())?;
+    let mut rows = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    if rows.len() > 1 {
+        return Err("ambiguous file identity".to_string());
+    }
+    Ok(rows.pop())
+}
+
 /// All stored facts for one path in one snapshot, ordered by start position.
 /// The query-time span lookup for Go to Definition / Find References.
 pub fn semantic_facts_at(

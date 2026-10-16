@@ -1235,3 +1235,330 @@ fn task4_binary_source_is_an_explicit_coverage_gap() {
             > 0
     );
 }
+
+fn trace_fixture(h: &Path, graph: &[Vec<usize>]) -> Vec<usize> {
+    let names: Vec<String> = (0..graph.len()).map(|i| format!("f{i}")).collect();
+    let uris: Vec<String> = names
+        .iter()
+        .map(|n| format!("scip-test test test-pkg 1.0.0 graph.py/{n}()."))
+        .collect();
+    let mut src = String::new();
+    let mut occurrences = Vec::new();
+    let mut lines = Vec::new();
+    let mut line = 0;
+    for (i, targets) in graph.iter().enumerate() {
+        lines.push(line + 1);
+        src.push_str(&format!("def {}():\n", names[i]));
+        occurrences.push(occurrence(
+            &uris[i],
+            1,
+            line as i64,
+            4,
+            (4 + names[i].len()) as i64,
+        ));
+        line += 1;
+        if targets.is_empty() {
+            src.push_str("    pass\n");
+            line += 1;
+        }
+        for target in targets {
+            src.push_str(&format!("    {}()\n", names[*target]));
+            occurrences.push(occurrence(
+                &uris[*target],
+                0,
+                line as i64,
+                4,
+                (4 + names[*target].len()) as i64,
+            ));
+            line += 1;
+        }
+        src.push('\n');
+        line += 1;
+    }
+    let dir = repo_with(h, "sem", &[("graph.py", &src)]);
+    do_index(h);
+    let symbols: Vec<_> = uris
+        .iter()
+        .zip(names.iter())
+        .map(|(u, n)| (u.as_str(), n.as_str()))
+        .collect();
+    import_documents(
+        h,
+        &dir,
+        "trace",
+        &[test_document("graph.py", &occurrences, &symbols)],
+    );
+    lines
+}
+
+fn trace_json(h: &Path, line: usize, extra: &[&str]) -> serde_json::Value {
+    let line = line.to_string();
+    let mut args = vec![
+        "trace", "--repo", "sem", "--path", "graph.py", "--line", &line, "--col", "6",
+    ];
+    args.extend_from_slice(extra);
+    let (code, out, err) = run(h, &args);
+    assert_eq!(code, 0, "{out} {err}");
+    serde_json::from_str(&out).expect("trace JSON")
+}
+
+#[test]
+fn task5_trace_destination_and_outbound_chain() {
+    let h = home("trace-chain");
+    let lines = trace_fixture(&h, &[vec![1], vec![2], vec![]]);
+    let target = format!("graph.py:{}:6", lines[2]);
+    let v = trace_json(&h, lines[0], &["--to", &target]);
+    assert_eq!(v["disclaimer"], "plausible-path-not-execution");
+    assert_eq!(v["paths"].as_array().unwrap().len(), 1);
+    assert_eq!(v["paths"][0]["edges"].as_array().unwrap().len(), 2);
+    assert_eq!(v["paths"][0]["edges"][0]["kind"], "CALLS");
+    assert_eq!(
+        v["paths"][0]["edges"][1]["evidence"]["imports"][0]["provider"],
+        "trace"
+    );
+    assert_eq!(v["verification"], "Unverified");
+    let enumeration = trace_json(&h, lines[0], &["--depth", "2"]);
+    assert_eq!(enumeration["paths"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        enumeration["paths"][0]["edges"].as_array().unwrap().len(),
+        2
+    );
+    assert_eq!(enumeration["truncated"], false);
+}
+
+#[test]
+fn task5_trace_cycle_depth_and_unreachable_are_explicit() {
+    let h = home("trace-cycle");
+    let lines = trace_fixture(&h, &[vec![1], vec![0], vec![]]);
+    let cycle = trace_json(&h, lines[0], &[]);
+    assert_eq!(cycle["paths"][0]["cycle"], true);
+    assert!(cycle["visits"]["nodes"].as_u64().unwrap() <= 500);
+    let target = format!("graph.py:{}:6", lines[2]);
+    let absent = trace_json(&h, lines[0], &["--to", &target]);
+    assert_eq!(absent["paths"], serde_json::json!([]));
+    assert!(absent["unresolved"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|r| r == "target-unreachable"));
+    let short = trace_json(&h, lines[0], &["--depth", "1"]);
+    assert_eq!(short["truncated"], true);
+    assert!(short["unresolved"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|r| r == "depth-budget"));
+}
+
+#[test]
+fn task5_trace_diamond_pagination_and_repeatability() {
+    let h = home("trace-diamond");
+    let lines = trace_fixture(&h, &[vec![1, 2], vec![3], vec![3], vec![]]);
+    let target = format!("graph.py:{}:6", lines[3]);
+    let full = trace_json(&h, lines[0], &["--to", &target]);
+    assert_eq!(
+        full["paths"].as_array().unwrap().len(),
+        2,
+        "shared endpoint is not a cycle"
+    );
+    let p0 = trace_json(&h, lines[0], &["--to", &target, "--limit", "1"]);
+    let p1 = trace_json(
+        &h,
+        lines[0],
+        &["--to", &target, "--limit", "1", "--offset", "1"],
+    );
+    assert_eq!(p0["paths"][0], full["paths"][0]);
+    assert_eq!(p1["paths"][0], full["paths"][1]);
+    assert_eq!(p0["limits"]["next_offset"], 1);
+    assert!(p1["limits"]["next_offset"].is_null());
+    assert_eq!(full, trace_json(&h, lines[0], &["--to", &target]));
+}
+
+#[test]
+fn task5_trace_syntax_unknown_target_is_not_a_path_to_another_name() {
+    let h = home("trace-syntax");
+    repo_with(
+        &h,
+        "sem",
+        &[("graph.py", "def f0():\n    f1()\n\ndef f1():\n    pass\n")],
+    );
+    do_index(&h);
+    let v = trace_json(&h, 1, &[]);
+    assert_eq!(v["anchor"]["kind"], "syntax-fallback");
+    assert_eq!(v["paths"][0]["edges"][0]["kind"], "POTENTIAL_CALL");
+    assert!(v["paths"][0]["edges"][0]["callee"].is_null());
+    let to = trace_json(&h, 1, &["--to", "graph.py:4:6"]);
+    assert_eq!(to["paths"], serde_json::json!([]));
+    assert!(to["unresolved"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|r| r == "unresolved-target"));
+}
+
+#[test]
+fn task5_trace_verified_syntax_bridge_and_stale_label() {
+    let h = home("trace-bridge");
+    let lines = trace_fixture(&h, &[vec![1], vec![2], vec![]]);
+    // Whitespace in f0's body has no semantic occurrence: a syntax fallback
+    // can connect to the persisted semantic owner only by validated mapping.
+    let v = trace_json(
+        &h,
+        lines[0],
+        &["--line", &(lines[0] + 1).to_string(), "--col", "1"],
+    );
+    assert_eq!(v["anchor"]["kind"], "syntax-fallback");
+    assert_eq!(v["paths"][0]["edges"].as_array().unwrap().len(), 2);
+    assert!(!v["bridges"].as_array().unwrap().is_empty());
+    let file = h.join("sem/graph.py");
+    let mut source = std::fs::read_to_string(&file).unwrap();
+    source.push_str("# edit\n");
+    std::fs::write(file, source).unwrap();
+    let stale = trace_json(&h, lines[0], &[]);
+    assert_eq!(stale["verification"], "Stale");
+}
+
+#[test]
+fn task5_trace_rejects_invalid_depth_and_destination() {
+    let h = home("trace-invalid");
+    trace_fixture(&h, &[vec![]]);
+    for extra in [
+        ["--depth", "0"],
+        ["--depth", "7"],
+        ["--to", "bad-position"],
+        ["--to", "graph.py:0:1"],
+        ["--limit", "0"],
+    ] {
+        let mut args = vec![
+            "trace", "--repo", "sem", "--path", "graph.py", "--line", "1", "--col", "6",
+        ];
+        args.extend(extra);
+        let (code, out, err) = run(&h, &args);
+        assert_eq!(code, 2, "{extra:?}: {out} {err}");
+    }
+}
+
+#[test]
+fn task5_trace_destination_fallback_and_max_depth_boundary() {
+    let h = home("trace-max-depth");
+    let lines = trace_fixture(
+        &h,
+        &[
+            vec![1],
+            vec![2],
+            vec![3],
+            vec![4],
+            vec![5],
+            vec![6],
+            vec![7],
+            vec![],
+        ],
+    );
+    let target = format!("graph.py:{}:6", lines[6]);
+    let exact = trace_json(&h, lines[0], &["--depth", "6", "--to", &target]);
+    assert_eq!(exact["paths"][0]["edges"].as_array().unwrap().len(), 6);
+    assert_eq!(
+        exact["truncated"], false,
+        "reached destination needs no expansion beyond depth"
+    );
+    let later = format!("graph.py:{}:6", lines[7]);
+    let bounded = trace_json(&h, lines[0], &["--depth", "6", "--to", &later]);
+    assert_eq!(bounded["paths"], serde_json::json!([]));
+    assert_eq!(bounded["truncated"], true);
+    assert!(!bounded["unresolved"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|r| r == "target-unreachable"));
+    let whitespace = format!("graph.py:{}:1", lines[6] + 1);
+    let fallback = trace_json(&h, lines[0], &["--depth", "6", "--to", &whitespace]);
+    assert_eq!(fallback["destination"]["kind"], "syntax-fallback");
+    assert_eq!(fallback["paths"][0]["edges"].as_array().unwrap().len(), 6);
+}
+
+#[test]
+fn task5_trace_ambiguous_import_mapping_does_not_join() {
+    let h = home("trace-imports");
+    let lines = trace_fixture(&h, &[vec![1], vec![]]);
+    let f0 = "scip-test test test-pkg 1.0.0 graph.py/f0().";
+    let f1 = "scip-test test test-pkg 1.0.0 graph.py/f1().";
+    let doc = test_document(
+        "graph.py",
+        &[
+            occurrence(f0, 1, 0, 4, 6),
+            occurrence(f1, 0, 1, 4, 6),
+            occurrence(f1, 1, 3, 4, 6),
+        ],
+        &[(f0, "f0"), (f1, "f1")],
+    );
+    import_documents(&h, &h.join("sem"), "trace-second", &[doc]);
+    let v = trace_json(&h, lines[0], &["--line", "2", "--col", "1"]);
+    assert_eq!(v["anchor"]["kind"], "syntax-fallback");
+    assert_eq!(v["paths"], serde_json::json!([]));
+    assert!(v["unresolved"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|r| r == "ambiguous-owner-mapping"));
+    let (code, _, err) = run(
+        &h,
+        &[
+            "trace", "--repo", "sem", "--path", "graph.py", "--line", "1", "--col", "6",
+        ],
+    );
+    assert_eq!(code, 3);
+    assert!(err.contains("ambiguous"));
+}
+
+#[test]
+fn task5_trace_local_cycles_stay_in_document() {
+    let h = home("trace-locals");
+    let src = "def f0():\n    f0()\n";
+    let dir = repo_with(&h, "sem", &[("graph.py", src), ("other.py", src)]);
+    do_index(&h);
+    let doc = |path| {
+        test_document(
+            path,
+            &[
+                occurrence("local f0", 1, 0, 4, 6),
+                occurrence("local f0", 0, 1, 4, 6),
+            ],
+            &[("local f0", "f0")],
+        )
+    };
+    import_documents(&h, &dir, "local-trace", &[doc("graph.py"), doc("other.py")]);
+    let v = trace_json(&h, 1, &[]);
+    assert_eq!(v["visits"]["nodes"], 1);
+    assert_eq!(v["paths"][0]["cycle"], true);
+    assert_eq!(v["paths"][0]["edges"][0]["callee"]["doc"], "graph.py");
+    assert!(v["bridges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|b| b["syntax"]["path"] == "graph.py"));
+}
+
+#[test]
+fn task5_trace_full_json_goldens() {
+    let syntax_home = home("trace-golden-syntax");
+    repo_with(
+        &syntax_home,
+        "sem",
+        &[(
+            "graph.py",
+            "def f0():\n    f1()\n\ndef f1():\n    f2()\n\ndef f2():\n    pass\n\n",
+        )],
+    );
+    do_index(&syntax_home);
+    let syntax = normalized_edge_json(trace_json(&syntax_home, 1, &[]));
+    let expected: serde_json::Value =
+        serde_json::from_str(include_str!("golden/m6-trace-syntax.json")).unwrap();
+    assert_eq!(syntax, expected);
+
+    let semantic_home = home("trace-golden-scip");
+    trace_fixture(&semantic_home, &[vec![1], vec![2], vec![]]);
+    let semantic = normalized_edge_json(trace_json(&semantic_home, 1, &["--to", "graph.py:7:6"]));
+    let expected: serde_json::Value =
+        serde_json::from_str(include_str!("golden/m6-trace-scip.json")).unwrap();
+    assert_eq!(semantic, expected);
+}

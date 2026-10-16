@@ -561,53 +561,48 @@ fn owner_scip(
     path: &str,
     file_digest: &str,
 ) -> Option<EdgeEndpoint> {
-    let facts = store::semantic_facts_of_import(conn, snapshot_id, import_id).ok()?;
-    let name = owner.name.as_deref()?;
-    let candidates = facts
-        .iter()
-        .filter(|f| f.roles & 0x1 != 0)
-        .filter(|f| f.display_name.as_deref() == Some(name))
-        .filter(|f| {
-            f.rel_path == path
-                && owner.byte_start <= f.byte_start
-                && f.byte_end <= owner.byte_end
-                && f.file_digest == file_digest
-                && match f.file_id {
-                    Some(fid) => fid == owner.file_id,
-                    None => f.file_digest == file_digest,
-                }
-        })
-        .filter_map(|f| {
-            f.symbol_uri.as_deref().map(|uri| EdgeEndpoint::Scip {
-                import_id,
-                symbol_uri: uri.to_string(),
-                doc: if crate::scip::is_local_symbol(uri) {
-                    Some(f.rel_path.clone())
-                } else {
-                    None
-                },
-            })
-        });
-    let mut unique = None;
-    for candidate in candidates {
-        if unique
-            .as_ref()
-            .is_some_and(|previous| !unify(previous, &candidate))
-        {
-            return None;
-        }
-        unique = Some(candidate);
+    let mut uris =
+        store::semantic_owner_uris(conn, snapshot_id, import_id, owner, path, file_digest).ok()?;
+    if uris.len() != 1 {
+        return None;
     }
-    unique
+    let uri = uris.remove(0);
+    Some(EdgeEndpoint::Scip {
+        import_id,
+        doc: if crate::scip::is_local_symbol(&uri) {
+            Some(path.to_string())
+        } else {
+            None
+        },
+        symbol_uri: uri,
+    })
+}
+
+#[derive(Debug, Clone)]
+pub struct OwnerBridge {
+    pub semantic: EdgeEndpoint,
+    pub syntax: EdgeEndpoint,
+    pub definition_span: (usize, usize),
+    pub digest: String,
 }
 
 /// Query aliases reuse the exact same validated owner mapping as derivation.
 /// They retrieve unresolved syntax rows; they never change edge identity.
-pub(crate) fn syntax_aliases(
+pub(crate) fn owner_bridges(
     conn: &rusqlite::Connection,
     snapshot_id: i64,
     endpoint: &EdgeEndpoint,
-) -> Result<Vec<EdgeEndpoint>, String> {
+) -> Result<Vec<OwnerBridge>, String> {
+    owner_bridges_checked(conn, snapshot_id, endpoint, None, || false)
+}
+
+fn owner_bridges_checked(
+    conn: &rusqlite::Connection,
+    snapshot_id: i64,
+    endpoint: &EdgeEndpoint,
+    limit: Option<usize>,
+    expired: impl Fn() -> bool,
+) -> Result<Vec<OwnerBridge>, String> {
     let EdgeEndpoint::Scip {
         import_id,
         symbol_uri,
@@ -621,36 +616,539 @@ pub(crate) fn syntax_aliases(
     if !valid {
         return Ok(Vec::new());
     }
-    let files = store::file_id_map(conn, snapshot_id)?;
     let mut aliases = Vec::new();
-    for fact in store::semantic_facts_for(conn, snapshot_id, symbol_uri)? {
+    let definitions = store::semantic_definitions_for(
+        conn,
+        snapshot_id,
+        *import_id,
+        symbol_uri,
+        doc.as_deref(),
+        limit.map(|n| n as i64 + 1).unwrap_or(i64::MAX),
+    )?;
+    if limit.is_some_and(|cap| definitions.len() > cap) {
+        return Err("mapping-budget".to_string());
+    }
+    for fact in definitions {
+        if expired() {
+            return Err("time-budget".to_string());
+        }
         if fact.import_id != *import_id
             || fact.roles & 1 == 0
             || doc.as_ref().is_some_and(|p| *p != fact.rel_path)
         {
             continue;
         }
-        let Some((fid, digest)) = files.get(&fact.rel_path) else {
+        let Some((fid, digest)) = store::file_identity(conn, snapshot_id, &fact.rel_path)? else {
             continue;
         };
+        if fact.file_digest != digest || !fact.file_id.is_none_or(|bound| bound == fid) {
+            continue;
+        }
         let symbols = store::symbols_at(conn, snapshot_id, &fact.rel_path)?;
-        let Some(owner) = owner_of(&symbols, *fid, fact.byte_start) else {
+        let Some(owner) = owner_of(&symbols, fid, fact.byte_start) else {
             continue;
         };
-        if owner_scip(conn, snapshot_id, *import_id, owner, &fact.rel_path, digest)
-            .is_some_and(|mapped| unify(endpoint, &mapped))
+        if owner_scip(
+            conn,
+            snapshot_id,
+            *import_id,
+            owner,
+            &fact.rel_path,
+            &digest,
+        )
+        .is_some_and(|mapped| unify(endpoint, &mapped))
         {
             let alias = EdgeEndpoint::SyntaxDef {
                 path: fact.rel_path,
                 byte_start: owner.byte_start,
                 byte_end: owner.byte_end,
             };
-            if !aliases.iter().any(|previous| unify(previous, &alias)) {
-                aliases.push(alias);
+            if !aliases
+                .iter()
+                .any(|previous: &OwnerBridge| unify(&previous.syntax, &alias))
+            {
+                aliases.push(OwnerBridge {
+                    semantic: endpoint.clone(),
+                    syntax: alias,
+                    definition_span: (fact.byte_start, fact.byte_end),
+                    digest: digest.clone(),
+                });
             }
         }
     }
     Ok(aliases)
+}
+
+pub(crate) fn syntax_aliases(
+    conn: &rusqlite::Connection,
+    snapshot_id: i64,
+    endpoint: &EdgeEndpoint,
+) -> Result<Vec<EdgeEndpoint>, String> {
+    Ok(owner_bridges(conn, snapshot_id, endpoint)?
+        .into_iter()
+        .map(|bridge| bridge.syntax)
+        .collect())
+}
+
+pub const TRACE_MAX_DEPTH: usize = 6;
+pub const TRACE_MAX_NODES: usize = 500;
+pub const TRACE_MAX_EDGES: usize = 3000;
+pub const TRACE_MAX_PATHS: usize = 1000;
+pub const TRACE_TIME_MS: u64 = 2000;
+
+pub struct TraceBudget {
+    pub depth: usize,
+    pub nodes: usize,
+    pub edges: usize,
+    pub paths: usize,
+    pub deadline: std::time::Instant,
+}
+
+impl TraceBudget {
+    pub fn new(depth: usize, started: std::time::Instant) -> Self {
+        Self {
+            depth,
+            nodes: TRACE_MAX_NODES,
+            edges: TRACE_MAX_EDGES,
+            paths: TRACE_MAX_PATHS,
+            deadline: started + std::time::Duration::from_millis(TRACE_TIME_MS),
+        }
+    }
+    fn expired(&self) -> bool {
+        std::time::Instant::now() >= self.deadline
+    }
+}
+
+#[derive(Clone)]
+pub struct TracePath {
+    pub edges: Vec<EdgeRow>,
+    pub cycle: bool,
+    pub truncated: bool,
+    pub unresolved: Vec<String>,
+}
+
+pub struct Traversal {
+    pub paths: Vec<TracePath>,
+    pub bridges: Vec<OwnerBridge>,
+    pub nodes: usize,
+    pub edges: usize,
+    pub cycle: bool,
+    pub truncated: bool,
+    pub unresolved: BTreeSet<String>,
+}
+
+impl Traversal {
+    fn stop(&mut self, reason: &str) {
+        self.truncated = true;
+        self.unresolved.insert(reason.to_string());
+    }
+    fn emit(&mut self, path: TracePath, target: bool, reached: bool, budget: &TraceBudget) {
+        self.cycle |= path.cycle;
+        self.truncated |= path.truncated;
+        self.unresolved.extend(path.unresolved.iter().cloned());
+        if !target || reached {
+            if self.paths.len() < budget.paths {
+                self.paths.push(path);
+            } else {
+                self.stop("path-budget");
+            }
+        }
+    }
+    fn remember(&mut self, bridges: Vec<OwnerBridge>) -> Result<(), String> {
+        for bridge in bridges {
+            if !self.bridges.iter().any(|old| {
+                unify(&old.semantic, &bridge.semantic) && unify(&old.syntax, &bridge.syntax)
+            }) {
+                if self.bridges.len() == TRACE_MAX_NODES {
+                    return Err("mapping-budget".to_string());
+                }
+                self.bridges.push(bridge);
+            }
+        }
+        Ok(())
+    }
+}
+
+fn trace_bridges(
+    conn: &rusqlite::Connection,
+    snapshot_id: i64,
+    endpoint: &EdgeEndpoint,
+    budget: &TraceBudget,
+) -> Result<Vec<OwnerBridge>, String> {
+    if budget.expired() {
+        return Err("time-budget".to_string());
+    }
+    owner_bridges_checked(conn, snapshot_id, endpoint, Some(TRACE_MAX_NODES), || {
+        budget.expired()
+    })
+}
+
+fn endpoint_import(endpoint: &EdgeEndpoint) -> Option<i64> {
+    match endpoint {
+        EdgeEndpoint::Scip { import_id, .. } => Some(*import_id),
+        _ => None,
+    }
+}
+
+/// No reverse name inference: a syntax node connects only when the existing
+/// owner proof yields exactly one import-scoped semantic identity.
+fn trace_node(
+    conn: &rusqlite::Connection,
+    snapshot_id: i64,
+    endpoint: &EdgeEndpoint,
+    scope: Option<i64>,
+    budget: &TraceBudget,
+) -> Result<(EdgeEndpoint, Vec<OwnerBridge>, bool), String> {
+    let EdgeEndpoint::SyntaxDef {
+        path,
+        byte_start,
+        byte_end,
+    } = endpoint
+    else {
+        return Ok((endpoint.clone(), Vec::new(), false));
+    };
+    let Some((_, digest)) = store::file_identity(conn, snapshot_id, path)? else {
+        return Ok((endpoint.clone(), Vec::new(), false));
+    };
+    let owner = store::symbols_at(conn, snapshot_id, path)?
+        .into_iter()
+        .find(|s| {
+            s.byte_start == *byte_start
+                && s.byte_end == *byte_end
+                && (s.kind == "function" || s.kind == "method")
+        });
+    let Some(owner) = owner else {
+        return Ok((endpoint.clone(), Vec::new(), false));
+    };
+    let mut candidates = Vec::new();
+    let imports_count = conn
+        .query_row(
+            "SELECT COUNT(*) FROM semantic_imports WHERE snapshot_id=?1",
+            [snapshot_id],
+            |r| r.get::<_, i64>(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if imports_count > TRACE_MAX_NODES as i64 {
+        return Err("mapping-budget".to_string());
+    }
+    for (id, import) in store::semantic_imports_for(conn, snapshot_id)? {
+        if budget.expired() {
+            return Err("time-budget".to_string());
+        }
+        if scope.is_some_and(|want| want != id) || !import_provenance_ok(&import) {
+            continue;
+        }
+        if let Some(mapped) = owner_scip(conn, snapshot_id, id, &owner, path, &digest) {
+            if !candidates.iter().any(|old| unify(old, &mapped)) {
+                candidates.push(mapped);
+            }
+        }
+    }
+    if candidates.len() != 1 {
+        return Ok((endpoint.clone(), Vec::new(), candidates.len() > 1));
+    }
+    let mapped = candidates.remove(0);
+    let bridges = trace_bridges(conn, snapshot_id, &mapped, budget)?;
+    if !bridges.iter().any(|bridge| unify(&bridge.syntax, endpoint)) {
+        return Ok((endpoint.clone(), Vec::new(), false));
+    }
+    Ok((mapped, bridges, false))
+}
+
+/// Bounded breadth-first enumeration. Lineage detects cycles per PATH so a
+/// diamond's shared node preserves both routes. All joins use scoped keys.
+pub fn traverse(
+    conn: &rusqlite::Connection,
+    snapshot_id: i64,
+    start: &EdgeEndpoint,
+    target: Option<&EdgeEndpoint>,
+    budget: &TraceBudget,
+) -> Result<Traversal, String> {
+    let mut out = Traversal {
+        paths: Vec::new(),
+        bridges: Vec::new(),
+        nodes: 0,
+        edges: 0,
+        cycle: false,
+        truncated: false,
+        unresolved: BTreeSet::new(),
+    };
+    if !(1..=TRACE_MAX_NODES).contains(&budget.nodes)
+        || !(1..=TRACE_MAX_EDGES).contains(&budget.edges)
+        || !(1..=TRACE_MAX_PATHS).contains(&budget.paths)
+        || budget.depth == 0
+        || budget.depth > TRACE_MAX_DEPTH
+    {
+        return Err("invalid trace budget".to_string());
+    }
+    if budget.expired() {
+        out.stop("time-budget");
+        return Ok(out);
+    }
+    struct State {
+        node: EdgeEndpoint,
+        edges: Vec<EdgeRow>,
+        lineage: Vec<EdgeEndpoint>,
+    }
+    enum Work {
+        Node(State),
+        Done(TracePath, bool),
+    }
+    let mut queue = std::collections::VecDeque::new();
+    let result = (|| -> Result<(), String> {
+        let (start, bridges, ambiguous) = trace_node(conn, snapshot_id, start, None, budget)?;
+        out.remember(bridges)?;
+        if ambiguous {
+            out.unresolved.insert("ambiguous-owner-mapping".to_string());
+        }
+        let target = if let Some(target) = target {
+            let (node, bridges, ambiguous) =
+                trace_node(conn, snapshot_id, target, endpoint_import(&start), budget)?;
+            out.remember(bridges)?;
+            if ambiguous {
+                out.unresolved
+                    .insert("ambiguous-destination-mapping".to_string());
+            }
+            Some(node)
+        } else {
+            None
+        };
+        let mut known = vec![start.clone()];
+        out.nodes = 1;
+        queue.push_back(Work::Node(State {
+            node: start.clone(),
+            edges: Vec::new(),
+            lineage: vec![start],
+        }));
+        'search: while let Some(work) = queue.pop_front() {
+            if budget.expired() {
+                out.stop("time-budget");
+                break;
+            }
+            let state = match work {
+                Work::Node(state) => state,
+                Work::Done(path, reached) => {
+                    out.emit(path, target.is_some(), reached, budget);
+                    if out.paths.len() >= budget.paths && !queue.is_empty() {
+                        out.stop("path-budget");
+                        break;
+                    }
+                    continue;
+                }
+            };
+            if target.as_ref().is_some_and(|t| unify(t, &state.node)) {
+                out.emit(
+                    TracePath {
+                        edges: state.edges,
+                        cycle: false,
+                        truncated: false,
+                        unresolved: Vec::new(),
+                    },
+                    true,
+                    true,
+                    budget,
+                );
+                continue;
+            }
+            let bridges = trace_bridges(conn, snapshot_id, &state.node, budget)?;
+            let aliases: Vec<_> = bridges.iter().map(|b| b.syntax.clone()).collect();
+            out.remember(bridges)?;
+            let selection = store::EdgeSelection {
+                snapshot_id,
+                endpoint: &state.node,
+                inbound: false,
+                candidate_name: None,
+                candidate_paths: &[],
+                syntax_aliases: &aliases,
+            };
+            if budget.expired() {
+                out.stop("time-budget");
+                break;
+            }
+            // Only a one-row existence probe at the depth boundary; no extra hop.
+            if state.edges.len() == budget.depth {
+                let more = !store::selected_edge_page(conn, &selection, 1, 0)?.is_empty();
+                let reasons = if more {
+                    vec!["depth-budget".to_string()]
+                } else {
+                    Vec::new()
+                };
+                out.emit(
+                    TracePath {
+                        edges: state.edges,
+                        cycle: false,
+                        truncated: more,
+                        unresolved: reasons,
+                    },
+                    target.is_some(),
+                    false,
+                    budget,
+                );
+                continue;
+            }
+            let mut offset = 0;
+            loop {
+                if budget.expired() {
+                    out.stop("time-budget");
+                    break 'search;
+                }
+                if out.edges == budget.edges {
+                    out.stop("edge-budget");
+                    break 'search;
+                }
+                let batch = (budget.edges - out.edges).min(1000);
+                let rows =
+                    store::selected_edge_page(conn, &selection, batch as i64, offset as i64)?;
+                let count = rows.len();
+                if count == 0 && offset == 0 {
+                    if state.edges.is_empty() {
+                        out.unresolved.insert("no-outbound-edges".to_string());
+                    } else {
+                        out.emit(
+                            TracePath {
+                                edges: state.edges.clone(),
+                                cycle: false,
+                                truncated: false,
+                                unresolved: Vec::new(),
+                            },
+                            target.is_some(),
+                            false,
+                            budget,
+                        );
+                    }
+                }
+                for edge in rows {
+                    if budget.expired() {
+                        out.stop("time-budget");
+                        break 'search;
+                    }
+                    out.edges += 1;
+                    if out.paths.len() >= budget.paths {
+                        out.stop("path-budget");
+                        break 'search;
+                    }
+                    let mut hops = state.edges.clone();
+                    let Some(callee) = edge.callee.as_ref().filter(|_| edge.edge_kind == "CALLS")
+                    else {
+                        let mut reasons = vec!["unresolved-target".to_string()];
+                        if let Some(reason) = &edge.unresolved {
+                            reasons.push(reason.clone());
+                        }
+                        hops.push(edge);
+                        queue.push_back(Work::Done(
+                            TracePath {
+                                edges: hops,
+                                cycle: false,
+                                truncated: false,
+                                unresolved: reasons,
+                            },
+                            false,
+                        ));
+                        continue;
+                    };
+                    if endpoint_import(&state.node)
+                        .zip(endpoint_import(callee))
+                        .is_some_and(|(a, b)| a != b)
+                    {
+                        return Err("trace edge crosses import scope".to_string());
+                    }
+                    let (next, bridges, ambiguous) = trace_node(
+                        conn,
+                        snapshot_id,
+                        callee,
+                        endpoint_import(&state.node),
+                        budget,
+                    )?;
+                    out.remember(bridges)?;
+                    if ambiguous {
+                        out.unresolved.insert("ambiguous-owner-mapping".to_string());
+                    }
+                    let cycle = state.lineage.iter().any(|old| unify(old, &next));
+                    if !known.iter().any(|old| unify(old, &next)) {
+                        if known.len() == budget.nodes {
+                            out.stop("node-budget");
+                            out.emit(
+                                TracePath {
+                                    edges: hops,
+                                    cycle: false,
+                                    truncated: true,
+                                    unresolved: vec!["node-budget".to_string()],
+                                },
+                                target.is_some(),
+                                false,
+                                budget,
+                            );
+                            break 'search;
+                        }
+                        known.push(next.clone());
+                        out.nodes = known.len();
+                    }
+                    hops.push(edge);
+                    let reached = target.as_ref().is_some_and(|t| unify(t, &next));
+                    if cycle || reached {
+                        queue.push_back(Work::Done(
+                            TracePath {
+                                edges: hops,
+                                cycle,
+                                truncated: false,
+                                unresolved: if cycle {
+                                    vec!["cycle".to_string()]
+                                } else {
+                                    Vec::new()
+                                },
+                            },
+                            reached,
+                        ));
+                    } else {
+                        let mut lineage = state.lineage.clone();
+                        lineage.push(next.clone());
+                        queue.push_back(Work::Node(State {
+                            node: next,
+                            edges: hops,
+                            lineage,
+                        }));
+                    }
+                }
+                offset += count;
+                if count < batch {
+                    break;
+                }
+            }
+            if out.paths.len() >= budget.paths && !queue.is_empty() {
+                out.stop("path-budget");
+                break;
+            }
+        }
+        Ok(())
+    })();
+    if let Err(reason) = result {
+        if reason == "time-budget" || reason == "mapping-budget" {
+            out.stop(&reason);
+        } else {
+            return Err(reason);
+        }
+    }
+    while let Some(work) = queue.pop_front() {
+        if out.paths.len() >= budget.paths {
+            break;
+        }
+        if let Work::Done(path, reached) = work {
+            out.emit(path, target.is_some(), reached, budget);
+        }
+    }
+    if target.is_some() && out.paths.is_empty() {
+        let reason = if !out.truncated
+            && !out.unresolved.contains("unresolved-target")
+            && !out.unresolved.contains("ambiguous-owner-mapping")
+            && !out.unresolved.contains("ambiguous-destination-mapping")
+        {
+            "target-unreachable"
+        } else {
+            "target-not-proven"
+        };
+        out.unresolved.insert(reason.to_string());
+    }
+    Ok(out)
 }
 
 /// Full re-derivation after semantic carry-over and `import_id` rebinding.
@@ -685,6 +1183,124 @@ pub fn rederive_after_carry(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn trace_store(pairs: &[(usize, usize)]) -> (rusqlite::Connection, i64, EdgeEndpoint) {
+        let conn = mem_db();
+        let snapshot = mk_snap(&conn);
+        let import = mk_import_full(
+            &conn,
+            snapshot,
+            "scip-import",
+            "definitions,references",
+            "UTF8",
+            "trace-test",
+        );
+        let node = |n| EdgeEndpoint::Scip {
+            import_id: import,
+            symbol_uri: format!("node-{n}"),
+            doc: None,
+        };
+        for (i, (a, b)) in pairs.iter().enumerate() {
+            store::insert_edge(
+                &conn,
+                &EdgeRow {
+                    snapshot_id: snapshot,
+                    file_id: 1,
+                    caller: Some(node(a)),
+                    caller_path: "graph.py".to_string(),
+                    caller_span_bytes: (i * 2, i * 2 + 1),
+                    callee: Some(node(b)),
+                    callee_name: format!("n{b}"),
+                    edge_kind: "CALLS".to_string(),
+                    precision: "Exact".to_string(),
+                    provider: "scip-import".to_string(),
+                    evidence: "{}".to_string(),
+                    unresolved: None,
+                },
+            )
+            .unwrap();
+        }
+        (conn, snapshot, node(&0))
+    }
+
+    #[test]
+    fn trace_node_edge_path_and_time_budgets_are_explicit() {
+        let (conn, snapshot, start) = trace_store(&[(0, 1), (1, 2), (2, 3)]);
+        let mut budget = TraceBudget::new(6, std::time::Instant::now());
+        budget.nodes = 2;
+        let limited = traverse(&conn, snapshot, &start, None, &budget).unwrap();
+        assert_eq!(limited.nodes, 2);
+        assert!(limited.truncated);
+        assert!(limited.unresolved.contains("node-budget"));
+        let mut budget = TraceBudget::new(6, std::time::Instant::now());
+        budget.edges = 1;
+        let limited = traverse(&conn, snapshot, &start, None, &budget).unwrap();
+        assert_eq!(limited.edges, 1);
+        assert!(limited.unresolved.contains("edge-budget"));
+        let (conn, snapshot, start) = trace_store(&[(0, 1), (0, 2), (0, 3)]);
+        let mut budget = TraceBudget::new(6, std::time::Instant::now());
+        budget.paths = 1;
+        let limited = traverse(&conn, snapshot, &start, None, &budget).unwrap();
+        assert_eq!(limited.paths.len(), 1);
+        assert!(limited.unresolved.contains("path-budget"));
+        let mut budget = TraceBudget::new(6, std::time::Instant::now());
+        budget.deadline = std::time::Instant::now();
+        let limited = traverse(&conn, snapshot, &start, None, &budget).unwrap();
+        assert!(limited.paths.is_empty());
+        assert_eq!(limited.nodes, 0);
+        assert_eq!(limited.edges, 0);
+        assert!(limited.truncated);
+        assert!(limited.unresolved.contains("time-budget"));
+    }
+
+    #[test]
+    fn trace_rejects_internal_budget_above_contract() {
+        let (conn, snapshot, start) = trace_store(&[]);
+        let mut budget = TraceBudget::new(6, std::time::Instant::now());
+        budget.nodes = 501;
+        assert!(traverse(&conn, snapshot, &start, None, &budget).is_err());
+    }
+
+    #[test]
+    fn trace_bfs_orders_leaf_and_cycle_paths_at_same_depth() {
+        let (conn, snapshot, start) = trace_store(&[(0, 1), (0, 2), (1, 3), (2, 2)]);
+        let result = traverse(
+            &conn,
+            snapshot,
+            &start,
+            None,
+            &TraceBudget::new(3, std::time::Instant::now()),
+        )
+        .unwrap();
+        assert_eq!(result.paths.len(), 2);
+        assert!(
+            !result.paths[0].cycle,
+            "first branch's leaf precedes second branch cycle"
+        );
+        assert!(result.paths[1].cycle);
+        assert_eq!(result.nodes, 4);
+    }
+
+    #[test]
+    fn trace_retains_completed_target_when_later_branch_exceeds_budget() {
+        let (conn, snapshot, start) = trace_store(&[(0, 1), (0, 2), (0, 3)]);
+        let mut budget = TraceBudget::new(3, std::time::Instant::now());
+        budget.nodes = 3;
+        let target = EdgeEndpoint::Scip {
+            import_id: endpoint_import(&start).unwrap(),
+            symbol_uri: "node-1".to_string(),
+            doc: None,
+        };
+        let result = traverse(&conn, snapshot, &start, Some(&target), &budget).unwrap();
+        assert!(result.truncated);
+        assert_eq!(
+            result.paths.len(),
+            1,
+            "already-proven target must survive a later frontier cutoff"
+        );
+        assert_eq!(result.paths[0].edges.len(), 1);
+        assert!(!result.unresolved.contains("target-not-proven"));
+    }
     use crate::testutil::tmpdir;
 
     fn mem_db() -> rusqlite::Connection {

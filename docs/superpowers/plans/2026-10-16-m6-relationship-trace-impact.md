@@ -141,11 +141,11 @@ Contract: `{"repo","snapshot":{"id","nonce"},"anchor":{"kind":"semantic|syntax-f
 
 Semantics (locked): `trace --to PATH:LINE:COL` = destination-anchored BFS (paths from source anchor to the resolved `--to` key, both anchors resolved with the same semantic-first/syntax-fallback rule); without `--to` = bounded enumeration of outbound paths from the anchor up to depth/node budgets. Both deterministic under the Task 4 ordering; every path carries per-edge evidence; `truncated`/`cycle` flags explicit.
 
-- [ ] **Step 1: Write failing tests** — `--to` destination found returns the exact path; unreachable `--to` returns empty paths + `unresolved=["target-unreachable"]`; no-`--to` linear chain depth 2 returns 1 path; cycle terminates with `cycle:true` and visited ≤ nodes; depth cap truncates with `truncated:true`; pagination (`limit/offset`) over paths is deterministic across runs.
-- [ ] **Step 2: Run to verify they fail** — Run: `cargo test --locked --test edges` Expected: FAIL.
-- [ ] **Step 3: Implement BFS** — budgets `depth default 3 max 6, nodes 500, time 2000ms`; visited on full edge keys (never bare names); output `paths[]` + `plausible-path-not-execution` disclaimer string.
-- [ ] **Step 4: Re-run** — Run: `cargo test --locked --test edges` Expected: PASS.
-- [ ] **Step 5: Commit** — `git add crates/cli/src/edges.rs crates/cli/src/args.rs crates/cli/src/main.rs crates/cli/src/index.rs && git commit -m "m6: bounded static trace with cycle/depth/node/time guards"`
+- [x] **Step 1: Write failing tests** — destination, outbound chain, cycle/unreachable/depth, deterministic diamond pagination, syntax fallback, mapping isolation, max-depth, evidence goldens, budgets, and actual promotion concurrency. See `docs/m6-task5-validation.md`.
+- [x] **Step 2: Run to verify they fail** — five initial functional CLI cases failed on unknown `trace`; subsequent RED/GREEN reproduced an excessive internal node budget and loss of a completed target after a later frontier cutoff. No RED is claimed for already-passing invalid-argument coverage.
+- [x] **Step 3: Implement BFS** — depth default 3/max 6, 500 nodes, cooperative 2000 ms deadline, full scoped identities, per-path cycle detection, per-hop evidence, verified owner mappings, and explicit unresolved/truncated results. Additional work bounds: 3000 edges, 1000 paths, 500 mappings. Deadline and pagination limits are documented in `docs/m6-task5-validation.md`.
+- [x] **Step 4: Re-run** — all 40 edge integration tests and all 300 locked tests pass. Formatting, check, warning-denying Clippy, build, real syntax/SCIP CLI smoke, and independent review pass locally.
+- [x] **Step 5: Commit** — signed local checkpoint `m6: bounded static trace with cycle/depth/node/time guards`, including scoped store/proof helpers, tests, two goldens, and `docs/m6-task5-validation.md`. Stop for Task 5 audit; no push or Task 6–8 work.
 
 ### Task 6: Impact (UNKNOWN-first, never false-safe)
 

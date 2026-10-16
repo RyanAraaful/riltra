@@ -1,0 +1,149 @@
+{
+  "schema_version": 1,
+  "repo": "sem",
+  "snapshot": {
+    "id": 1,
+    "nonce": "<nonce>",
+    "revision": "head=-|branch=-|dirty=false|untracked=0|cfg=1a92ea80d66dd56e|nonce=<nonce>"
+  },
+  "direction": "trace",
+  "anchor": {
+    "kind": "syntax-fallback",
+    "path": "graph.py",
+    "line": 1,
+    "col": 6,
+    "symbol_uri": null,
+    "import_id": null,
+    "precision": "Heuristic",
+    "anchor_uncertainty": "syntax-only anchor: no semantic identity at this position",
+    "span": [
+      0,
+      18
+    ],
+    "endpoint": {
+      "type": "syntax_def",
+      "import_id": null,
+      "symbol_uri": null,
+      "doc": null,
+      "path": "graph.py",
+      "byte_start": 0,
+      "byte_end": 18
+    }
+  },
+  "destination": null,
+  "freshness": {
+    "status": "fresh",
+    "reasons": []
+  },
+  "verification": "Unverified",
+  "completeness": {
+    "status": "partial",
+    "covered": 1,
+    "total": 1,
+    "total_exact": true,
+    "denominator": {
+      "ambiguous_calls": 0,
+      "dynamic_calls": 0,
+      "missing_provider_files": 1,
+      "observed_edges": 1,
+      "parse_error_files": 0,
+      "skipped_files": 0,
+      "stale_imports": 0,
+      "truncated_branches": 0,
+      "unresolved_owner": 0,
+      "unresolved_target": 2,
+      "unsupported_files": 0
+    },
+    "unresolved": [
+      "missing_provider_files",
+      "no-overlap",
+      "syntax-anchor-uncertain",
+      "unresolved-relations",
+      "unresolved-target",
+      "unresolved_target"
+    ]
+  },
+  "paths": [
+    {
+      "edges": [
+        {
+          "kind": "POTENTIAL_CALL",
+          "precision": "Heuristic",
+          "caller": {
+            "type": "syntax_def",
+            "import_id": null,
+            "symbol_uri": null,
+            "doc": null,
+            "path": "graph.py",
+            "byte_start": 0,
+            "byte_end": 18
+          },
+          "callee": null,
+          "caller_path": "graph.py",
+          "caller_span": [
+            14,
+            18
+          ],
+          "callee_name": "f1",
+          "provider": "syntax",
+          "import_id": null,
+          "tool": null,
+          "verification": "Unverified",
+          "unresolved": "no-overlap",
+          "evidence": {
+            "path": "graph.py",
+            "span": [
+              14,
+              18
+            ],
+            "callee_span": [
+              14,
+              16
+            ],
+            "terminal_span": [
+              14,
+              16
+            ],
+            "reference_span": null,
+            "digest": "590fddd26c9b5cfc",
+            "provider": "syntax",
+            "imports": []
+          }
+        }
+      ],
+      "cycle": false,
+      "truncated": false,
+      "verification": "Unverified",
+      "unresolved": [
+        "unresolved-target",
+        "no-overlap"
+      ]
+    }
+  ],
+  "bridges": [],
+  "visits": {
+    "nodes": 1,
+    "edges": 1
+  },
+  "budgets": {
+    "depth": 3,
+    "max_depth": 6,
+    "nodes": 500,
+    "edges": 3000,
+    "paths": 1000,
+    "mappings": 500,
+    "time_ms": 2000
+  },
+  "limits": {
+    "limit": 50,
+    "offset": 0,
+    "next_offset": null
+  },
+  "cycle": false,
+  "truncated": false,
+  "unresolved": [
+    "no-overlap",
+    "unresolved-target"
+  ],
+  "disclaimer": "plausible-path-not-execution"
+}

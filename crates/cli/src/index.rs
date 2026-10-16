@@ -1707,6 +1707,93 @@ impl EdgeRead<'_> {
     }
 }
 
+struct QueryCoverage {
+    denominator: BTreeMap<&'static str, usize>,
+    reasons: BTreeSet<String>,
+    verification: String,
+}
+
+impl EdgeRead<'_> {
+    /// Shared Task4/Task5 coverage and import memo, still inside one read txn.
+    fn coverage(&mut self) -> Result<QueryCoverage, String> {
+        let mut stale = 0;
+        let mut provider_paths = BTreeSet::new();
+        for (id, import) in store::semantic_imports_for(self.tx, self.snapshot.id)? {
+            if !crate::edges::import_provenance_ok(&import) {
+                continue;
+            }
+            if self.verdict(id)? == "Stale" {
+                stale += 1;
+            }
+            let mut stmt = self.tx.prepare("SELECT DISTINCT rel_path FROM semantic_facts WHERE snapshot_id = ?1 AND import_id = ?2 AND symbol_uri IS NOT NULL").map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map(params![self.snapshot.id, id], |r| r.get::<_, String>(0))
+                .map_err(|e| e.to_string())?;
+            for row in rows {
+                provider_paths.insert(row.map_err(|e| e.to_string())?);
+            }
+        }
+        let files = store::file_id_map(self.tx, self.snapshot.id)?;
+        let missing = files
+            .keys()
+            .filter(|p| !provider_paths.contains(*p))
+            .count();
+        let (walk, skips) = scan::plan_walk(self.canon)?;
+        let unsupported = walk
+            .iter()
+            .filter(|f| matches!(f.action, PlanAction::Unsupported(_)))
+            .count();
+        let skipped = skips.escape
+            + skips.unreadable
+            + walk
+                .iter()
+                .filter(|f| {
+                    matches!(f.action,PlanAction::Skip(reason) if reason!="ignored")
+                        || (matches!(f.action, PlanAction::Parse(_)) && !files.contains_key(&f.rel))
+                })
+                .count();
+        let parse_errors = self
+            .tx
+            .query_row(
+                "SELECT COUNT(*) FROM files WHERE snapshot_id = ?1 AND errors > 0",
+                params![self.snapshot.id],
+                |r| r.get::<_, i64>(0),
+            )
+            .map_err(|e| e.to_string())? as usize;
+        let unknown = store::snapshot_edge_counts(self.tx, self.snapshot.id)?;
+        let denominator = BTreeMap::from([
+            ("observed_edges", 0),
+            ("unsupported_files", unsupported),
+            ("missing_provider_files", missing),
+            ("dynamic_calls", unknown.dynamic_calls),
+            ("ambiguous_calls", unknown.ambiguous_calls),
+            ("truncated_branches", 0),
+            ("unresolved_owner", unknown.unresolved_owner),
+            ("unresolved_target", unknown.unresolved_target),
+            ("stale_imports", stale),
+            ("skipped_files", skipped),
+            ("parse_error_files", parse_errors),
+        ]);
+        let mut reasons = BTreeSet::new();
+        if unknown.unresolved > 0 {
+            reasons.insert("unresolved-relations".to_string());
+        }
+        if !self.source_fresh {
+            reasons.insert("source-not-fresh".to_string());
+        }
+        Ok(QueryCoverage {
+            denominator,
+            reasons,
+            verification: if !self.source_fresh || stale > 0 {
+                "Stale"
+            } else {
+                "Unverified"
+            }
+            .to_string(),
+        })
+    }
+}
+
 pub fn edge_query(
     home: &Path,
     name: &str,
@@ -1776,7 +1863,6 @@ fn edge_query_inner(
         syntax_aliases: &aliases,
     };
     let counts = store::selected_edge_counts(&tx, &selection)?;
-    let unknowns = store::snapshot_edge_counts(&tx, snapshot.id)?;
     let page = if selection.candidate_name.is_some() || !aliases.is_empty() {
         store::selected_edge_page(&tx, &selection, request.limit as i64, request.offset as i64)?
     } else if selection.inbound {
@@ -1817,27 +1903,8 @@ fn edge_query_inner(
             verification = "Stale".to_string();
         }
     }
-    let mut stale_imports = 0;
-    // Conservative repository-wide coverage context. It is NOT proof that a
-    // provider observed all behavior, and counts intentionally may overlap.
-    let imports = store::semantic_imports_for(&tx, snapshot.id)?;
-    let mut provider_paths = BTreeSet::new();
-    for (id, import) in &imports {
-        if !crate::edges::import_provenance_ok(import) {
-            continue;
-        }
-        if read.verdict(*id)? == "Stale" {
-            stale_imports += 1;
-        }
-        let mut stmt = tx.prepare("SELECT DISTINCT rel_path FROM semantic_facts WHERE snapshot_id = ?1 AND import_id = ?2 AND symbol_uri IS NOT NULL").map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map(params![snapshot.id, id], |r| r.get::<_, String>(0))
-            .map_err(|e| e.to_string())?;
-        for row in rows {
-            provider_paths.insert(row.map_err(|e| e.to_string())?);
-        }
-    }
-    if stale_imports > 0 {
+    let coverage = read.coverage()?;
+    if coverage.verification == "Stale" {
         verification = "Stale".to_string();
     }
     let mut edges = Vec::with_capacity(page.len());
@@ -1852,48 +1919,13 @@ fn edge_query_inner(
         }
         edges.push(hit);
     }
-    let files = store::file_id_map(&tx, snapshot.id)?;
-    let missing = files
-        .keys()
-        .filter(|p| !provider_paths.contains(*p))
-        .count();
-    let (walk, skips) = scan::plan_walk(&canon)?;
-    let unsupported = walk
-        .iter()
-        .filter(|f| matches!(f.action, PlanAction::Unsupported(_)))
-        .count();
-    let skipped = skips.escape
-        + skips.unreadable
-        + walk
-            .iter()
-            .filter(|f| {
-                matches!(f.action, PlanAction::Skip(reason) if reason != "ignored")
-                    || (matches!(f.action, PlanAction::Parse(_)) && !files.contains_key(&f.rel))
-            })
-            .count();
-    let parse_error_files: usize = tx
-        .query_row(
-            "SELECT COUNT(*) FROM files WHERE snapshot_id = ?1 AND errors > 0",
-            params![snapshot.id],
-            |r| r.get::<_, i64>(0),
-        )
-        .map_err(|e| e.to_string())? as usize;
-    let denominator = BTreeMap::from([
-        ("observed_edges", counts.total),
-        ("unsupported_files", unsupported),
-        ("missing_provider_files", missing),
-        ("dynamic_calls", unknowns.dynamic_calls),
-        ("ambiguous_calls", unknowns.ambiguous_calls),
-        (
-            "truncated_branches",
-            usize::from(truncated || request.offset > 0),
-        ),
-        ("unresolved_owner", unknowns.unresolved_owner),
-        ("unresolved_target", unknowns.unresolved_target),
-        ("stale_imports", stale_imports),
-        ("skipped_files", skipped),
-        ("parse_error_files", parse_error_files),
-    ]);
+    let mut denominator = coverage.denominator;
+    reasons.extend(coverage.reasons);
+    denominator.insert("observed_edges", counts.total);
+    denominator.insert(
+        "truncated_branches",
+        usize::from(truncated || request.offset > 0),
+    );
     for (key, count) in &denominator {
         if *key != "observed_edges" && *count > 0 {
             reasons.insert((*key).to_string());
@@ -1901,9 +1933,6 @@ fn edge_query_inner(
     }
     if anchor.uncertainty.is_some() {
         reasons.insert("syntax-anchor-uncertain".to_string());
-    }
-    if unknowns.unresolved > 0 {
-        reasons.insert("unresolved-relations".to_string());
     }
     if counts.total == 0 {
         reasons.insert("empty-result-not-coverage-proof".to_string());
@@ -1933,6 +1962,221 @@ fn edge_query_inner(
         limit: request.limit,
         offset: request.offset,
         next_offset: truncated.then_some(next),
+    })
+}
+
+pub struct TraceRequest<'a> {
+    pub source: SpanQuery<'a>,
+    pub symbol: Option<&'a str>,
+    pub destination: Option<SpanQuery<'a>>,
+    pub depth: usize,
+    pub limit: usize,
+    pub offset: usize,
+}
+
+pub struct TracePathOut {
+    pub edges: Vec<EdgeHitOut>,
+    pub cycle: bool,
+    pub truncated: bool,
+    pub unresolved: Vec<String>,
+    pub verification: String,
+}
+
+pub struct TraceQueryOut {
+    pub repo: String,
+    pub snapshot: store::Snapshot,
+    pub revision: String,
+    pub anchor: EdgeAnchor,
+    pub destination: Option<EdgeAnchor>,
+    pub freshness: String,
+    pub freshness_reasons: Vec<String>,
+    pub verification: String,
+    pub completeness: CompletenessOut,
+    pub total_exact: bool,
+    pub paths: Vec<TracePathOut>,
+    pub bridges: Vec<crate::edges::OwnerBridge>,
+    pub nodes: usize,
+    pub edge_visits: usize,
+    pub cycle: bool,
+    pub truncated: bool,
+    pub unresolved: Vec<String>,
+    pub depth: usize,
+    pub limit: usize,
+    pub offset: usize,
+    pub next_offset: Option<usize>,
+}
+
+pub fn trace_query(
+    home: &Path,
+    name: &str,
+    root: &Path,
+    request: &TraceRequest<'_>,
+) -> Result<TraceQueryOut, String> {
+    trace_query_inner(home, name, root, request, || {})
+}
+
+fn trace_query_inner(
+    home: &Path,
+    name: &str,
+    root: &Path,
+    request: &TraceRequest<'_>,
+    pinned: impl FnOnce(),
+) -> Result<TraceQueryOut, String> {
+    let started = Instant::now();
+    if !(1..=crate::edges::TRACE_MAX_DEPTH).contains(&request.depth)
+        || !(1..=MAX_SEARCH_LIMIT).contains(&request.limit)
+        || request.offset > i64::MAX as usize - MAX_SEARCH_LIMIT
+        || request.source.line1 == 0
+        || request.source.col1 == 0
+        || request
+            .destination
+            .as_ref()
+            .is_some_and(|d| d.line1 == 0 || d.col1 == 0)
+    {
+        return Err("invalid trace bounds".to_string());
+    }
+    let canon = canonical_repo_root(root)?;
+    let rel = crate::semantic::validate_doc_path(&canon, request.source.rel)?;
+    let dest_path = request
+        .destination
+        .as_ref()
+        .map(|d| crate::semantic::validate_doc_path(&canon, d.rel))
+        .transpose()?;
+    let mut conn = store::open_live(&store::db_path(home, name))?;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let snapshot = store::latest_snapshot(&tx)?.ok_or("no snapshot: index the repository first")?;
+    pinned();
+    let anchor = resolve_edge_anchor(
+        &tx,
+        snapshot.id,
+        &canon,
+        &rel,
+        request.source.line1 - 1,
+        request.source.col1 - 1,
+        request.symbol,
+    )?;
+    let destination = request
+        .destination
+        .as_ref()
+        .zip(dest_path.as_ref())
+        .map(|(d, p)| {
+            resolve_edge_anchor(&tx, snapshot.id, &canon, p, d.line1 - 1, d.col1 - 1, None)
+        })
+        .transpose()?;
+    let start = anchor_endpoint(&anchor).ok_or("source has no identity")?;
+    let target = destination.as_ref().and_then(anchor_endpoint);
+    let (freshness, mut freshness_reasons) = evaluate_snapshot(&tx, name, &canon, &snapshot);
+    freshness_reasons.sort();
+    freshness_reasons.dedup();
+    let live = live_state_for(&tx, &snapshot)?;
+    let revision = crate::semantic::revision_string(&live);
+    let mut read = EdgeRead {
+        tx: &tx,
+        snapshot: &snapshot,
+        live: &live,
+        canon: &canon,
+        source_fresh: freshness == "fresh",
+        memo: BTreeMap::new(),
+    };
+    let coverage = read.coverage()?;
+    let mut verification = coverage.verification;
+    for a in [&anchor, destination.as_ref().unwrap_or(&anchor)] {
+        if let Some(id) = a.import_id {
+            if read.verdict(id)? == "Stale" {
+                verification = "Stale".to_string();
+            }
+        }
+    }
+    let budget = crate::edges::TraceBudget::new(request.depth, started);
+    let traversal = crate::edges::traverse(&tx, snapshot.id, &start, target.as_ref(), &budget)?;
+    let total = traversal.paths.len();
+    let mut paths = Vec::new();
+    for path in traversal
+        .paths
+        .into_iter()
+        .skip(request.offset)
+        .take(request.limit)
+    {
+        let mut hits = Vec::new();
+        let mut path_verification = if read.source_fresh {
+            "Unverified"
+        } else {
+            "Stale"
+        }
+        .to_string();
+        for edge in path.edges {
+            let hit = read.hit(edge)?;
+            if hit.verification == "Stale" {
+                path_verification = "Stale".to_string();
+                verification = "Stale".to_string();
+            }
+            hits.push(hit);
+        }
+        paths.push(TracePathOut {
+            edges: hits,
+            cycle: path.cycle,
+            truncated: path.truncated,
+            unresolved: path.unresolved,
+            verification: path_verification,
+        });
+    }
+    let next = request.offset + paths.len();
+    let more = next < total;
+    let truncated = traversal.truncated || more;
+    let mut reasons = coverage.reasons;
+    reasons.extend(traversal.unresolved.iter().cloned());
+    if anchor.uncertainty.is_some() {
+        reasons.insert("syntax-anchor-uncertain".to_string());
+    }
+    if destination
+        .as_ref()
+        .is_some_and(|a| a.uncertainty.is_some())
+    {
+        reasons.insert("destination-anchor-uncertain".to_string());
+    }
+    if total == 0 {
+        reasons.insert("empty-result-not-coverage-proof".to_string());
+    }
+    let mut denominator = coverage.denominator;
+    denominator.insert("observed_edges", traversal.edges);
+    denominator.insert(
+        "truncated_branches",
+        usize::from(truncated || request.offset > 0),
+    );
+    for (key, count) in &denominator {
+        if *key != "observed_edges" && *count > 0 {
+            reasons.insert((*key).to_string());
+        }
+    }
+    let complete = reasons.is_empty() && !truncated && paths.len() == total;
+    Ok(TraceQueryOut {
+        repo: name.to_string(),
+        snapshot,
+        revision,
+        anchor,
+        destination,
+        freshness,
+        freshness_reasons,
+        verification,
+        completeness: CompletenessOut {
+            status: if complete { "complete" } else { "partial" }.to_string(),
+            covered: paths.len(),
+            total,
+            denominator,
+            unresolved: reasons.into_iter().collect(),
+        },
+        total_exact: !traversal.truncated,
+        paths,
+        bridges: traversal.bridges,
+        nodes: traversal.nodes,
+        edge_visits: traversal.edges,
+        cycle: traversal.cycle,
+        truncated,
+        unresolved: traversal.unresolved.into_iter().collect(),
+        depth: request.depth,
+        limit: request.limit,
+        offset: request.offset,
+        next_offset: more.then_some(next),
     })
 }
 
@@ -3514,5 +3758,102 @@ mod tests {
             "new file invalidates the OLD source snapshot, never upgrades it"
         );
         assert_eq!(next.freshness, "fresh");
+    }
+
+    #[test]
+    fn task5_trace_pins_paths_and_digests_across_concurrent_promotion() {
+        let home = tmpdir("trace-pin-home");
+        let repo = tmpdir("trace-pin-repo");
+        let original = b"def f():\n    mystery()\n";
+        std::fs::write(repo.join("a.py"), original).unwrap();
+        super::build_full(&home, "r", &repo).unwrap();
+        let conn = store::open_live(&store::db_path(&home, "r")).unwrap();
+        let snapshot = store::latest_snapshot(&conn).unwrap().unwrap();
+        let live = super::live_state_for(&conn, &snapshot).unwrap();
+        let (file_id, digest) = store::file_id_map(&conn, snapshot.id).unwrap()["a.py"].clone();
+        let import_id = store::insert_semantic_import(
+            &conn,
+            &store::SemanticImport {
+                snapshot_id: snapshot.id,
+                provider_name: "scip-test".to_string(),
+                provider_version: "1".to_string(),
+                capability: "definitions,references".to_string(),
+                project_root: repo.to_string_lossy().into_owned(),
+                text_encoding: "UTF8".to_string(),
+                artifact_id: "trace-pin-artifact".to_string(),
+                source_revision: crate::semantic::revision_string(&live),
+                claimed_source_digest: String::new(),
+                content_identity: live.content_identity.clone(),
+                external_symbols: "[]".to_string(),
+                verification: "Unverified".to_string(),
+            },
+        )
+        .unwrap();
+        store::insert_semantic_facts(
+            &conn,
+            &[store::SemanticFact {
+                snapshot_id: snapshot.id,
+                import_id,
+                file_id: Some(file_id),
+                rel_path: "a.py".to_string(),
+                file_digest: digest,
+                symbol_uri: Some("scip-test pkg 1 a.py/f().".to_string()),
+                display_name: Some("f".to_string()),
+                roles: 1,
+                start_line: 0,
+                start_col: 4,
+                end_line: 0,
+                end_col: 5,
+                byte_start: 4,
+                byte_end: 5,
+                precision: "Exact".to_string(),
+                relationships: "[]".to_string(),
+                external: false,
+            }],
+        )
+        .unwrap();
+        crate::edges::upsert_semantic_edges(&conn, snapshot.id, import_id).unwrap();
+        drop(conn);
+        let request = super::TraceRequest {
+            source: super::SpanQuery {
+                rel: "a.py",
+                line1: 1,
+                col1: 5,
+                refs: false,
+            },
+            symbol: None,
+            destination: None,
+            depth: 3,
+            limit: 50,
+            offset: 0,
+        };
+        let changed = b"def f():\n    different()\n";
+        let pinned = super::trace_query_inner(&home, "r", &repo, &request, || {
+            let writer_home = home.clone();
+            let writer_repo = repo.clone();
+            std::thread::spawn(move || {
+                std::fs::write(writer_repo.join("a.py"), changed).unwrap();
+                super::build(&writer_home, "r", &writer_repo, false).unwrap();
+            })
+            .join()
+            .unwrap();
+        })
+        .unwrap();
+        let next = super::trace_query(&home, "r", &repo, &request).unwrap();
+        assert_ne!(pinned.snapshot.nonce, next.snapshot.nonce);
+        assert_eq!(pinned.anchor.path, "a.py");
+        assert_eq!(pinned.anchor.kind.as_str(), "semantic");
+        assert_eq!(next.anchor.kind.as_str(), "syntax-fallback");
+        let old_hit = &pinned.paths[0].edges[0];
+        let new_hit = &next.paths[0].edges[0];
+        assert_eq!(old_hit.edge.callee_name, "mystery");
+        assert_eq!(new_hit.edge.callee_name, "different");
+        assert_eq!(old_hit.edge.snapshot_id, pinned.snapshot.id);
+        assert_eq!(old_hit.evidence.digest, store::content_digest(original));
+        assert_eq!(new_hit.evidence.digest, store::content_digest(changed));
+        assert_eq!(pinned.verification, "Stale");
+        assert_eq!(old_hit.verification, "Stale");
+        assert_eq!(next.freshness, "fresh");
+        assert!(old_hit.edge.callee.is_none());
     }
 }

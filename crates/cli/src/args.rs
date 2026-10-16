@@ -42,6 +42,20 @@ pub enum Command {
     Edge {
         op: EdgeOp,
     },
+    Trace(TraceArgs),
+}
+
+#[derive(Debug, PartialEq)]
+pub struct TraceArgs {
+    pub repo: String,
+    pub path: String,
+    pub line: String,
+    pub col: String,
+    pub symbol: Option<String>,
+    pub to: Option<String>,
+    pub depth: Option<String>,
+    pub limit: Option<String>,
+    pub offset: Option<String>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -307,8 +321,41 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         },
         "callers" => parse_edge_args(args, true).map(|op| Command::Edge { op }),
         "callees" => parse_edge_args(args, false).map(|op| Command::Edge { op }),
+        "trace" => parse_trace_args(args).map(Command::Trace),
         _ => Err(crate::usage()),
     }
+}
+
+fn parse_trace_args(args: &[String]) -> Result<TraceArgs, String> {
+    let mut values = std::collections::BTreeMap::new();
+    let mut i = 1;
+    while i < args.len() {
+        let mut matched = false;
+        for flag in [
+            "--repo", "--path", "--line", "--col", "--symbol", "--to", "--depth", "--limit",
+            "--offset",
+        ] {
+            if let Some(value) = take_value(args, &mut i, flag) {
+                values.insert(flag, value);
+                matched = true;
+                break;
+            }
+        }
+        if !matched {
+            return Err(crate::usage());
+        }
+    }
+    Ok(TraceArgs {
+        repo: values.remove("--repo").ok_or_else(crate::usage)?,
+        path: values.remove("--path").ok_or_else(crate::usage)?,
+        line: values.remove("--line").ok_or_else(crate::usage)?,
+        col: values.remove("--col").ok_or_else(crate::usage)?,
+        symbol: values.remove("--symbol"),
+        to: values.remove("--to"),
+        depth: values.remove("--depth"),
+        limit: values.remove("--limit"),
+        offset: values.remove("--offset"),
+    })
 }
 
 /// Shared `callers`/`callees` flag parsing: anchored position plus optional
