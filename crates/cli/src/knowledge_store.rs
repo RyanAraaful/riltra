@@ -72,6 +72,11 @@ fn open_inner(
     if !existed && !create {
         return Err(format!("no knowledge store for repository '{}'", repo.name));
     }
+    if !existed && create {
+        // Refuse binding a new store to a moved or retargeted root before
+        // SQLite creates anything, so a refusal leaves no file behind.
+        check_fresh_root_binding(repo, &croot)?;
+    }
     if !existed && create && db.exists() {
         // Present but not a file (directory, fifo, …). Links were rejected
         // above, so this is never a dangling link.
@@ -272,18 +277,22 @@ CREATE TABLE retractions (
   author TEXT NOT NULL, reason TEXT NOT NULL, created_unix INTEGER NOT NULL
 );
 CREATE VIRTUAL TABLE knowledge_fts USING fts5(id UNINDEXED, title, body);
--- FTS mirrors the latest-inserted revision per record id. Revisions for one
--- id are inserted in increasing order (record writers uphold this), so the
--- newest insert is the head; immutable historical revisions never appear in
--- the index. Deletion keeps the invariant for symmetry (records are never
--- deleted, but a delete must not leave a stale FTS row behind).
-CREATE TRIGGER records_fts_head AFTER INSERT ON records BEGIN
+-- FTS holds exactly the current head revision per record id. Only head moves
+-- (inserts and updates of `heads.current_revision`) maintain the index, in
+-- the same transaction as the move, so rolling back a head move rolls back
+-- the index with it. Inserting a revision without moving the head never
+-- touches the index, and immutable historical rows are never removed by it.
+CREATE TRIGGER heads_fts_sync_insert AFTER INSERT ON heads BEGIN
   DELETE FROM knowledge_fts WHERE id = new.id;
   INSERT INTO knowledge_fts(id, title, body)
-  VALUES (new.id, new.title, new.body);
+  SELECT id, title, body FROM records
+  WHERE id = new.id AND revision = new.current_revision;
 END;
-CREATE TRIGGER records_fts_delete AFTER DELETE ON records BEGIN
-  DELETE FROM knowledge_fts WHERE id = old.id;
+CREATE TRIGGER heads_fts_sync_update AFTER UPDATE OF current_revision ON heads BEGIN
+  DELETE FROM knowledge_fts WHERE id = new.id;
+  INSERT INTO knowledge_fts(id, title, body)
+  SELECT id, title, body FROM records
+  WHERE id = new.id AND revision = new.current_revision;
 END;
 ";
 
@@ -346,7 +355,7 @@ const REQUIRED_TABLES: [&str; 7] = [
     "retractions",
     "knowledge_fts",
 ];
-const REQUIRED_TRIGGERS: [&str; 2] = ["records_fts_head", "records_fts_delete"];
+const REQUIRED_TRIGGERS: [&str; 2] = ["heads_fts_sync_insert", "heads_fts_sync_update"];
 
 fn check_schema_complete(conn: &Connection, repo: &RepoEntry) -> Result<(), String> {
     for table in REQUIRED_TABLES {
@@ -389,6 +398,21 @@ fn meta_value(conn: &Connection, key: &str) -> Result<String, String> {
     .map_err(|_| "corrupt knowledge store: metadata unreadable".to_string())
 }
 
+/// Fresh-create guard: registration records the canonical root string, and
+/// every read command re-resolves the entry and compares (see `scan`/`status`
+/// handling). A live canonical form that differs means the tree moved or the
+/// entry was retargeted before the first knowledge store was created, so the
+/// new store is refused instead of silently binding another tree.
+fn check_fresh_root_binding(repo: &RepoEntry, croot: &Path) -> Result<(), String> {
+    if croot.to_string_lossy().as_ref() != repo.root {
+        return Err(format!(
+            "knowledge store creation refused for '{}': repository root retargeted",
+            repo.name
+        ));
+    }
+    Ok(())
+}
+
 /// The store belongs to exactly one registered repository: name, canonical
 /// root and schema marker must all match on every open. The stored root must
 /// also still resolve to itself, so a moved or deleted root fails instead of
@@ -421,9 +445,15 @@ mod tests {
     fn setup(name: &str) -> (PathBuf, RepoEntry) {
         let home = tmpdir("m7-home");
         let root = tmpdir("m7-root");
+        // Fixtures mirror production registry entries, which record the
+        // canonical root string at registration time.
+        let canonical = crate::paths::canonical_root(&root)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
         let repo = RepoEntry {
             name: name.to_string(),
-            root: root.to_string_lossy().into_owned(),
+            root: canonical,
             added_unix: 1,
         };
         (home, repo)
@@ -565,7 +595,7 @@ mod tests {
     }
 
     #[test]
-    fn knowledge_store_open_fts_represents_head_only() {
+    fn knowledge_store_open_fts_follows_head() {
         let (home, repo) = setup("ftshead");
         let conn = open_knowledge_at(&home, &repo, true).unwrap();
         for (rev, title) in [
@@ -579,6 +609,17 @@ mod tests {
             )
             .unwrap();
         }
+        // No head yet: inserting revisions alone must not index anything.
+        let unheaded: i64 = conn
+            .query_row("SELECT count(*) FROM knowledge_fts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(unheaded, 0, "revisions without a head must not be indexed");
+        // Head at rev1: FTS is rev1 only, even though rev2 exists.
+        conn.execute(
+            "INSERT INTO heads (id, current_revision) VALUES ('r1', 1)",
+            [],
+        )
+        .unwrap();
         let stale: i64 = conn
             .query_row(
                 "SELECT count(*) FROM knowledge_fts WHERE knowledge_fts MATCH 'zqxalpha'",
@@ -586,19 +627,73 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(stale, 0, "historical revision must not be indexed");
-        let head: i64 = conn
+        assert_eq!(stale, 1, "head revision must be indexed");
+        let future: i64 = conn
             .query_row(
                 "SELECT count(*) FROM knowledge_fts WHERE knowledge_fts MATCH 'zqxbeta'",
                 [],
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(head, 1, "head revision must be indexed");
-        let total: i64 = conn
-            .query_row("SELECT count(*) FROM knowledge_fts", [], |r| r.get(0))
+        assert_eq!(future, 0, "non-head revision must not be indexed");
+        // Moving the head moves the index.
+        conn.execute("UPDATE heads SET current_revision = 2 WHERE id = 'r1'", [])
             .unwrap();
-        assert_eq!(total, 1, "exactly one head row per record id");
+        let stale_after: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM knowledge_fts WHERE knowledge_fts MATCH 'zqxalpha'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stale_after, 0, "old head must leave the index");
+        let head_after: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM knowledge_fts WHERE knowledge_fts MATCH 'zqxbeta'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(head_after, 1, "new head must be indexed");
+        // Immutable history is preserved regardless of the index.
+        let rows: i64 = conn
+            .query_row("SELECT count(*) FROM records WHERE id = 'r1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(rows, 2, "historical revisions are never removed");
+        // Rolling back a head move rolls back the index with it.
+        conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        conn.execute("UPDATE heads SET current_revision = 1 WHERE id = 'r1'", [])
+            .unwrap();
+        let in_txn: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM knowledge_fts WHERE knowledge_fts MATCH 'zqxalpha'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(in_txn, 1, "index follows the head inside the transaction");
+        conn.execute_batch("ROLLBACK").unwrap();
+        let head_rev: i64 = conn
+            .query_row(
+                "SELECT current_revision FROM heads WHERE id = 'r1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(head_rev, 2);
+        let rolled_back: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM knowledge_fts WHERE knowledge_fts MATCH 'zqxbeta'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            rolled_back, 1,
+            "rolled-back head move must not leak index changes"
+        );
         conn.close().unwrap();
     }
 
@@ -661,6 +756,32 @@ mod tests {
     }
 
     #[test]
+    fn knowledge_store_open_fresh_create_refuses_retarget() {
+        // The entry was retargeted to another tree before the first
+        // knowledge store was created: the recorded string no longer matches
+        // the live canonical root, so creation must fail.
+        let (home, repo) = setup("retarget");
+        let other_root = tmpdir("m7-retarget-root");
+        let moved = RepoEntry {
+            name: repo.name.clone(),
+            root: other_root.to_string_lossy().into_owned(),
+            added_unix: 1,
+        };
+        let err = open_knowledge_at(&home, &moved, true).unwrap_err();
+        assert!(err.contains("retarget"), "unexpected: {err}");
+        assert!(
+            !knowledge_db_path(&home, "retarget").exists(),
+            "refused creation must leave no store file behind"
+        );
+        // The normal compatible path still works: the recorded canonical
+        // root creates fine, as does the no-index case (other tests).
+        open_knowledge_at(&home, &repo, true)
+            .unwrap()
+            .close()
+            .unwrap();
+    }
+
+    #[test]
     fn knowledge_store_open_db_path_is_directory() {
         let (home, repo) = setup("isdir");
         let db = knowledge_db_path(&home, "isdir");
@@ -693,7 +814,10 @@ mod tests {
         let root = tmpdir("m7-root");
         let repo = RepoEntry {
             name: "nonutf".to_string(),
-            root: root.to_string_lossy().into_owned(),
+            root: crate::paths::canonical_root(&root)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
             added_unix: 1,
         };
         let conn = open_knowledge_at(&home, &repo, true).unwrap();
