@@ -1198,6 +1198,175 @@ fn map_row_error(e: rusqlite::Error, otherwise: &str) -> String {
     }
 }
 
+/// One page of lexical search hits with its generation guard.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SearchPage {
+    pub hits: Vec<RecordVersion>,
+    pub total: usize,
+    pub truncated: bool,
+    pub next_offset: Option<usize>,
+    pub generation: u64,
+}
+
+/// Quote user tokens as FTS5 phrases: internal quotes double, each token
+/// stays one literal, and phrases join with spaces (implicit AND). Quoting
+/// neutralizes operators, column filters and SQL-looking text, but FTS5 still
+/// treats `*` as a prefix operator inside phrases and folds token separators —
+/// so the expression is only a coarse pre-filter. Every candidate is
+/// re-checked in Rust for literal containment of each raw token before it
+/// counts as a hit.
+fn fts_literal_match(query: &str) -> Result<(Option<String>, Vec<String>), String> {
+    if query.len() > crate::knowledge::MAX_QUERY_TEXT_BYTES {
+        return Err(format!(
+            "search query is {} bytes, at most {} allowed",
+            query.len(),
+            crate::knowledge::MAX_QUERY_TEXT_BYTES
+        ));
+    }
+    let tokens: Vec<String> = query.split_whitespace().map(str::to_string).collect();
+    if tokens.is_empty() {
+        return Ok((None, tokens));
+    }
+    let mut expr = String::new();
+    for token in &tokens {
+        if !expr.is_empty() {
+            expr.push(' ');
+        }
+        expr.push('"');
+        expr.push_str(&token.replace('"', "\"\""));
+        expr.push('"');
+    }
+    Ok((Some(expr), tokens))
+}
+
+/// Every raw token must appear literally (case-insensitively, mirroring FTS
+/// recall) in the title or body. This is what makes `*`, quotes and
+/// separators inert text rather than query syntax.
+fn contains_all_terms(record: &RecordVersion, tokens: &[String]) -> bool {
+    let haystack = format!("{}\n{}", record.title, record.body).to_lowercase();
+    tokens
+        .iter()
+        .all(|token| haystack.contains(&token.to_lowercase()))
+}
+
+/// Deterministic lexical search over current head revisions only: title and
+/// body match literal user terms, results order by record ID (binary
+/// collation), and filters apply before counting. Generation, total and rows
+/// are read inside one SQLite read transaction; a supplied generation that
+/// no longer matches fails instead of serving shifted pages.
+#[allow(clippy::too_many_arguments)]
+pub fn search(
+    conn: &Connection,
+    query: &str,
+    kind: Option<&str>,
+    include_archived: bool,
+    limit: usize,
+    offset: usize,
+    generation: Option<u64>,
+) -> Result<SearchPage, String> {
+    if let Some(k) = kind {
+        crate::knowledge::validate_kind(k)?;
+    }
+    if limit > crate::knowledge::SEARCH_LIMIT_MAX {
+        return Err(format!(
+            "search limit {limit} exceeds maximum {}",
+            crate::knowledge::SEARCH_LIMIT_MAX
+        ));
+    }
+    // Usize page bounds always fit the SQLite range on 64-bit targets, but
+    // the conversion stays explicit: absurd values fail here, never in SQL.
+    i64::try_from(limit).map_err(|_| format!("search limit out of range: {limit}"))?;
+    i64::try_from(offset).map_err(|_| format!("search offset out of range: {offset}"))?;
+    let (matcher, tokens) = fts_literal_match(query)?;
+    conn.execute_batch("BEGIN")
+        .map_err(|e| format!("cannot begin knowledge read: {e}"))?;
+    let page = (|| {
+        let current = read_generation(conn)?;
+        if let Some(expected) = generation {
+            if expected != current {
+                return Err(format!(
+                    "knowledge generation conflict: expected {expected} but store is at {current}"
+                ));
+            }
+        }
+        let Some(match_expr) = matcher else {
+            return Ok(SearchPage {
+                hits: Vec::new(),
+                total: 0,
+                truncated: false,
+                next_offset: None,
+                generation: current,
+            });
+        };
+        // Structural clauses only; every value below is bound, including the
+        // pre-quoted MATCH expression and the validated kind.
+        let mut filters = String::from("knowledge_fts MATCH ?1");
+        let mut args: Vec<rusqlite::types::Value> = vec![rusqlite::types::Value::Text(match_expr)];
+        if let Some(k) = kind {
+            filters.push_str(&format!(" AND r.kind = ?{}", args.len() + 1));
+            args.push(rusqlite::types::Value::Text(k.to_string()));
+        }
+        if !include_archived {
+            filters.push_str(" AND r.status = 'active'");
+        }
+        // FTS is a coarse pre-filter: fetch every candidate in ID order,
+        // keep only literal-term rows in Rust, then paginate the verified
+        // set — so total and pages reflect literal matching, never FTS
+        // operator semantics.
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT r.id, r.revision, r.kind, r.title, r.body, r.status, r.author, r.created_unix
+                 FROM knowledge_fts
+                 JOIN heads h ON h.id = knowledge_fts.id
+                 JOIN records r ON r.id = knowledge_fts.id
+                   AND r.revision = h.current_revision
+                 WHERE {filters}
+                 ORDER BY r.id COLLATE BINARY ASC"
+            ))
+            .map_err(|e| format!("cannot search knowledge: {e}"))?;
+        let candidates = stmt
+            .query_map(rusqlite::params_from_iter(args.iter()), record_from_row)
+            .map_err(|e| map_row_error(e, "cannot search knowledge"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| map_row_error(e, "cannot search knowledge"))?;
+        let total_usize = candidates
+            .iter()
+            .filter(|record| contains_all_terms(record, &tokens))
+            .count();
+        let mut hits: Vec<RecordVersion> = candidates
+            .into_iter()
+            .filter(|record| contains_all_terms(record, &tokens))
+            .skip(offset)
+            .take(limit)
+            .collect();
+        for record in &mut hits {
+            let rev_i64 = i64::try_from(record.revision)
+                .map_err(|_| "corrupt knowledge store: stored revision out of range".to_string())?;
+            record.measurement = read_measurement(conn, &record.id, rev_i64)?;
+            record.evidence = read_evidence(conn, &record.id, rev_i64)?;
+        }
+        let end = offset.saturating_add(hits.len());
+        Ok(SearchPage {
+            truncated: end < total_usize,
+            next_offset: if end < total_usize { Some(end) } else { None },
+            total: total_usize,
+            generation: current,
+            hits,
+        })
+    })();
+    match page {
+        Ok(built) => {
+            conn.execute_batch("COMMIT")
+                .map_err(|e| format!("cannot commit knowledge read: {e}"))?;
+            Ok(built)
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(e)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2731,6 +2900,198 @@ mod tests {
         let shown = show_record(&conn, "d1", None).unwrap();
         assert!(shown.evidence.is_empty());
         assert_eq!(evidence_support(shown.evidence.len()), "unknown");
+        conn.close().unwrap();
+    }
+
+    fn kind_record(id: &str, kind: &str, title: &str) -> NewRecord {
+        NewRecord {
+            id: id.to_string(),
+            kind: kind.to_string(),
+            title: title.to_string(),
+            body: format!("body of {title}"),
+            status: "active".to_string(),
+            author: "tester".to_string(),
+        }
+    }
+
+    fn search_default(conn: &Connection, query: &str) -> Result<SearchPage, String> {
+        search(conn, query, None, false, 50, 0, None)
+    }
+
+    #[test]
+    fn search_literal_terms_treat_injection_as_text() {
+        let (home, repo) = setup("searchlit");
+        let mut conn = open_rw(&home, &repo);
+        create_record(&mut conn, &new_record("d1", "alpha zqxone")).unwrap();
+        // Every FTS operator / SQL fragment below is inert literal text:
+        // bound as quoted phrases, never parsed as query language or SQL.
+        for hostile in [
+            "\" OR 1=1 --",
+            "OR",
+            "*",
+            "title:alpha",
+            "alpha*",
+            "\"alpha\"",
+            "NEAR(alpha zqxone)",
+            "alpha OR zqxone",
+            "'; DROP TABLE records; --",
+        ] {
+            let page = search_default(&conn, hostile).unwrap();
+            assert!(
+                !page.hits.iter().any(|h| h.id == "d1"),
+                "hostile query {hostile:?} must not match via syntax"
+            );
+        }
+        // The plain term still matches title text.
+        let page = search_default(&conn, "alpha").unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.hits[0].id, "d1");
+        // Multi-term queries require every term (AND).
+        create_record(&mut conn, &new_record("d2", "alpha zqxtwo")).unwrap();
+        let page = search_default(&conn, "alpha zqxone").unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.hits[0].id, "d1");
+        // Body text is indexed too.
+        let page = search_default(&conn, "body").unwrap();
+        assert_eq!(page.total, 2);
+        conn.close().unwrap();
+    }
+
+    #[test]
+    fn search_indexes_current_revisions_only() {
+        let (home, repo) = setup("searchhist");
+        let mut conn = open_rw(&home, &repo);
+        create_record(&mut conn, &new_record("d1", "histonly-zqxtext")).unwrap();
+        update_record(&mut conn, "d1", 1, &update_to("newtext-zqxhead", "active")).unwrap();
+        // Superseded revision text is not searchable.
+        let gone = search_default(&conn, "histonly-zqxtext").unwrap();
+        assert_eq!(gone.total, 0);
+        assert!(gone.hits.is_empty());
+        assert!(!gone.truncated);
+        let head = search_default(&conn, "newtext-zqxhead").unwrap();
+        assert_eq!(head.total, 1);
+        assert_eq!(head.hits[0].revision, 2);
+        // Hits carry the full revision payload for consistency.
+        assert_eq!(head.hits[0].title, "newtext-zqxhead");
+        conn.close().unwrap();
+    }
+
+    #[test]
+    fn search_orders_by_id_with_stable_pages() {
+        let (home, repo) = setup("searchpage");
+        let mut conn = open_rw(&home, &repo);
+        for id in ["d3", "d1", "d2"] {
+            create_record(
+                &mut conn,
+                &kind_record(id, "decision", &format!("common zqx-{id}")),
+            )
+            .unwrap();
+        }
+        let full = search(&conn, "common", None, false, 50, 0, None).unwrap();
+        assert_eq!(full.total, 3);
+        assert_eq!(
+            full.hits.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(),
+            vec!["d1", "d2", "d3"]
+        );
+        assert!(!full.truncated);
+        assert_eq!(full.next_offset, None);
+        // Paginated reads return the same order in slices.
+        let p1 = search(&conn, "common", None, false, 2, 0, None).unwrap();
+        assert_eq!(p1.total, 3);
+        assert!(p1.truncated);
+        assert_eq!(p1.next_offset, Some(2));
+        assert_eq!(
+            p1.hits.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(),
+            vec!["d1", "d2"]
+        );
+        let p2 = search(&conn, "common", None, false, 2, 2, Some(p1.generation)).unwrap();
+        assert!(!p2.truncated);
+        assert_eq!(p2.next_offset, None);
+        assert_eq!(
+            p2.hits.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(),
+            vec!["d3"]
+        );
+        conn.close().unwrap();
+    }
+
+    #[test]
+    fn search_empty_result_is_success() {
+        let (home, repo) = setup("searchempty");
+        let mut conn = open_rw(&home, &repo);
+        create_record(&mut conn, &new_record("d1", "something")).unwrap();
+        // No match and whitespace-only queries succeed with empty results.
+        for query in ["no-such-term-zqx", "   "] {
+            let page = search_default(&conn, query).unwrap();
+            assert_eq!(page.total, 0);
+            assert!(page.hits.is_empty());
+            assert!(!page.truncated);
+            assert_eq!(page.next_offset, None);
+        }
+        // An empty store also searches cleanly.
+        let (home2, repo2) = setup("searchempty2");
+        let conn2 = open_rw(&home2, &repo2);
+        let page = search_default(&conn2, "anything").unwrap();
+        assert_eq!(page.total, 0);
+        conn.close().unwrap();
+        conn2.close().unwrap();
+    }
+
+    #[test]
+    fn search_archived_and_kind_filters() {
+        let (home, repo) = setup("searchfilter");
+        let mut conn = open_rw(&home, &repo);
+        create_record(&mut conn, &kind_record("d1", "decision", "filter zqxme")).unwrap();
+        create_record(&mut conn, &kind_record("c1", "constraint", "filter zqxme")).unwrap();
+        update_record(&mut conn, "c1", 1, &update_to("filter zqxme", "archived")).unwrap();
+        // Archived heads are hidden unless explicitly included.
+        let hidden = search_default(&conn, "filter").unwrap();
+        assert_eq!(hidden.total, 1);
+        assert_eq!(hidden.hits[0].id, "d1");
+        let shown = search(&conn, "filter", None, true, 50, 0, None).unwrap();
+        assert_eq!(shown.total, 2);
+        // Kind narrows before counting: archived constraint still filtered.
+        let kinds = search(&conn, "filter", Some("constraint"), false, 50, 0, None).unwrap();
+        assert_eq!(kinds.total, 0);
+        let kinds = search(&conn, "filter", Some("constraint"), true, 50, 0, None).unwrap();
+        assert_eq!(kinds.total, 1);
+        assert_eq!(kinds.hits[0].id, "c1");
+        // Invalid kind is a validation error, not an empty page.
+        assert!(search(&conn, "filter", Some("note"), false, 50, 0, None).is_err());
+        conn.close().unwrap();
+    }
+
+    #[test]
+    fn search_limits_and_generation_guard() {
+        let (home, repo) = setup("searchgen");
+        let mut conn = open_rw(&home, &repo);
+        create_record(&mut conn, &new_record("d1", "guarded zqxterm")).unwrap();
+        let gen = search_default(&conn, "guarded").unwrap().generation;
+        // A concurrent mutation bumps generation: old pages fail explicitly.
+        create_record(&mut conn, &new_record("d2", "guarded zqxterm")).unwrap();
+        let err = search(&conn, "guarded", None, false, 50, 0, Some(gen)).unwrap_err();
+        assert!(err.contains("generation"), "unexpected: {err}");
+        // Bounds: over-limit pages and over-long queries fail before reading.
+        assert!(search(&conn, "guarded", None, false, 1001, 0, None).is_err());
+        let long = "q".repeat(4096 + 1);
+        assert!(search_default(&conn, &long).is_err());
+        // Exactly 4096 bytes is accepted.
+        let exact = format!("guarded {}", "q".repeat(4088));
+        assert_eq!(exact.len(), 4096);
+        assert!(search_default(&conn, &exact).is_ok());
+        // Failed writes change neither results nor generation.
+        let before = search_default(&conn, "guarded").unwrap();
+        assert!(create_record(&mut conn, &new_record("d1", "dup")).is_err());
+        let after = search(
+            &conn,
+            "guarded",
+            None,
+            false,
+            50,
+            0,
+            Some(before.generation),
+        )
+        .unwrap();
+        assert_eq!(after.total, before.total);
         conn.close().unwrap();
     }
 }

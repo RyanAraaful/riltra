@@ -114,6 +114,9 @@ pub const MAX_AUTHOR_BYTES: usize = 256;
 pub const MAX_EVIDENCE_REFS: usize = 64;
 /// Pinned for the Task 5 search path; mutation inputs carry no query field.
 pub const MAX_QUERY_TEXT_BYTES: usize = 4096;
+/// Search paging: Task 7 applies the default; the store enforces the cap.
+pub const SEARCH_LIMIT_DEFAULT: usize = 50;
+pub const SEARCH_LIMIT_MAX: usize = 1000;
 const MAX_JSON_DEPTH: usize = 64;
 
 /// Parsed JSON that preserves every key occurrence so duplicates can be
