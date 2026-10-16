@@ -1,12 +1,43 @@
-# M6 validation — real providers and final local checkpoint
+# M6 validation — real providers, cross-platform CI and closure
 
 Task 8 on branch `m6-task7-multilanguage-corpus`, based on accepted correction
-`6e54d5e5579a6810b386063d0ee77925f94873ee`. The local DCO commit carrying this
-report is the audit unit. Production Rust, schema v4, dependencies and existing
+`6e54d5e5579a6810b386063d0ee77925f94873ee`. The Task 8 and CI audit unit is
+`cabfb9fcc0a2869184d5143971afebabb0ee90a0`. Production Rust, schema v4, dependencies and existing
 goldens are unchanged. Scope is the two real pilots, measurements and regression.
 
-**M6 is not CLOSED.** Final Windows/Ubuntu/macOS CI is NOT TESTED. No push,
-M7/M8 work, installation, binary download or package installation script was performed.
+**M6 — Relationship, Trace & Impact: PASS — CLOSED**, by final reviewer decision
+on 2026-10-16. Task 1–8 checkpoints and three-OS CI are accepted for the agreed
+milestone scope. The original Task 8 report preceded CI; its earlier NOT TESTED
+status is superseded by the evidence below. This documentation follow-up does
+not change the tested implementation or claim CI ran on the documentation commit.
+
+## Final cross-platform CI and audit decision
+
+[Actions #38897944666](https://github.com/RyanAraaful/riltra/actions/runs/38897944666)
+completed successfully, attempt 1, on the same SHA
+`cabfb9fcc0a2869184d5143971afebabb0ee90a0` in every job:
+
+| Check | Windows | Ubuntu | macOS |
+| --- | --- | --- | --- |
+| `cargo fmt --all -- --check` | PASS | PASS | PASS |
+| `cargo check --locked` | PASS | PASS | PASS |
+| `cargo clippy --all-targets -- -D warnings` | PASS | PASS | PASS |
+| `cargo test --locked` | 402 PASS | 404 PASS | 404 PASS |
+| CLI help/version/status | PASS | PASS | PASS |
+
+Original logs contain 201/202/202 unit tests, 16/17/17 CLI tests, 137 edge,
+21 index, 15 semantic and 12 syntax tests, respectively. No failed or ignored
+tests; the two extra Unix tests are platform-specific. The final reviewer
+independently verified job results, logs, lineage and DCO on GitHub.
+
+The M6 branch was pushed normally without force-push or merge. At the verified
+checkpoint it was 10 commits ahead and 0 behind master, with merge base/master
+`2f57cee33a97670dacd1431ebfb6c0385352a357`. AGENTS.md was excluded from the push.
+
+Closure does not establish complete semantic coverage, a hard traversal deadline,
+or public-release readiness. Real-provider pilots remain local Windows evidence;
+the CI matrix runs automated regressions, not those pilots. macOS CI uses ARM64.
+These documented limits are accepted non-blockers for M6 closure. M7 has not begun.
 
 ## Acceptance ledger
 
@@ -25,7 +56,7 @@ M7/M8 work, installation, binary download or package installation script was per
 | Resource/repeated-parsing ledger | PASS | Actual small-fixture measurements; unmeasured fields explicit |
 | Local Windows fmt/check/Clippy/test/build | PASS | All exit 0, 402 tests, zero failed/ignored |
 | Independent read-only review | PASS | No critical/important findings; minor harness restoration finding fixed and reviewed |
-| Final CI Windows/Ubuntu/macOS | NOT TESTED | Separate push permission required; earlier milestone CI does not certify M6 |
+| Final CI Windows/Ubuntu/macOS | PASS | Actions #38897944666, attempt 1; same tested SHA, all steps successful |
 
 ## Environment, licenses and exact reproduction
 
@@ -273,7 +304,8 @@ fixed: source mutation is now inside try/finally, with completed-target-fixture
 input confinement. Wrong-path rejection exits 1 before mutation. The reviewer
 did not rerun providers, measure large-repository scalability, inject real-provider
 failures, capture network traffic or certify Linux/macOS. Those remain outside
-the review's evidence; final cross-platform CI remains NOT TESTED.
+that local review's evidence; the subsequent three-OS CI and final reviewer
+decision are recorded above.
 
 Known limitations: incomplete semantic coverage and unsupported/provider gaps;
 empty producer display names preventing owner bridges; append-only reimports causing
@@ -283,5 +315,7 @@ SQL and subprocesses have separate costs/bounds. Repeated parsing grows with fil
 × import passes. Windows symlink bodies may require privileges, and local Windows
 evidence does not establish Linux/macOS behavior.
 
-Recommendation: proceed to separately authorized final cross-platform validation
-after Task 8 audit. M6 remains open. STOP here; no push or new milestone.
+Final decision: M6 PASS — CLOSED on 2026-10-16. No further M6 testing or refactor
+is required without a newly demonstrated bug. M7 may enter requirements audit
+and minimum-design planning after separate instruction; no M7 implementation
+is authorized by this closure record.
