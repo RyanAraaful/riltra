@@ -49,6 +49,24 @@ pub fn unify(a: &EdgeEndpoint, b: &EdgeEndpoint) -> bool {
     a == b
 }
 
+/// Import provenance gate: `provider_name` alone is NOT the trust boundary
+/// (the row carries the real producer tool name by upsert time). A row
+/// counts as SCIP-verified only with the full metadata the trusted importer
+/// lifecycle writes: a non-ephemeral provider, a non-empty producer
+/// artifact digest, a `references` capability, and a concrete text encoding.
+/// The trust root is `import_file` — the only writer of such rows —
+/// re-validated here defense-in-depth, so a forged row can never resolve
+/// `CALLS` no matter what provider it claims.
+fn import_provenance_ok(import: &store::SemanticImport) -> bool {
+    import.provider_name != "lsp-subprocess"
+        && !import.artifact_id.is_empty()
+        && import
+            .capability
+            .split(',')
+            .any(|c| c.trim() == "references")
+        && (import.text_encoding == "UTF8" || import.text_encoding == "UTF16")
+}
+
 /// Narrowest enclosing CALLABLE definition (`function|method`) containing a
 /// byte offset in one file. Class/interface/struct bodies and anonymous
 /// scopes never own definite caller edges.
@@ -218,13 +236,7 @@ pub fn upsert_semantic_edges(
 ) -> Result<EdgeStats, String> {
     let import = store::semantic_import_by_id(conn, import_id)?
         .ok_or_else(|| "import vanished".to_string())?;
-    // LSP boundary: stored import rows are SCIP-provenance by construction
-    // (only `import_file` writes them; the ephemeral LSP path never stores
-    // rows and fabricates no identity). The row's `provider_name` is the
-    // real producer tool name by the time this runs, so the boundary is a
-    // denylist of the ephemeral provider, never an allowlist that a real
-    // tool name could miss.
-    if import.1.provider_name == "lsp-subprocess" {
+    if !import_provenance_ok(&import.1) {
         return Ok(EdgeStats::default());
     }
     let facts = store::semantic_facts_of_import(conn, snapshot_id, import_id)?;
@@ -233,9 +245,11 @@ pub fn upsert_semantic_edges(
     let id_map = store::file_id_map(conn, snapshot_id)?;
     let mut fid_of: BTreeMap<&str, i64> = BTreeMap::new();
     let mut path_of: BTreeMap<i64, &str> = BTreeMap::new();
-    for (path, (fid, _)) in &id_map {
+    let mut digest_of: BTreeMap<i64, &str> = BTreeMap::new();
+    for (path, (fid, digest)) in &id_map {
         fid_of.insert(path.as_str(), *fid);
         path_of.insert(*fid, path.as_str());
+        digest_of.insert(*fid, digest.as_str());
     }
     // Definitions by URI; locals additionally keyed by document.
     let mut defs: BTreeMap<&str, Vec<&store::SemanticFact>> = BTreeMap::new();
@@ -314,15 +328,15 @@ pub fn upsert_semantic_edges(
                     // Proven call: overlapping reference of the resolved
                     // target + proven callable owner. The caller endpoint
                     // unifies to the owner's SCIP identity when the owner
-                    // has a definition fact in this import, else its
+                    // fact is file-bound in this import, else its
                     // snapshot-local syntax identity.
-                    let caller = owner_scip(conn, snapshot_id, import_id, o, path).unwrap_or(
-                        EdgeEndpoint::SyntaxDef {
+                    let file_digest = digest_of.get(&o.file_id).copied().unwrap_or("");
+                    let caller = owner_scip(conn, snapshot_id, import_id, o, path, file_digest)
+                        .unwrap_or(EdgeEndpoint::SyntaxDef {
                             path: path.to_string(),
                             byte_start: o.byte_start,
                             byte_end: o.byte_end,
-                        },
-                    );
+                        });
                     let terminal = call.name.as_deref().map(terminal_of).unwrap_or_default();
                     out.push(EdgeRow {
                         snapshot_id,
@@ -478,16 +492,21 @@ fn potential_row(
     }
 }
 
-/// Map a proven owner definition to its SCIP identity in this import when a
-/// definition fact for it exists (same file, contained occurrence); `None`
-/// keeps the snapshot-local syntax identity. This is the single validated
-/// SyntaxDef↔Scip mapping point: same file + byte containment + same import.
+/// Map a proven owner definition to its SCIP identity in this import when the
+/// definition fact is bound to the indexed file: same file, contained
+/// occurrence, same import, same display name, AND file-identity evidence —
+/// the fact's `file_id` when present, else a digest match against the files
+/// row (stale or foreign facts never bridge, even with the right name).
+/// Local symbols additionally require the fact document. `None` keeps the
+/// snapshot-local syntax identity. This is the single validated
+/// SyntaxDef↔Scip mapping point.
 fn owner_scip(
     conn: &rusqlite::Connection,
     snapshot_id: i64,
     import_id: i64,
     owner: &store::SymbolRow,
     path: &str,
+    file_digest: &str,
 ) -> Option<EdgeEndpoint> {
     let facts = store::semantic_facts_of_import(conn, snapshot_id, import_id).ok()?;
     let name = owner.name.as_deref()?;
@@ -496,7 +515,13 @@ fn owner_scip(
         .filter(|f| f.roles & 0x1 != 0)
         .filter(|f| f.display_name.as_deref() == Some(name))
         .find(|f| {
-            f.rel_path == path && owner.byte_start <= f.byte_start && f.byte_end <= owner.byte_end
+            f.rel_path == path
+                && owner.byte_start <= f.byte_start
+                && f.byte_end <= owner.byte_end
+                && match f.file_id {
+                    Some(fid) => fid == owner.file_id,
+                    None => f.file_digest == file_digest,
+                }
         })
         .and_then(|f| {
             f.symbol_uri.as_deref().map(|uri| EdgeEndpoint::Scip {
@@ -1146,6 +1171,282 @@ mod tests {
         );
     }
 
+    fn mk_import_full(
+        conn: &rusqlite::Connection,
+        snap: i64,
+        provider: &str,
+        capability: &str,
+        encoding: &str,
+        artifact: &str,
+    ) -> i64 {
+        store::insert_semantic_import(
+            conn,
+            &store::SemanticImport {
+                snapshot_id: snap,
+                provider_name: provider.to_string(),
+                provider_version: "v".to_string(),
+                capability: capability.to_string(),
+                project_root: "C:\\r".to_string(),
+                text_encoding: encoding.to_string(),
+                artifact_id: artifact.to_string(),
+                source_revision: "r".to_string(),
+                claimed_source_digest: String::new(),
+                content_identity: "ci".to_string(),
+                external_symbols: "[]".to_string(),
+                verification: "Unverified".to_string(),
+            },
+        )
+        .unwrap()
+    }
+
+    /// Bridging audit: a SyntaxDef owner maps to a Scip identity ONLY when
+    /// the definition fact is bound to the indexed file bytes (digest, or
+    /// file_id when present) in the same file and import. Same display name
+    /// alone — stale digest, foreign file_id, ghost document — never bridges.
+    /// The CALLS edge itself still stands (callee proven); only the caller
+    /// endpoint falls back to the snapshot-local syntax identity.
+    #[test]
+    fn edges_bridge_requires_file_bound_evidence() {
+        let conn = mem_db();
+        let snap = mk_snap(&conn);
+        let main = b"def caller():\n    return target()\n";
+        let lib = b"def target():\n    return 1\n";
+        let main_digest = store::content_digest(main);
+        ingest_py(&conn, snap, "main.py", main);
+        ingest_py(&conn, snap, "lib.py", lib);
+        let imp = mk_import_full(
+            &conn,
+            snap,
+            "scip-import",
+            "definitions,references",
+            "UTF8",
+            "9f2c3a4b5d6e7f80",
+        );
+        let t = "scip-test test test-pkg 1.0.0 lib.py/target().";
+        let c = "scip-test test test-pkg 1.0.0 main.py/caller().";
+        // Caller def fact with a STALE digest: same name, same path,
+        // contained occurrence — but not the indexed bytes. Must not bridge.
+        let mut stale_caller = mk_fact(
+            snap,
+            imp,
+            "main.py",
+            "stale-digest",
+            Some(c),
+            "caller",
+            0x1,
+            (1, 5, 1, 11),
+            (4, 10),
+            false,
+        );
+        // Foreign file_id with the right digest: also not this file.
+        stale_caller.file_id = Some(9999);
+        // Ghost document: same display name, nowhere near the owner.
+        let ghost = mk_fact(
+            snap,
+            imp,
+            "ghost.py",
+            "g",
+            Some(c),
+            "caller",
+            0x1,
+            (1, 5, 1, 11),
+            (4, 10),
+            false,
+        );
+        store::insert_semantic_facts(
+            &conn,
+            &[
+                mk_fact(
+                    snap,
+                    imp,
+                    "lib.py",
+                    &store::content_digest(lib),
+                    Some(t),
+                    "target",
+                    0x1,
+                    (1, 5, 1, 11),
+                    (4, 10),
+                    false,
+                ),
+                mk_fact(
+                    snap,
+                    imp,
+                    "main.py",
+                    &main_digest,
+                    Some(t),
+                    "target",
+                    0x0,
+                    (2, 12, 2, 18),
+                    (25, 31),
+                    false,
+                ),
+                stale_caller,
+                ghost,
+            ],
+        )
+        .unwrap();
+        let stats = upsert_semantic_edges(&conn, snap, imp).unwrap();
+        assert_eq!(
+            stats.calls, 1,
+            "callee proof is independent of caller bridging"
+        );
+        let key = EdgeEndpoint::Scip {
+            import_id: imp,
+            symbol_uri: t.to_string(),
+            doc: None,
+        };
+        let inbound = store::edges_inbound(&conn, snap, &key, 50, 0).unwrap();
+        assert_eq!(inbound.len(), 1);
+        assert!(
+            matches!(inbound[0].caller, Some(EdgeEndpoint::SyntaxDef { .. })),
+            "unproven caller stays snapshot-local, never a fabricated Scip: {:?}",
+            inbound[0].caller
+        );
+    }
+
+    /// Positive control for the bridge: fully-bound owner fact (right file,
+    /// right digest, contained occurrence, same import) maps to Scip.
+    #[test]
+    fn edges_bridge_binds_proven_owner() {
+        let conn = mem_db();
+        let snap = mk_snap(&conn);
+        let main = b"def caller():\n    return target()\n";
+        let lib = b"def target():\n    return 1\n";
+        let main_digest = store::content_digest(main);
+        ingest_py(&conn, snap, "main.py", main);
+        ingest_py(&conn, snap, "lib.py", lib);
+        let imp = mk_import_full(
+            &conn,
+            snap,
+            "scip-import",
+            "definitions,references",
+            "UTF8",
+            "9f2c3a4b5d6e7f80",
+        );
+        let t = "scip-test test test-pkg 1.0.0 lib.py/target().";
+        let c = "scip-test test test-pkg 1.0.0 main.py/caller().";
+        store::insert_semantic_facts(
+            &conn,
+            &[
+                mk_fact(
+                    snap,
+                    imp,
+                    "lib.py",
+                    &store::content_digest(lib),
+                    Some(t),
+                    "target",
+                    0x1,
+                    (1, 5, 1, 11),
+                    (4, 10),
+                    false,
+                ),
+                mk_fact(
+                    snap,
+                    imp,
+                    "main.py",
+                    &main_digest,
+                    Some(c),
+                    "caller",
+                    0x1,
+                    (1, 5, 1, 11),
+                    (4, 10),
+                    false,
+                ),
+                mk_fact(
+                    snap,
+                    imp,
+                    "main.py",
+                    &main_digest,
+                    Some(t),
+                    "target",
+                    0x0,
+                    (2, 12, 2, 18),
+                    (25, 31),
+                    false,
+                ),
+            ],
+        )
+        .unwrap();
+        let stats = upsert_semantic_edges(&conn, snap, imp).unwrap();
+        assert_eq!(stats.calls, 1);
+        let key = EdgeEndpoint::Scip {
+            import_id: imp,
+            symbol_uri: t.to_string(),
+            doc: None,
+        };
+        let inbound = store::edges_inbound(&conn, snap, &key, 50, 0).unwrap();
+        assert_eq!(
+            inbound[0].caller,
+            Some(EdgeEndpoint::Scip {
+                import_id: imp,
+                symbol_uri: c.to_string(),
+                doc: None
+            }),
+            "fully-bound owner bridges to its Scip identity"
+        );
+    }
+
+    /// Provenance audit: `provider_name` alone is not the trust boundary. A
+    /// forged row with a SCIP-sounding provider but unverified import
+    /// metadata (empty artifact, non-SCIP encoding/capability) must yield
+    /// zero resolved CALLS. The trust root is the importer lifecycle — the
+    /// only writer of verified rows — re-validated here defense-in-depth.
+    #[test]
+    fn edges_forged_import_metadata_yields_zero_edges() {
+        let conn = mem_db();
+        let snap = mk_snap(&conn);
+        let main = b"def caller():\n    return target()\n";
+        let lib = b"def target():\n    return 1\n";
+        ingest_py(&conn, snap, "main.py", main);
+        ingest_py(&conn, snap, "lib.py", lib);
+        let imp = mk_import_full(&conn, snap, "scip-import", "definitions", "Unspecified", "");
+        let t = "scip-test test test-pkg 1.0.0 lib.py/target().";
+        store::insert_semantic_facts(
+            &conn,
+            &[
+                mk_fact(
+                    snap,
+                    imp,
+                    "lib.py",
+                    &store::content_digest(lib),
+                    Some(t),
+                    "target",
+                    0x1,
+                    (1, 5, 1, 11),
+                    (4, 10),
+                    false,
+                ),
+                mk_fact(
+                    snap,
+                    imp,
+                    "main.py",
+                    &store::content_digest(main),
+                    Some(t),
+                    "target",
+                    0x0,
+                    (2, 12, 2, 18),
+                    (25, 31),
+                    false,
+                ),
+            ],
+        )
+        .unwrap();
+        let stats = upsert_semantic_edges(&conn, snap, imp).unwrap();
+        assert_eq!(
+            stats,
+            EdgeStats::default(),
+            "unverified import metadata never resolves CALLS, whatever the provider claims"
+        );
+        let key = EdgeEndpoint::Scip {
+            import_id: imp,
+            symbol_uri: t.to_string(),
+            doc: None,
+        };
+        assert!(store::edges_inbound(&conn, snap, &key, 50, 0)
+            .unwrap()
+            .is_empty());
+    }
+
     // --- lifecycle tests (real build + real SCIP bytes, no reindex) ---
 
     /// Minimal proto3 writer for exactly the fields the importer reads.
@@ -1302,6 +1603,19 @@ mod tests {
         assert_eq!(edges.len(), 1, "CALLS visible without reindex");
         assert_eq!(edges[0].edge_kind, "CALLS");
         assert_eq!(edges[0].precision, "Exact");
+        // Exact is evidence strength, not freshness: the import stays
+        // Unverified (never Current) while the edge reads Exact.
+        let db = store::db_path(&home, "r");
+        let conn = store::open_live(&db).unwrap();
+        let row = store::semantic_import_by_id(&conn, out.import_id)
+            .unwrap()
+            .unwrap()
+            .1;
+        assert_eq!(row.verification, "Unverified");
+        assert_ne!(
+            row.verification, "Current",
+            "Exact edges never imply Current"
+        );
     }
 
     #[test]
