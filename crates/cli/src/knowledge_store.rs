@@ -468,7 +468,10 @@ pub fn read_generation(conn: &Connection) -> Result<u64, String> {
 }
 
 fn bump_generation(tx: &Transaction) -> Result<u64, String> {
-    let next = read_generation(tx)? + 1;
+    let current = read_generation(tx)?;
+    let next = current
+        .checked_add(1)
+        .ok_or_else(|| "knowledge generation overflow".to_string())?;
     tx.execute(
         "UPDATE meta SET value = ?1 WHERE key = 'knowledge_generation'",
         [next.to_string()],
@@ -495,9 +498,19 @@ fn revalidate_open_paths(conn: &Connection) -> Result<(), String> {
 
 fn record_from_row(row: &rusqlite::Row) -> rusqlite::Result<RecordVersion> {
     let revision_i64: i64 = row.get(1)?;
+    let revision = u64::try_from(revision_i64).map_err(|_| {
+        rusqlite::Error::FromSqlConversionFailure(
+            1,
+            rusqlite::types::Type::Integer,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("negative revision {revision_i64}"),
+            )),
+        )
+    })?;
     Ok(RecordVersion {
         id: row.get(0)?,
-        revision: revision_i64 as u64,
+        revision,
         kind: row.get(2)?,
         title: row.get(3)?,
         body: row.get(4)?,
@@ -578,7 +591,12 @@ pub fn update_record(
         Some(c) => c,
         None => return Err(format!("unknown record id: '{id}'")),
     };
-    if current as u64 != expected_revision {
+    // An unrepresentable expectation can never match; a corrupt negative head
+    // fails here too, before any mutation is attempted.
+    let expected_matches = i64::try_from(expected_revision)
+        .map(|expected| expected == current)
+        .unwrap_or(false);
+    if !expected_matches {
         return Err(format!(
             "revision conflict for '{id}': expected {expected_revision} but head is {current}"
         ));
@@ -590,13 +608,17 @@ pub fn update_record(
             |row| row.get(0),
         )
         .map_err(|e| format!("cannot read record kind: {e}"))?;
-    let next = (current + 1) as u64;
+    let next_i64 = current
+        .checked_add(1)
+        .ok_or_else(|| "knowledge revision counter overflow".to_string())?;
+    let next =
+        u64::try_from(next_i64).map_err(|_| "knowledge revision counter overflow".to_string())?;
     tx.execute(
         "INSERT INTO records (id, revision, kind, title, body, status, author, created_unix)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         rusqlite::params![
             id,
-            next as i64,
+            next_i64,
             kind,
             input.title,
             input.body,
@@ -608,7 +630,7 @@ pub fn update_record(
     .map_err(|e| format!("cannot insert record revision: {e}"))?;
     tx.execute(
         "UPDATE heads SET current_revision = ?1 WHERE id = ?2",
-        rusqlite::params![next as i64, id],
+        rusqlite::params![next_i64, id],
     )
     .map_err(|e| format!("cannot advance record head: {e}"))?;
     let generation = bump_generation(&tx)?;
@@ -633,19 +655,30 @@ pub fn show_record(
                     |row| row.get(0),
                 )
                 .map_err(|_| format!("unknown record id: '{id}'"))?;
-            current as u64
+            u64::try_from(current)
+                .map_err(|_| "corrupt knowledge store: stored revision out of range".to_string())?
         }
     };
+    let rev_i64 = i64::try_from(rev).map_err(|_| format!("record revision out of range: {rev}"))?;
     conn.query_row(
         &format!("SELECT {RECORD_COLS} FROM records WHERE id = ?1 AND revision = ?2"),
-        rusqlite::params![id, rev as i64],
+        rusqlite::params![id, rev_i64],
         record_from_row,
     )
-    .map_err(|_| format!("unknown record revision: '{id}' rev {rev}"))
+    .map_err(|e| match e {
+        rusqlite::Error::FromSqlConversionFailure(..) => {
+            "corrupt knowledge store: stored revision out of range".to_string()
+        }
+        _ => format!("unknown record revision: '{id}' rev {rev}"),
+    })
 }
 
 /// Deterministic history by revision with a generation guard: a supplied
 /// generation that no longer matches fails instead of serving shifted pages.
+///
+/// Generation, total and rows are read inside one SQLite read transaction, so
+/// a concurrent commit landing mid-read can neither mix generations with rows
+/// nor shift pages; the whole page reflects a single snapshot.
 pub fn history(
     conn: &Connection,
     id: &str,
@@ -653,43 +686,103 @@ pub fn history(
     offset: usize,
     generation: Option<u64>,
 ) -> Result<HistoryPage, String> {
-    let current = read_generation(conn)?;
-    if let Some(expected) = generation {
-        if expected != current {
-            return Err(format!(
-                "knowledge generation conflict: expected {expected} but store is at {current}"
-            ));
+    history_inner(conn, id, limit, offset, generation, None)
+}
+
+/// Test-only probe invoked after generation validation but before row reads,
+/// so a test can commit from another connection exactly on that boundary.
+#[cfg(test)]
+pub(crate) fn history_with_probe(
+    conn: &Connection,
+    id: &str,
+    limit: usize,
+    offset: usize,
+    generation: Option<u64>,
+    probe: Option<&dyn Fn()>,
+) -> Result<HistoryPage, String> {
+    history_inner(conn, id, limit, offset, generation, probe)
+}
+
+fn history_inner(
+    conn: &Connection,
+    id: &str,
+    limit: usize,
+    offset: usize,
+    generation: Option<u64>,
+    probe: Option<&dyn Fn()>,
+) -> Result<HistoryPage, String> {
+    let limit_i64 =
+        i64::try_from(limit).map_err(|_| format!("history limit out of range: {limit}"))?;
+    let offset_i64 =
+        i64::try_from(offset).map_err(|_| format!("history offset out of range: {offset}"))?;
+    conn.execute_batch("BEGIN")
+        .map_err(|e| format!("cannot begin knowledge read: {e}"))?;
+    let page = (|| {
+        let current = read_generation(conn)?;
+        if let Some(expected) = generation {
+            if expected != current {
+                return Err(format!(
+                    "knowledge generation conflict: expected {expected} but store is at {current}"
+                ));
+            }
+        }
+        if let Some(run) = probe {
+            run();
+        }
+        let total: i64 = conn
+            .query_row("SELECT count(*) FROM records WHERE id = ?1", [id], |row| {
+                row.get(0)
+            })
+            .map_err(|e| format!("cannot read record history: {e}"))?;
+        if total == 0 {
+            return Err(format!("unknown record id: '{id}'"));
+        }
+        let total_usize = usize::try_from(total)
+            .map_err(|_| "corrupt knowledge store: history total out of range".to_string())?;
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT {RECORD_COLS} FROM records WHERE id = ?1
+                 ORDER BY revision ASC LIMIT ?2 OFFSET ?3"
+            ))
+            .map_err(|e| format!("cannot read record history: {e}"))?;
+        let revisions = stmt
+            .query_map(
+                rusqlite::params![id, limit_i64, offset_i64],
+                record_from_row,
+            )
+            .map_err(|e| map_row_error(e, "cannot read record history"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| map_row_error(e, "cannot read record history"))?;
+        let end = offset.saturating_add(revisions.len());
+        Ok(HistoryPage {
+            truncated: end < total_usize,
+            total: total_usize,
+            generation: current,
+            revisions,
+        })
+    })();
+    match page {
+        Ok(built) => {
+            conn.execute_batch("COMMIT")
+                .map_err(|e| format!("cannot commit knowledge read: {e}"))?;
+            Ok(built)
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(e)
         }
     }
-    let total: i64 = conn
-        .query_row("SELECT count(*) FROM records WHERE id = ?1", [id], |row| {
-            row.get(0)
-        })
-        .map_err(|e| format!("cannot read record history: {e}"))?;
-    if total == 0 {
-        return Err(format!("unknown record id: '{id}'"));
+}
+
+/// A stored revision outside `u64` range surfaces as store corruption, never
+/// as a panic and never disguised as a missing row.
+fn map_row_error(e: rusqlite::Error, otherwise: &str) -> String {
+    match e {
+        rusqlite::Error::FromSqlConversionFailure(..) => {
+            "corrupt knowledge store: stored revision out of range".to_string()
+        }
+        _ => otherwise.to_string(),
     }
-    let mut stmt = conn
-        .prepare(&format!(
-            "SELECT {RECORD_COLS} FROM records WHERE id = ?1
-             ORDER BY revision ASC LIMIT ?2 OFFSET ?3"
-        ))
-        .map_err(|e| format!("cannot read record history: {e}"))?;
-    let revisions = stmt
-        .query_map(
-            rusqlite::params![id, limit as i64, offset as i64],
-            record_from_row,
-        )
-        .map_err(|e| format!("cannot read record history: {e}"))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("cannot read record history: {e}"))?;
-    let total_usize = total as usize;
-    Ok(HistoryPage {
-        truncated: offset + revisions.len() < total_usize,
-        total: total_usize,
-        generation: current,
-        revisions,
-    })
 }
 
 #[cfg(test)]
@@ -1537,5 +1630,148 @@ mod tests {
         assert_eq!(read_generation(&conn).unwrap(), gen_before);
         conn.close().unwrap();
         assert_eq!(std::fs::read(&target).unwrap(), b"SENTINEL");
+    }
+
+    #[test]
+    fn knowledge_history_reads_single_snapshot() {
+        use std::sync::{Arc, Barrier};
+        let (home, repo) = setup("snapshot");
+        let mut conn = open_rw(&home, &repo);
+        create_record(&mut conn, &new_record("d1", "snap zqxone")).unwrap();
+        conn.close().unwrap();
+        // Writer commits exactly on the boundary between the reader's
+        // generation validation and its row reads. No sleeps: barriers order
+        // the two threads deterministically.
+        let barrier = Arc::new(Barrier::new(2));
+        let home2 = home.clone();
+        let repo2 = repo.clone();
+        let parked = barrier.clone();
+        let released = barrier.clone();
+        let writer = std::thread::spawn(move || {
+            let mut w = open_knowledge_at(&home2, &repo2, true).unwrap();
+            parked.wait();
+            update_record(&mut w, "d1", 1, &update_to("writer zqxwtwo", "active")).unwrap();
+            w.close().unwrap();
+            released.wait();
+        });
+        let conn = open_knowledge_at(&home, &repo, false).unwrap();
+        let page = history_with_probe(
+            &conn,
+            "d1",
+            50,
+            0,
+            Some(1),
+            Some(&|| {
+                barrier.wait();
+                barrier.wait();
+            }),
+        )
+        .unwrap();
+        writer.join().unwrap();
+        // Generation, total and rows all reflect the pre-commit snapshot.
+        assert_eq!(page.generation, 1);
+        assert_eq!(page.total, 1);
+        assert_eq!(
+            page.revisions
+                .iter()
+                .map(|r| r.revision)
+                .collect::<Vec<_>>(),
+            vec![1]
+        );
+        // The concurrent commit itself is intact afterwards.
+        assert_eq!(show_record(&conn, "d1", None).unwrap().revision, 2);
+        conn.close().unwrap();
+    }
+
+    #[test]
+    fn knowledge_integers_checked_no_panic_no_mutation() {
+        let (home, repo) = setup("intbounds");
+        let mut conn = open_rw(&home, &repo);
+        create_record(&mut conn, &new_record("d1", "t1")).unwrap();
+        // Unrepresentable revision request fails explicitly.
+        let err = show_record(&conn, "d1", Some(u64::MAX)).unwrap_err();
+        assert!(err.contains("range"), "unexpected: {err}");
+        // Pagination beyond i64 fails explicitly.
+        let err = history(&conn, "d1", usize::MAX, 0, None).unwrap_err();
+        assert!(err.contains("limit"), "unexpected: {err}");
+        let err = history(&conn, "d1", 50, usize::MAX, None).unwrap_err();
+        assert!(err.contains("offset"), "unexpected: {err}");
+        // A corrupt negative stored revision fails explicitly on reads.
+        conn.execute("UPDATE heads SET current_revision = -1 WHERE id = 'd1'", [])
+            .unwrap();
+        let err = show_record(&conn, "d1", None).unwrap_err();
+        assert!(err.contains("corrupt"), "unexpected: {err}");
+        conn.execute(
+            "UPDATE records SET revision = -1 WHERE id = 'd1' AND revision = 1",
+            [],
+        )
+        .unwrap();
+        let err = history(&conn, "d1", 50, 0, None).unwrap_err();
+        assert!(err.contains("corrupt"), "unexpected: {err}");
+        conn.close().unwrap();
+        // Generation overflow fails explicitly with no mutation.
+        let (home, repo) = setup("genoverflow");
+        let mut conn = open_rw(&home, &repo);
+        create_record(&mut conn, &new_record("d1", "t1")).unwrap();
+        conn.execute(
+            "UPDATE meta SET value = '18446744073709551615' WHERE key = 'knowledge_generation'",
+            [],
+        )
+        .unwrap();
+        let err = update_record(&mut conn, "d1", 1, &update_to("t2", "active")).unwrap_err();
+        assert!(err.contains("overflow"), "unexpected: {err}");
+        assert_eq!(show_record(&conn, "d1", None).unwrap().revision, 1);
+        assert_eq!(history(&conn, "d1", 50, 0, None).unwrap().total, 1);
+        conn.close().unwrap();
+    }
+
+    #[test]
+    fn knowledge_records_parallel_writers_overlap() {
+        use std::sync::{Arc, Barrier};
+        let (home, repo) = setup("parrace");
+        let mut first = open_rw(&home, &repo);
+        create_record(&mut first, &new_record("d1", "base zqxpbase")).unwrap();
+        let gen_before = read_generation(&first).unwrap();
+        drop(first);
+        // Both writers read head rev 1 first then rendezvous, so the two
+        // expected-1 updates genuinely overlap instead of merely following
+        // each other.
+        let barrier = Arc::new(Barrier::new(3));
+        let mut handles = Vec::new();
+        for term in ["zqxpwina", "zqxpwinb"] {
+            let (h, r, b) = (home.clone(), repo.clone(), barrier.clone());
+            handles.push(std::thread::spawn(move || {
+                let mut w = open_knowledge_at(&h, &r, true).unwrap();
+                assert_eq!(show_record(&w, "d1", None).unwrap().revision, 1);
+                b.wait();
+                let out = update_record(&mut w, "d1", 1, &update_to(term, "active"));
+                w.close().unwrap();
+                (term, out.map(|_| term))
+            }));
+        }
+        barrier.wait();
+        let mut winners = Vec::new();
+        for h in handles {
+            let (term, res) = h.join().unwrap();
+            match res {
+                Ok(_) => winners.push(term),
+                Err(e) => assert!(e.contains("conflict"), "loser must conflict: {e}"),
+            }
+        }
+        assert_eq!(winners.len(), 1, "exactly one overlapping writer wins");
+        let check = open_knowledge_at(&home, &repo, false).unwrap();
+        assert_eq!(show_record(&check, "d1", None).unwrap().revision, 2);
+        assert_eq!(history(&check, "d1", 50, 0, None).unwrap().total, 2);
+        assert_eq!(read_generation(&check).unwrap(), gen_before + 1);
+        // FTS reflects the winner only.
+        let winner_hits: i64 = check
+            .query_row(
+                "SELECT count(*) FROM knowledge_fts WHERE knowledge_fts MATCH 'zqxpwina' OR knowledge_fts MATCH 'zqxpwinb'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(winner_hits, 1, "index must reflect exactly the winner");
+        check.close().unwrap();
     }
 }
