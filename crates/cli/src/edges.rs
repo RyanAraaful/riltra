@@ -1,0 +1,1434 @@
+// SPDX-License-Identifier: Apache-2.0
+//! M6 graph edges (Task 3): taxonomy, callable-owner resolution, derivation.
+//! Syntax builds derive `IMPORTS` + syntax-only `POTENTIAL_CALL`; the SCIP
+//! import transaction upserts semantic-backed edges without reparsing;
+//! rebuilds re-derive after semantic carry-over. Traversal (Task 5) and
+//! queries (Task 4) build on the `EdgeEndpoint` identity defined in
+//! `store.rs`: endpoints link only through validated evidence, never names.
+
+use crate::store::{self, EdgeEndpoint, EdgeRow};
+use std::collections::{BTreeMap, BTreeSet};
+
+/// Edge taxonomy. `CALLS` is the strict proven subset; everything else
+/// carries its own evidence and never upgrades silently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgeKind {
+    Calls,
+    PotentialCall,
+    References,
+    Imports,
+}
+
+impl EdgeKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            EdgeKind::Calls => "CALLS",
+            EdgeKind::PotentialCall => "POTENTIAL_CALL",
+            EdgeKind::References => "REFERENCES",
+            EdgeKind::Imports => "IMPORTS",
+        }
+    }
+}
+
+/// Derivation totals. Reported by upsert/rederive; no performance claims.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EdgeStats {
+    pub calls: usize,
+    pub potential: usize,
+    pub references: usize,
+    pub imports: usize,
+}
+
+/// Structural endpoint equality: the ONLY way two endpoints link. Cross-kind
+/// (`Scip` vs `SyntaxDef`) never unifies by itself — the mapping happens in
+/// derivation, where both the syntax definition and the semantic definition
+/// fact are in hand as validated evidence.
+// Task 5 traversal is the production caller; allow until then.
+#[allow(dead_code)]
+pub fn unify(a: &EdgeEndpoint, b: &EdgeEndpoint) -> bool {
+    a == b
+}
+
+/// Narrowest enclosing CALLABLE definition (`function|method`) containing a
+/// byte offset in one file. Class/interface/struct bodies and anonymous
+/// scopes never own definite caller edges.
+fn owner_of(
+    symbols: &[store::SymbolRow],
+    file_id: i64,
+    call_bs: usize,
+) -> Option<&store::SymbolRow> {
+    symbols
+        .iter()
+        .filter(|s| {
+            s.file_id == file_id
+                && (s.kind == "function" || s.kind == "method")
+                && s.byte_start <= call_bs
+                && call_bs < s.byte_end
+        })
+        .min_by_key(|s| s.byte_end - s.byte_start)
+}
+
+/// Terminal identifier/property of a dotted callee name. ASCII separators
+/// only, mirroring `syntax::terminal_span` byte arithmetic.
+fn terminal_of(name: &str) -> &str {
+    let mut cut = 0;
+    let bytes = name.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'.' {
+            cut = i + 1;
+            i += 1;
+        } else if bytes.get(i..i + 2) == Some(b"::".as_slice())
+            || bytes.get(i..i + 2) == Some(b"->".as_slice())
+        {
+            cut = i + 2;
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    &name[cut..]
+}
+
+fn has_receiver(name: &str) -> bool {
+    terminal_of(name).len() != name.len()
+}
+
+fn evidence_json(path: &str, span_bs: usize, span_be: usize, extra: &str) -> String {
+    format!("{{\"path\":\"{path}\",\"span\":[{span_bs},{span_be}]{extra}}}")
+}
+
+/// Syntax-only derivation: `IMPORTS` verbatim + honest `POTENTIAL_CALL`
+/// candidates. Never proves `CALLS`. Reads only; the caller stores the rows.
+pub fn derive_syntax_edges(
+    conn: &rusqlite::Connection,
+    snapshot_id: i64,
+) -> Result<Vec<EdgeRow>, String> {
+    let symbols = store::symbols_for(conn, snapshot_id)?;
+    let calls = store::calls_for(conn, snapshot_id)?;
+    let imports = store::imports_for(conn, snapshot_id)?;
+    let id_map = store::file_id_map(conn, snapshot_id)?;
+    let mut path_of: BTreeMap<i64, &str> = BTreeMap::new();
+    for (path, (fid, _)) in &id_map {
+        path_of.insert(*fid, path.as_str());
+    }
+    let mut edges = Vec::new();
+    for import in &imports {
+        let path = path_of.get(&import.file_id).copied().unwrap_or("?");
+        edges.push(EdgeRow {
+            snapshot_id,
+            file_id: import.file_id,
+            caller: None,
+            caller_path: path.to_string(),
+            caller_span_bytes: (import.byte_start, import.byte_end),
+            callee: None,
+            callee_name: import.text.clone().unwrap_or_default(),
+            edge_kind: EdgeKind::Imports.as_str().to_string(),
+            precision: "Exact".to_string(),
+            provider: "syntax".to_string(),
+            evidence: evidence_json(path, import.byte_start, import.byte_end, ""),
+            unresolved: None,
+        });
+    }
+    // Import texts per file for the alias rule (text-match only).
+    let mut import_texts: BTreeMap<i64, Vec<&str>> = BTreeMap::new();
+    for import in &imports {
+        if let Some(text) = import.text.as_deref() {
+            import_texts.entry(import.file_id).or_default().push(text);
+        }
+    }
+    for call in &calls {
+        let path = path_of.get(&call.file_id).copied().unwrap_or("?");
+        let owner = owner_of(&symbols, call.file_id, call.byte_start);
+        let caller = owner.map(|o| EdgeEndpoint::SyntaxDef {
+            path: path.to_string(),
+            byte_start: o.byte_start,
+            byte_end: o.byte_end,
+        });
+        let full = call.name.as_deref().unwrap_or("");
+        let terminal = call
+            .tcallee
+            .as_ref()
+            .map(|_| terminal_of(full))
+            .filter(|t| !t.is_empty());
+        let reason: Option<String> = if call.callee.is_none() {
+            Some("no-callee".to_string())
+        } else if caller.is_none() {
+            Some("owner-unproven".to_string())
+        } else if terminal.is_none() {
+            Some("no-callee".to_string())
+        } else {
+            let t = terminal.unwrap_or("");
+            let candidates = symbols
+                .iter()
+                .filter(|s| {
+                    s.file_id == call.file_id
+                        && (s.kind == "function" || s.kind == "method")
+                        && s.name.as_deref() == Some(t)
+                })
+                .count();
+            let aliased = import_texts
+                .get(&call.file_id)
+                .map(|texts| {
+                    texts
+                        .iter()
+                        .any(|text| text.contains(" as ") && text.contains(t))
+                })
+                .unwrap_or(false);
+            if aliased {
+                Some("alias".to_string())
+            } else if candidates > 1 {
+                Some(format!("ambiguous:{candidates}"))
+            } else if has_receiver(full) {
+                Some("dynamic".to_string())
+            } else {
+                Some("no-overlap".to_string())
+            }
+        };
+        edges.push(EdgeRow {
+            snapshot_id,
+            file_id: call.file_id,
+            caller,
+            caller_path: path.to_string(),
+            caller_span_bytes: (call.byte_start, call.byte_end),
+            callee: None,
+            callee_name: terminal.unwrap_or(full).to_string(),
+            edge_kind: EdgeKind::PotentialCall.as_str().to_string(),
+            precision: "Heuristic".to_string(),
+            provider: "syntax".to_string(),
+            evidence: evidence_json(path, call.byte_start, call.byte_end, ""),
+            unresolved: reason,
+        });
+    }
+    Ok(edges)
+}
+
+/// Upsert semantic-backed edges for ONE import, inside the caller's
+/// transaction: proven `CALLS` where the evidence rule holds, one
+/// `POTENTIAL_CALL` per unproven call site, one `REFERENCES` edge per
+/// non-call reference occurrence. Stored import rows are SCIP-provenance by
+/// construction; the ephemeral `lsp-subprocess` provider (location-only, no
+/// stored identity) yields zero edges — no SCIP identity is ever fabricated
+/// for it. Syntax-only `POTENTIAL_CALL` rows this import resolves are
+/// replaced, never duplicated.
+pub fn upsert_semantic_edges(
+    conn: &rusqlite::Connection,
+    snapshot_id: i64,
+    import_id: i64,
+) -> Result<EdgeStats, String> {
+    let import = store::semantic_import_by_id(conn, import_id)?
+        .ok_or_else(|| "import vanished".to_string())?;
+    // LSP boundary: stored import rows are SCIP-provenance by construction
+    // (only `import_file` writes them; the ephemeral LSP path never stores
+    // rows and fabricates no identity). The row's `provider_name` is the
+    // real producer tool name by the time this runs, so the boundary is a
+    // denylist of the ephemeral provider, never an allowlist that a real
+    // tool name could miss.
+    if import.1.provider_name == "lsp-subprocess" {
+        return Ok(EdgeStats::default());
+    }
+    let facts = store::semantic_facts_of_import(conn, snapshot_id, import_id)?;
+    let symbols = store::symbols_for(conn, snapshot_id)?;
+    let calls = store::calls_for(conn, snapshot_id)?;
+    let id_map = store::file_id_map(conn, snapshot_id)?;
+    let mut fid_of: BTreeMap<&str, i64> = BTreeMap::new();
+    let mut path_of: BTreeMap<i64, &str> = BTreeMap::new();
+    for (path, (fid, _)) in &id_map {
+        fid_of.insert(path.as_str(), *fid);
+        path_of.insert(*fid, path.as_str());
+    }
+    // Definitions by URI; locals additionally keyed by document.
+    let mut defs: BTreeMap<&str, Vec<&store::SemanticFact>> = BTreeMap::new();
+    for fact in &facts {
+        if let Some(uri) = fact.symbol_uri.as_deref() {
+            if fact.roles & 0x1 != 0 {
+                defs.entry(uri).or_default().push(fact);
+            }
+        }
+    }
+    let def_for = |uri: &str, rel: &str| -> Option<&store::SemanticFact> {
+        defs.get(uri).and_then(|candidates| {
+            candidates
+                .iter()
+                .find(|d| !crate::scip::is_local_symbol(uri) || d.rel_path == rel)
+                .copied()
+        })
+    };
+    // Calls by file for overlap joins.
+    let mut calls_by_file: BTreeMap<i64, Vec<&store::CallRow>> = BTreeMap::new();
+    for call in &calls {
+        calls_by_file.entry(call.file_id).or_default().push(call);
+    }
+    let empty: Vec<&store::CallRow> = Vec::new();
+    let mut stats = EdgeStats::default();
+    let mut resolved: BTreeSet<(i64, usize, usize)> = BTreeSet::new();
+    let mut out = Vec::new();
+    for fact in &facts {
+        let uri = match fact.symbol_uri.as_deref() {
+            Some(uri) => uri,
+            None => continue,
+        };
+        if fact.roles & 0x1 != 0 {
+            continue; // definitions anchor identity; they are not edges.
+        }
+        let fid = match fid_of.get(fact.rel_path.as_str()).copied() {
+            Some(fid) => fid,
+            None => continue,
+        };
+        let file_calls = calls_by_file.get(&fid).unwrap_or(&empty);
+        // Terminal-overlapping calls: CALLS candidates. Callee-overlapping
+        // but terminal-missing: object-base reference, never a call.
+        let mut terminal_hits = Vec::new();
+        let mut callee_hits = Vec::new();
+        for call in file_calls {
+            if let Some(t) = call.tcallee.as_ref() {
+                if t.byte_start < fact.byte_end && fact.byte_start < t.byte_end {
+                    terminal_hits.push(*call);
+                    continue;
+                }
+            }
+            if let Some(c) = call.callee.as_ref() {
+                if c.byte_start < fact.byte_end && fact.byte_start < c.byte_end {
+                    callee_hits.push(*call);
+                }
+            }
+        }
+        let local_doc = if crate::scip::is_local_symbol(uri) {
+            Some(fact.rel_path.clone())
+        } else {
+            None
+        };
+        let target = EdgeEndpoint::Scip {
+            import_id,
+            symbol_uri: uri.to_string(),
+            doc: local_doc,
+        };
+        if terminal_hits.len() == 1 {
+            let call = terminal_hits[0];
+            let path = path_of.get(&call.file_id).copied().unwrap_or("?");
+            let owner = owner_of(&symbols, call.file_id, call.byte_start);
+            let external = fact.external;
+            let def = def_for(uri, &fact.rel_path);
+            match (owner, def, external) {
+                (Some(o), Some(_), false) => {
+                    // Proven call: overlapping reference of the resolved
+                    // target + proven callable owner. The caller endpoint
+                    // unifies to the owner's SCIP identity when the owner
+                    // has a definition fact in this import, else its
+                    // snapshot-local syntax identity.
+                    let caller = owner_scip(conn, snapshot_id, import_id, o, path).unwrap_or(
+                        EdgeEndpoint::SyntaxDef {
+                            path: path.to_string(),
+                            byte_start: o.byte_start,
+                            byte_end: o.byte_end,
+                        },
+                    );
+                    let terminal = call.name.as_deref().map(terminal_of).unwrap_or_default();
+                    out.push(EdgeRow {
+                        snapshot_id,
+                        file_id: call.file_id,
+                        caller: Some(caller),
+                        caller_path: path.to_string(),
+                        caller_span_bytes: (call.byte_start, call.byte_end),
+                        callee: Some(target),
+                        callee_name: terminal.to_string(),
+                        edge_kind: EdgeKind::Calls.as_str().to_string(),
+                        precision: "Exact".to_string(),
+                        provider: "scip-import".to_string(),
+                        evidence: evidence_json(
+                            path,
+                            call.byte_start,
+                            call.byte_end,
+                            &format!(",\"ref\":[{},{}]", fact.byte_start, fact.byte_end),
+                        ),
+                        unresolved: None,
+                    });
+                    stats.calls += 1;
+                    resolved.insert((call.file_id, call.byte_start, call.byte_end));
+                }
+                _ => {
+                    let reason = if external {
+                        "external"
+                    } else if owner.is_none() {
+                        "owner-unproven"
+                    } else {
+                        "unresolved"
+                    };
+                    let caller = owner.map(|o| EdgeEndpoint::SyntaxDef {
+                        path: path.to_string(),
+                        byte_start: o.byte_start,
+                        byte_end: o.byte_end,
+                    });
+                    let terminal = call.name.as_deref().map(terminal_of).unwrap_or_default();
+                    out.push(potential_row(
+                        snapshot_id,
+                        call.file_id,
+                        path,
+                        call,
+                        caller,
+                        terminal,
+                        reason,
+                    ));
+                    stats.potential += 1;
+                    resolved.insert((call.file_id, call.byte_start, call.byte_end));
+                }
+            }
+        } else if terminal_hits.len() > 1 {
+            let n = terminal_hits.len();
+            for call in &terminal_hits {
+                let path = path_of.get(&call.file_id).copied().unwrap_or("?");
+                let owner = owner_of(&symbols, call.file_id, call.byte_start);
+                let caller = owner.map(|o| EdgeEndpoint::SyntaxDef {
+                    path: path.to_string(),
+                    byte_start: o.byte_start,
+                    byte_end: o.byte_end,
+                });
+                let terminal = call.name.as_deref().map(terminal_of).unwrap_or_default();
+                out.push(potential_row(
+                    snapshot_id,
+                    call.file_id,
+                    path,
+                    call,
+                    caller,
+                    terminal,
+                    &format!("ambiguous:{n}"),
+                ));
+                stats.potential += 1;
+                resolved.insert((call.file_id, call.byte_start, call.byte_end));
+            }
+        } else if !callee_hits.is_empty() {
+            for call in callee_hits {
+                let path = path_of.get(&call.file_id).copied().unwrap_or("?");
+                let owner = owner_of(&symbols, call.file_id, call.byte_start);
+                let caller = owner.map(|o| EdgeEndpoint::SyntaxDef {
+                    path: path.to_string(),
+                    byte_start: o.byte_start,
+                    byte_end: o.byte_end,
+                });
+                let terminal = call.name.as_deref().map(terminal_of).unwrap_or_default();
+                out.push(potential_row(
+                    snapshot_id,
+                    call.file_id,
+                    path,
+                    call,
+                    caller,
+                    terminal,
+                    "target-mismatch",
+                ));
+                stats.potential += 1;
+                resolved.insert((call.file_id, call.byte_start, call.byte_end));
+            }
+        } else {
+            // Plain reference: no call site involved. Caller stays unknown
+            // with the occurrence location as evidence; never expanded.
+            out.push(EdgeRow {
+                snapshot_id,
+                file_id: fid,
+                caller: None,
+                caller_path: fact.rel_path.clone(),
+                caller_span_bytes: (fact.byte_start, fact.byte_end),
+                callee: Some(target),
+                callee_name: fact.display_name.clone().unwrap_or_default(),
+                edge_kind: EdgeKind::References.as_str().to_string(),
+                precision: "Exact".to_string(),
+                provider: "scip-import".to_string(),
+                evidence: evidence_json(&fact.rel_path, fact.byte_start, fact.byte_end, ""),
+                unresolved: None,
+            });
+            stats.references += 1;
+        }
+    }
+    // Replace the syntax-only potentials this import resolved: one row per
+    // call site per layer, never duplicates.
+    for (file_id, bs, be) in &resolved {
+        conn.execute(
+            "DELETE FROM code_edges WHERE snapshot_id = ?1 AND file_id = ?2 AND caller_sbs = ?3 AND caller_sbe = ?4 AND edge_kind = 'POTENTIAL_CALL' AND provider = 'syntax'",
+            rusqlite::params![snapshot_id, file_id, *bs as i64, *be as i64],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    for edge in &out {
+        store::insert_edge(conn, edge)?;
+    }
+    Ok(stats)
+}
+
+fn potential_row(
+    snapshot_id: i64,
+    file_id: i64,
+    path: &str,
+    call: &store::CallRow,
+    caller: Option<EdgeEndpoint>,
+    terminal: &str,
+    reason: &str,
+) -> EdgeRow {
+    EdgeRow {
+        snapshot_id,
+        file_id,
+        caller,
+        caller_path: path.to_string(),
+        caller_span_bytes: (call.byte_start, call.byte_end),
+        callee: None,
+        callee_name: terminal.to_string(),
+        edge_kind: EdgeKind::PotentialCall.as_str().to_string(),
+        precision: "Heuristic".to_string(),
+        provider: "scip-import".to_string(),
+        evidence: evidence_json(path, call.byte_start, call.byte_end, ""),
+        unresolved: Some(reason.to_string()),
+    }
+}
+
+/// Map a proven owner definition to its SCIP identity in this import when a
+/// definition fact for it exists (same file, contained occurrence); `None`
+/// keeps the snapshot-local syntax identity. This is the single validated
+/// SyntaxDef↔Scip mapping point: same file + byte containment + same import.
+fn owner_scip(
+    conn: &rusqlite::Connection,
+    snapshot_id: i64,
+    import_id: i64,
+    owner: &store::SymbolRow,
+    path: &str,
+) -> Option<EdgeEndpoint> {
+    let facts = store::semantic_facts_of_import(conn, snapshot_id, import_id).ok()?;
+    let name = owner.name.as_deref()?;
+    facts
+        .iter()
+        .filter(|f| f.roles & 0x1 != 0)
+        .filter(|f| f.display_name.as_deref() == Some(name))
+        .find(|f| {
+            f.rel_path == path && owner.byte_start <= f.byte_start && f.byte_end <= owner.byte_end
+        })
+        .and_then(|f| {
+            f.symbol_uri.as_deref().map(|uri| EdgeEndpoint::Scip {
+                import_id,
+                symbol_uri: uri.to_string(),
+                doc: if crate::scip::is_local_symbol(uri) {
+                    Some(f.rel_path.clone())
+                } else {
+                    None
+                },
+            })
+        })
+}
+
+/// Full re-derivation after semantic carry-over and `import_id` rebinding.
+/// Edges are never carried or copied: staging always re-derives from its own
+/// facts, so remapped `file_id`/`import_id` values cannot dangle.
+pub fn rederive_after_carry(
+    conn: &rusqlite::Connection,
+    snapshot_id: i64,
+) -> Result<EdgeStats, String> {
+    conn.execute(
+        "DELETE FROM code_edges WHERE snapshot_id = ?1",
+        rusqlite::params![snapshot_id],
+    )
+    .map_err(|e| e.to_string())?;
+    let mut totals = EdgeStats::default();
+    for edge in derive_syntax_edges(conn, snapshot_id)? {
+        store::insert_edge(conn, &edge)?;
+        match edge.edge_kind.as_str() {
+            "IMPORTS" => totals.imports += 1,
+            _ => totals.potential += 1,
+        }
+    }
+    for (id, _) in store::semantic_imports_for(conn, snapshot_id)? {
+        let stats = upsert_semantic_edges(conn, snapshot_id, id)?;
+        totals.calls += stats.calls;
+        totals.potential += stats.potential;
+        totals.references += stats.references;
+    }
+    Ok(totals)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testutil::tmpdir;
+
+    fn mem_db() -> rusqlite::Connection {
+        store::open_memory().unwrap()
+    }
+
+    fn mk_snap(conn: &rusqlite::Connection) -> i64 {
+        store::insert_snapshot(
+            conn,
+            &store::Snapshot {
+                id: 0,
+                repo: "r".to_string(),
+                root: "C:\\r".to_string(),
+                created_unix: 1,
+                head: None,
+                branch: None,
+                dirty: false,
+                untracked: 0,
+                parser_version: store::PARSER_VERSION,
+                grammar_versions: store::grammar_versions(),
+                config_fingerprint: "c".to_string(),
+                pre_fingerprint: "p".to_string(),
+                post_fingerprint: "p".to_string(),
+                status_at_write: "fresh".to_string(),
+                nonce: store::new_nonce(),
+            },
+        )
+        .unwrap()
+    }
+
+    fn span_cols(s: &Option<crate::syntax::CalleeSpan>) -> Option<store::SpanCols> {
+        s.as_ref().map(|v| store::SpanCols {
+            start_line: v.start_line,
+            start_col: v.start_col,
+            end_line: v.end_line,
+            end_col: v.end_col,
+            byte_start: v.byte_start,
+            byte_end: v.byte_end,
+        })
+    }
+
+    /// Ingest parsed Python facts exactly like `index::ingest_file`.
+    fn ingest_py(conn: &rusqlite::Connection, snap: i64, path: &str, src: &[u8]) -> i64 {
+        let facts = crate::syntax::parse_source(crate::syntax::Language::Python, src);
+        let fid = store::insert_file(
+            conn,
+            snap,
+            &store::FileRow {
+                path: path.to_string(),
+                language: "python".to_string(),
+                bytes: src.len() as u64,
+                digest: store::content_digest(src),
+                errors: facts.errors,
+            },
+        )
+        .unwrap();
+        for d in &facts.definitions {
+            store::insert_symbol(
+                conn,
+                snap,
+                &store::SymbolRow {
+                    file_id: fid,
+                    kind: d.kind.to_string(),
+                    name: d.name.clone(),
+                    start_line: d.span.start_line,
+                    start_col: d.span.start_col,
+                    end_line: d.span.end_line,
+                    end_col: d.span.end_col,
+                    byte_start: d.byte_start,
+                    byte_end: d.byte_end,
+                    provider: "syntax".to_string(),
+                    grammar: "python:0.25.0".to_string(),
+                    language: "python".to_string(),
+                },
+            )
+            .unwrap();
+        }
+        for import in &facts.imports {
+            store::insert_import(
+                conn,
+                snap,
+                &store::ImportRow {
+                    file_id: fid,
+                    text: import.text.clone(),
+                    start_line: import.span.start_line,
+                    start_col: import.span.start_col,
+                    end_line: import.span.end_line,
+                    end_col: import.span.end_col,
+                    byte_start: import.byte_start,
+                    byte_end: import.byte_end,
+                    provider: "syntax".to_string(),
+                    grammar: "python:0.25.0".to_string(),
+                    language: "python".to_string(),
+                },
+            )
+            .unwrap();
+        }
+        for call in &facts.calls {
+            store::insert_call(
+                conn,
+                snap,
+                &store::CallRow {
+                    file_id: fid,
+                    name: call.name.clone(),
+                    start_line: call.span.start_line,
+                    start_col: call.span.start_col,
+                    end_line: call.span.end_line,
+                    end_col: call.span.end_col,
+                    byte_start: call.byte_start,
+                    byte_end: call.byte_end,
+                    callee: span_cols(&call.callee),
+                    tcallee: span_cols(&call.tcallee),
+                    unresolved: 1,
+                    provider: "syntax".to_string(),
+                    grammar: "python:0.25.0".to_string(),
+                    language: "python".to_string(),
+                },
+            )
+            .unwrap();
+        }
+        fid
+    }
+
+    fn mk_import(conn: &rusqlite::Connection, snap: i64, provider: &str) -> i64 {
+        store::insert_semantic_import(
+            conn,
+            &store::SemanticImport {
+                snapshot_id: snap,
+                provider_name: provider.to_string(),
+                provider_version: "v".to_string(),
+                capability: "definitions,references".to_string(),
+                project_root: "C:\\r".to_string(),
+                text_encoding: "UTF8".to_string(),
+                artifact_id: "a".to_string(),
+                source_revision: "r".to_string(),
+                claimed_source_digest: String::new(),
+                content_identity: "ci".to_string(),
+                external_symbols: "[]".to_string(),
+                verification: "Unverified".to_string(),
+            },
+        )
+        .unwrap()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn mk_fact(
+        snap: i64,
+        imp: i64,
+        path: &str,
+        digest: &str,
+        uri: Option<&str>,
+        display: &str,
+        roles: u32,
+        span: (u32, u32, u32, u32),
+        bytes: (usize, usize),
+        external: bool,
+    ) -> store::SemanticFact {
+        store::SemanticFact {
+            snapshot_id: snap,
+            import_id: imp,
+            file_id: None,
+            rel_path: path.to_string(),
+            file_digest: digest.to_string(),
+            symbol_uri: uri.map(|s| s.to_string()),
+            display_name: Some(display.to_string()),
+            roles,
+            start_line: span.0,
+            start_col: span.1,
+            end_line: span.2,
+            end_col: span.3,
+            byte_start: bytes.0,
+            byte_end: bytes.1,
+            precision: "Heuristic".to_string(),
+            relationships: "[]".to_string(),
+            external,
+        }
+    }
+
+    #[test]
+    fn edges_derive_syntax_only_calls_are_honest_potentials() {
+        let conn = mem_db();
+        let snap = mk_snap(&conn);
+        let src = b"import os\n\n\ndef caller():\n    target()\n    w.process(1)\n";
+        ingest_py(&conn, snap, "m.py", src);
+        let edges = derive_syntax_edges(&conn, snap).unwrap();
+        assert!(
+            edges.iter().all(|e| e.edge_kind != "CALLS"),
+            "syntax-only derivation never proves CALLS"
+        );
+        let pots: Vec<&EdgeRow> = edges
+            .iter()
+            .filter(|e| e.edge_kind == "POTENTIAL_CALL")
+            .collect();
+        assert_eq!(pots.len(), 2);
+        assert!(pots.iter().any(|e| e.callee_name == "target"));
+        let member = pots.iter().find(|e| e.callee_name == "process").unwrap();
+        assert_eq!(
+            member.unresolved.as_deref(),
+            Some("dynamic"),
+            "receiver dispatch without proof is dynamic, not resolved"
+        );
+        assert!(edges.iter().any(|e| e.edge_kind == "IMPORTS"));
+    }
+
+    #[test]
+    fn edges_derive_scip_overlap_proves_calls_strictly() {
+        let conn = mem_db();
+        let snap = mk_snap(&conn);
+        // main.py: 0:"from lib import target\n" 1:"\n" 2:"def caller():\n"
+        // 3:"    return target()\n" 4:"    lone()\n" 5:"    w.process(9)\n"
+        let main = b"from lib import target\n\ndef caller():\n    return target()\n    lone()\n    w.process(9)\n";
+        let lib = b"def target():\n    return 1\n";
+        let main_digest = store::content_digest(main);
+        let lib_digest = store::content_digest(lib);
+        ingest_py(&conn, snap, "main.py", main);
+        ingest_py(&conn, snap, "lib.py", lib);
+        let imp = mk_import(&conn, snap, "scip-import");
+        let t = "scip-test test test-pkg 1.0.0 lib.py/target().";
+        let c = "scip-test test test-pkg 1.0.0 main.py/caller().";
+        let l = "scip-test test test-pkg 1.0.0 main.py/lone().";
+        let p = "scip-test test test-pkg 1.0.0 other.py/process().";
+        store::insert_semantic_facts(
+            &conn,
+            &[
+                // def target in lib.py (line 1, cols 5..11 1-based).
+                mk_fact(
+                    snap,
+                    imp,
+                    "lib.py",
+                    &lib_digest,
+                    Some(t),
+                    "target",
+                    0x1,
+                    (1, 5, 1, 11),
+                    (4, 10),
+                    false,
+                ),
+                // def caller in main.py (line 3, cols 5..11).
+                mk_fact(
+                    snap,
+                    imp,
+                    "main.py",
+                    &main_digest,
+                    Some(c),
+                    "caller",
+                    0x1,
+                    (3, 5, 3, 11),
+                    (28, 34),
+                    false,
+                ),
+                // ref target overlapping the target() terminal (line 4,
+                // 1-based cols 12..18).
+                mk_fact(
+                    snap,
+                    imp,
+                    "main.py",
+                    &main_digest,
+                    Some(t),
+                    "target",
+                    0x0,
+                    (4, 12, 4, 18),
+                    (49, 55),
+                    false,
+                ),
+                // ref lone with NO definition anywhere: dangling.
+                mk_fact(
+                    snap,
+                    imp,
+                    "main.py",
+                    &main_digest,
+                    Some(l),
+                    "lone",
+                    0x0,
+                    (5, 5, 5, 9),
+                    (62, 66),
+                    false,
+                ),
+                // ref process overlapping only the RECEIVER w (cols 5..6),
+                // never the terminal: object-base reference, not a call.
+                mk_fact(
+                    snap,
+                    imp,
+                    "main.py",
+                    &main_digest,
+                    Some(p),
+                    "process",
+                    0x0,
+                    (6, 5, 6, 6),
+                    (73, 74),
+                    false,
+                ),
+            ],
+        )
+        .unwrap();
+        let stats = upsert_semantic_edges(&conn, snap, imp).unwrap();
+        assert_eq!(stats.calls, 1, "exactly one proven call");
+        let calls = store::edges_outbound(
+            &conn,
+            snap,
+            &EdgeEndpoint::Scip {
+                import_id: imp,
+                symbol_uri: c.to_string(),
+                doc: None,
+            },
+            50,
+            0,
+        )
+        .unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].edge_kind, "CALLS");
+        assert_eq!(calls[0].precision, "Exact");
+        assert_eq!(
+            calls[0].callee,
+            Some(EdgeEndpoint::Scip {
+                import_id: imp,
+                symbol_uri: t.to_string(),
+                doc: None
+            })
+        );
+        // Dangling ref: POTENTIAL_CALL unresolved, never CALLS.
+        let dangling = store::edges_outbound(
+            &conn,
+            snap,
+            &EdgeEndpoint::Scip {
+                import_id: imp,
+                symbol_uri: l.to_string(),
+                doc: None,
+            },
+            50,
+            0,
+        )
+        .unwrap();
+        assert!(dangling.is_empty(), "dangling refs anchor nothing inbound");
+        // Receiver-only overlap: target-mismatch, never CALLS. The target
+        // stays unknown (no Scip endpoint fabricated), so assert the stored
+        // row directly: one POTENTIAL_CALL naming the terminal.
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM code_edges WHERE snapshot_id = ?1 AND edge_kind = 'POTENTIAL_CALL' AND callee_name = 'process' AND unresolved = 'target-mismatch' AND callee_kind = 'unknown'",
+                [snap],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn edges_derive_ambiguous_alias_and_owner_rules() {
+        let conn = mem_db();
+        let snap = mk_snap(&conn);
+        let src =
+            b"def dup():\n    return 1\n\ndef dup():\n    return 2\n\ndef user():\n    dup()\n";
+        ingest_py(&conn, snap, "a.py", src);
+        let alias_src = b"from m import real as alias\n\ndef real():\n    return 1\n\ndef user():\n    alias()\n";
+        ingest_py(&conn, snap, "b.py", alias_src);
+        let class_src = b"class K:\n    x = helper()\n";
+        ingest_py(&conn, snap, "c.py", class_src);
+        let edges = derive_syntax_edges(&conn, snap).unwrap();
+        let by_callee = |name: &str| {
+            edges
+                .iter()
+                .filter(|e| e.callee_name == name && e.edge_kind == "POTENTIAL_CALL")
+                .collect::<Vec<_>>()
+        };
+        let dup = by_callee("dup");
+        assert_eq!(dup.len(), 1);
+        assert_eq!(dup[0].unresolved.as_deref(), Some("ambiguous:2"));
+        let alias = by_callee("alias");
+        assert_eq!(alias.len(), 1);
+        assert_eq!(alias[0].unresolved.as_deref(), Some("alias"));
+        let helper = by_callee("helper");
+        assert_eq!(helper.len(), 1);
+        assert!(helper[0].caller.is_none(), "class body owns no caller");
+        assert_eq!(helper[0].unresolved.as_deref(), Some("owner-unproven"));
+    }
+
+    #[test]
+    fn edges_derive_recursion_proves_self_call() {
+        let conn = mem_db();
+        let snap = mk_snap(&conn);
+        let src = b"def r():\n    return r()\n";
+        let digest = store::content_digest(src);
+        ingest_py(&conn, snap, "r.py", src);
+        let imp = mk_import(&conn, snap, "scip-import");
+        let r = "scip-test test test-pkg 1.0.0 r.py/r().";
+        store::insert_semantic_facts(
+            &conn,
+            &[
+                mk_fact(
+                    snap,
+                    imp,
+                    "r.py",
+                    &digest,
+                    Some(r),
+                    "r",
+                    0x1,
+                    (1, 5, 1, 6),
+                    (4, 5),
+                    false,
+                ),
+                mk_fact(
+                    snap,
+                    imp,
+                    "r.py",
+                    &digest,
+                    Some(r),
+                    "r",
+                    0x0,
+                    (2, 12, 2, 13),
+                    (20, 21),
+                    false,
+                ),
+            ],
+        )
+        .unwrap();
+        let stats = upsert_semantic_edges(&conn, snap, imp).unwrap();
+        assert_eq!(stats.calls, 1);
+        let key = EdgeEndpoint::Scip {
+            import_id: imp,
+            symbol_uri: r.to_string(),
+            doc: None,
+        };
+        let out = store::edges_outbound(&conn, snap, &key, 50, 0).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].caller, Some(key.clone()));
+        assert_eq!(out[0].callee, Some(key));
+    }
+
+    #[test]
+    fn edges_derive_chain_links_only_through_unified_identity() {
+        let conn = mem_db();
+        let snap = mk_snap(&conn);
+        let a = b"def a():\n    return 1\n";
+        let b = b"from a import a\n\ndef b():\n    return a()\n";
+        let c = b"from b import b\n\ndef c():\n    return b()\n";
+        let (da, db, dc) = (
+            store::content_digest(a),
+            store::content_digest(b),
+            store::content_digest(c),
+        );
+        ingest_py(&conn, snap, "a.py", a);
+        ingest_py(&conn, snap, "b.py", b);
+        ingest_py(&conn, snap, "c.py", c);
+        let imp = mk_import(&conn, snap, "scip-import");
+        let (ua, ub, uc) = (
+            "scip-test test test-pkg 1.0.0 a.py/a().",
+            "scip-test test test-pkg 1.0.0 b.py/b().",
+            "scip-test test test-pkg 1.0.0 c.py/c().",
+        );
+        store::insert_semantic_facts(
+            &conn,
+            &[
+                mk_fact(
+                    snap,
+                    imp,
+                    "a.py",
+                    &da,
+                    Some(ua),
+                    "a",
+                    0x1,
+                    (1, 5, 1, 6),
+                    (4, 5),
+                    false,
+                ),
+                mk_fact(
+                    snap,
+                    imp,
+                    "b.py",
+                    &db,
+                    Some(ub),
+                    "b",
+                    0x1,
+                    (3, 5, 3, 6),
+                    (21, 22),
+                    false,
+                ),
+                mk_fact(
+                    snap,
+                    imp,
+                    "b.py",
+                    &db,
+                    Some(ua),
+                    "a",
+                    0x0,
+                    (4, 12, 4, 13),
+                    (37, 38),
+                    false,
+                ),
+                mk_fact(
+                    snap,
+                    imp,
+                    "c.py",
+                    &dc,
+                    Some(uc),
+                    "c",
+                    0x1,
+                    (3, 5, 3, 6),
+                    (21, 22),
+                    false,
+                ),
+                mk_fact(
+                    snap,
+                    imp,
+                    "c.py",
+                    &dc,
+                    Some(ub),
+                    "b",
+                    0x0,
+                    (4, 12, 4, 13),
+                    (37, 38),
+                    false,
+                ),
+            ],
+        )
+        .unwrap();
+        let stats = upsert_semantic_edges(&conn, snap, imp).unwrap();
+        assert_eq!(stats.calls, 2, "c→b and b→a both proven");
+        let kb = EdgeEndpoint::Scip {
+            import_id: imp,
+            symbol_uri: ub.to_string(),
+            doc: None,
+        };
+        let inbound = store::edges_inbound(&conn, snap, &kb, 50, 0).unwrap();
+        let outbound = store::edges_outbound(&conn, snap, &kb, 50, 0).unwrap();
+        assert_eq!(inbound.len(), 1, "c calls b");
+        assert_eq!(outbound.len(), 1, "b calls a");
+        assert_eq!(
+            inbound[0].callee, outbound[0].caller,
+            "B is the same proven identity on both sides of the chain"
+        );
+        // Negative: same URI under a DIFFERENT import never merges.
+        let imp2 = mk_import(&conn, snap, "scip-import");
+        let kb2 = EdgeEndpoint::Scip {
+            import_id: imp2,
+            symbol_uri: ub.to_string(),
+            doc: None,
+        };
+        assert!(!unify(&kb, &kb2), "import scope is identity");
+        assert!(store::edges_inbound(&conn, snap, &kb2, 50, 0)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn edges_derive_unify_is_structural_equality() {
+        let s = |u: &str| EdgeEndpoint::Scip {
+            import_id: 7,
+            symbol_uri: u.to_string(),
+            doc: None,
+        };
+        assert!(unify(&s("x"), &s("x")));
+        assert!(!unify(&s("x"), &s("y")));
+        assert!(!unify(
+            &s("x"),
+            &EdgeEndpoint::Scip {
+                import_id: 8,
+                symbol_uri: "x".to_string(),
+                doc: None
+            }
+        ));
+        let d = |p: &str| EdgeEndpoint::SyntaxDef {
+            path: p.to_string(),
+            byte_start: 0,
+            byte_end: 9,
+        };
+        assert!(unify(&d("a.py"), &d("a.py")));
+        assert!(!unify(&d("a.py"), &d("b.py")));
+        assert!(
+            !unify(&s("x"), &d("a.py")),
+            "cross-kind never unifies by itself"
+        );
+    }
+
+    #[test]
+    fn edges_derive_non_scip_provider_yields_zero_edges() {
+        let conn = mem_db();
+        let snap = mk_snap(&conn);
+        ingest_py(&conn, snap, "m.py", b"def f():\n    pass\n");
+        let imp = mk_import(&conn, snap, "lsp-subprocess");
+        store::insert_semantic_facts(
+            &conn,
+            &[mk_fact(
+                snap,
+                imp,
+                "m.py",
+                "d",
+                Some("u"),
+                "f",
+                0x1,
+                (1, 5, 1, 6),
+                (4, 5),
+                false,
+            )],
+        )
+        .unwrap();
+        let stats = upsert_semantic_edges(&conn, snap, imp).unwrap();
+        assert_eq!(
+            stats,
+            EdgeStats::default(),
+            "LSP rows never become stored graph edges"
+        );
+    }
+
+    // --- lifecycle tests (real build + real SCIP bytes, no reindex) ---
+
+    /// Minimal proto3 writer for exactly the fields the importer reads.
+    mod scip_enc {
+        pub fn varint(mut v: u64, out: &mut Vec<u8>) {
+            loop {
+                let mut b = (v & 0x7f) as u8;
+                v >>= 7;
+                if v != 0 {
+                    b |= 0x80;
+                }
+                out.push(b);
+                if v == 0 {
+                    break;
+                }
+            }
+        }
+        pub fn tag(field: u32, wire: u32, out: &mut Vec<u8>) {
+            varint(((field << 3) | wire) as u64, out);
+        }
+        pub fn len_field(field: u32, bytes: &[u8], out: &mut Vec<u8>) {
+            tag(field, 2, out);
+            varint(bytes.len() as u64, out);
+            out.extend_from_slice(bytes);
+        }
+        pub fn str_field(field: u32, value: &str, out: &mut Vec<u8>) {
+            len_field(field, value.as_bytes(), out);
+        }
+        pub fn varint_field(field: u32, value: u64, out: &mut Vec<u8>) {
+            tag(field, 0, out);
+            varint(value, out);
+        }
+        pub fn occurrence(symbol: &str, roles: u64, line: i64, start: i64, end: i64) -> Vec<u8> {
+            let mut r = Vec::new();
+            varint_field(1, line as u64, &mut r);
+            varint_field(2, start as u64, &mut r);
+            varint_field(3, end as u64, &mut r);
+            let mut o = Vec::new();
+            str_field(2, symbol, &mut o);
+            varint_field(3, roles, &mut o);
+            len_field(8, &r, &mut o);
+            o
+        }
+        pub fn symbol_info(symbol: &str, display: &str) -> Vec<u8> {
+            let mut s = Vec::new();
+            str_field(1, symbol, &mut s);
+            str_field(6, display, &mut s);
+            s
+        }
+        pub fn document(rel: &str, occs: &[Vec<u8>], symbols: &[Vec<u8>]) -> Vec<u8> {
+            let mut d = Vec::new();
+            str_field(1, rel, &mut d);
+            for o in occs {
+                len_field(2, o, &mut d);
+            }
+            for s in symbols {
+                len_field(3, s, &mut d);
+            }
+            varint_field(6, 1, &mut d); // UTF8
+            d
+        }
+        pub fn index_bytes(root: &std::path::Path, docs: &[Vec<u8>]) -> Vec<u8> {
+            let mut md = Vec::new();
+            let mut tool = Vec::new();
+            str_field(1, "scip-test", &mut tool);
+            str_field(2, "1.0", &mut tool);
+            len_field(2, &tool, &mut md);
+            str_field(
+                3,
+                &format!("file://{}", root.to_string_lossy().replace('\\', "/")),
+                &mut md,
+            );
+            varint_field(4, 1, &mut md);
+            let mut out = Vec::new();
+            len_field(1, &md, &mut out);
+            for d in docs {
+                len_field(2, d, &mut out);
+            }
+            out
+        }
+    }
+
+    const T_URI: &str = "scip-test test test-pkg 1.0.0 lib.py/target().";
+    const C_URI: &str = "scip-test test test-pkg 1.0.0 main.py/caller().";
+
+    fn lifecycle_repo(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let home = tmpdir(&format!("edges-life-home-{tag}"));
+        let repo = tmpdir(&format!("edges-life-{tag}"));
+        std::fs::write(repo.join("lib.py"), b"def target():\n    return 1\n").unwrap();
+        std::fs::write(
+            repo.join("main.py"),
+            b"from lib import target\n\ndef caller():\n    return target()\n",
+        )
+        .unwrap();
+        (home, repo)
+    }
+
+    fn lifecycle_scip(repo: &std::path::Path) -> std::path::PathBuf {
+        let docs = vec![
+            scip_enc::document(
+                "lib.py",
+                &[scip_enc::occurrence(T_URI, 0x1, 0, 4, 10)],
+                &[scip_enc::symbol_info(T_URI, "target")],
+            ),
+            scip_enc::document(
+                "main.py",
+                &[
+                    scip_enc::occurrence(C_URI, 0x1, 2, 4, 10),
+                    scip_enc::occurrence(T_URI, 0x0, 3, 11, 17),
+                ],
+                &[
+                    scip_enc::symbol_info(C_URI, "caller"),
+                    scip_enc::symbol_info(T_URI, "target"),
+                ],
+            ),
+        ];
+        let scip = repo.join("index.scip");
+        std::fs::write(&scip, scip_enc::index_bytes(repo, &docs)).unwrap();
+        scip
+    }
+
+    fn live_snapshot_id(home: &std::path::Path) -> i64 {
+        let db = store::db_path(home, "r");
+        let conn = store::open_live(&db).unwrap();
+        store::latest_snapshot(&conn).unwrap().unwrap().id
+    }
+
+    fn calls_edges(home: &std::path::Path) -> Vec<EdgeRow> {
+        // Read back through the public query surface (no raw SQL).
+        let db = store::db_path(home, "r");
+        let conn = store::open_live(&db).unwrap();
+        let snap = store::latest_snapshot(&conn).unwrap().unwrap().id;
+        let imports = store::semantic_imports_for(&conn, snap).unwrap();
+        // Newest import: rebuilds carry older imports forward, so the fully
+        // bound import is the last one.
+        let imp = imports.last().map(|(id, _)| *id).unwrap();
+        let key = EdgeEndpoint::Scip {
+            import_id: imp,
+            symbol_uri: C_URI.to_string(),
+            doc: None,
+        };
+        store::edges_outbound(&conn, snap, &key, 50, 0).unwrap()
+    }
+
+    #[test]
+    fn edges_lifecycle_import_upsert_visible_without_reindex() {
+        let (home, repo) = lifecycle_repo("noreindex");
+        crate::index::build_full(&home, "r", &repo).unwrap();
+        let scip = lifecycle_scip(&repo);
+        let out = crate::index::semantic_import(&home, "r", &repo, &scip, None).unwrap();
+        assert_eq!(out.documents, 2);
+        // No rebuild happened: the import transaction itself stored CALLS.
+        let edges = calls_edges(&home);
+        assert_eq!(edges.len(), 1, "CALLS visible without reindex");
+        assert_eq!(edges[0].edge_kind, "CALLS");
+        assert_eq!(edges[0].precision, "Exact");
+    }
+
+    #[test]
+    fn edges_lifecycle_import_failure_rolls_back_edges() {
+        let (home, repo) = lifecycle_repo("rollback");
+        crate::index::build_full(&home, "r", &repo).unwrap();
+        let bad = repo.join("bad.scip");
+        std::fs::write(&bad, b"not a scip payload").unwrap();
+        assert!(crate::index::semantic_import(&home, "r", &repo, &bad, None).is_err());
+        let db = store::db_path(&home, "r");
+        let conn = store::open_live(&db).unwrap();
+        let snap = store::latest_snapshot(&conn).unwrap().unwrap().id;
+        assert!(store::semantic_imports_for(&conn, snap).unwrap().is_empty());
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM code_edges WHERE provider = 'scip-import'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 0, "failed import leaves no semantic edges behind");
+    }
+
+    #[test]
+    fn edges_lifecycle_rebuild_rederives_after_target_change() {
+        let (home, repo) = lifecycle_repo("targetchange");
+        crate::index::build_full(&home, "r", &repo).unwrap();
+        let scip = lifecycle_scip(&repo);
+        crate::index::semantic_import(&home, "r", &repo, &scip, None).unwrap();
+        assert_eq!(calls_edges(&home).len(), 1);
+        // Change ONLY the target file; the caller file is untouched.
+        std::fs::write(repo.join("lib.py"), b"def target():\n    return 2\n").unwrap();
+        let second = crate::index::build(&home, "r", &repo, false).unwrap();
+        assert_eq!(second.mode, "incremental");
+        // The semantic import must be re-applied to the new snapshot before
+        // edges exist there (fresh import binds the new revision).
+        let scip2 = lifecycle_scip(&repo);
+        crate::index::semantic_import(&home, "r", &repo, &scip2, None).unwrap();
+        let edges = calls_edges(&home);
+        assert_eq!(edges.len(), 1, "edge re-derived under the new snapshot");
+        assert_eq!(edges[0].snapshot_id, live_snapshot_id(&home));
+    }
+
+    #[test]
+    fn edges_lifecycle_incremental_noop_keeps_edges() {
+        let (home, repo) = lifecycle_repo("noop");
+        crate::index::build_full(&home, "r", &repo).unwrap();
+        let scip = lifecycle_scip(&repo);
+        crate::index::semantic_import(&home, "r", &repo, &scip, None).unwrap();
+        let second = crate::index::build(&home, "r", &repo, false).unwrap();
+        assert_eq!(second.mode, "incremental");
+        // Stale semantic facts do not carry (source unchanged → they do),
+        // and the re-derivation restores the same CALLS edge.
+        let edges = calls_edges(&home);
+        assert_eq!(edges.len(), 1, "noop rebuild keeps the proven edge");
+    }
+
+    #[test]
+    fn edges_lifecycle_promote_race_aborts_with_edges_intact() {
+        // Store-level writer race: staging based on an old generation must
+        // abort with the committed live edges intact.
+        let dir = tmpdir("edges-race");
+        let live_path = dir.join("live.db");
+        let live = store::open_live(&live_path).unwrap();
+        let s1 = mk_snap_on(&live);
+        let imp = mk_import(&live, s1, "scip-import");
+        store::insert_edge(
+            &live,
+            &EdgeRow {
+                snapshot_id: s1,
+                file_id: 1,
+                caller: None,
+                caller_path: "m.py".to_string(),
+                caller_span_bytes: (0, 9),
+                callee: Some(EdgeEndpoint::Scip {
+                    import_id: imp,
+                    symbol_uri: "u".to_string(),
+                    doc: None,
+                }),
+                callee_name: "u".to_string(),
+                edge_kind: "REFERENCES".to_string(),
+                precision: "Exact".to_string(),
+                provider: "scip-import".to_string(),
+                evidence: "{}".to_string(),
+                unresolved: None,
+            },
+        )
+        .unwrap();
+        let base = store::live_base(&live).unwrap();
+        let staging_path = dir.join("s.db");
+        {
+            let staging = store::open_live(&staging_path).unwrap();
+            store::insert_snapshot(
+                &staging,
+                &store::Snapshot {
+                    id: 0,
+                    repo: "r".to_string(),
+                    root: "C:\\r".to_string(),
+                    created_unix: 2,
+                    head: None,
+                    branch: None,
+                    dirty: false,
+                    untracked: 0,
+                    parser_version: store::PARSER_VERSION,
+                    grammar_versions: store::grammar_versions(),
+                    config_fingerprint: "c".to_string(),
+                    pre_fingerprint: "p".to_string(),
+                    post_fingerprint: "p".to_string(),
+                    status_at_write: "fresh".to_string(),
+                    nonce: store::new_nonce(),
+                },
+            )
+            .unwrap();
+        }
+        store::meta_set(&live, "semantic_generation", "1").unwrap();
+        let err = store::promote_staging(&live, &staging_path, &base).unwrap_err();
+        assert!(err.contains("semantic-changed"), "unexpected: {err}");
+        let key = EdgeEndpoint::Scip {
+            import_id: imp,
+            symbol_uri: "u".to_string(),
+            doc: None,
+        };
+        let kept = store::edges_inbound(&live, s1, &key, 50, 0).unwrap();
+        assert_eq!(kept.len(), 1, "live edges survive the aborted race");
+    }
+
+    fn mk_snap_on(conn: &rusqlite::Connection) -> i64 {
+        mk_snap(conn)
+    }
+}

@@ -384,6 +384,12 @@ fn parse_project_root(s: &str) -> Result<PathBuf, String> {
 
 /// Split a symbol URI on single spaces; double spaces are escaped literals.
 /// Returns `None` for document-scoped `local` symbols and malformed URIs.
+/// A `local ...` symbol is document-scoped: definition and reference must
+/// share the document path to link. Anything else is a global URI.
+pub fn is_local_symbol(symbol: &str) -> bool {
+    symbol == "local" || symbol.starts_with("local ")
+}
+
 fn split_symbol(symbol: &str) -> Option<Vec<String>> {
     if symbol == "local" || symbol.starts_with("local ") {
         return None;
@@ -952,6 +958,10 @@ pub fn import_file(
     .map_err(|e| e.to_string())?;
     let generation = store::semantic_generation(conn)?;
     store::meta_set(conn, "semantic_generation", &(generation + 1).to_string())?;
+    // Graph lifecycle: semantic-backed edges for this import only, in the
+    // same transaction — failure rolls back with the import, never partial.
+    // No syntax reparsing; syntax-only potentials stay until resolved here.
+    crate::edges::upsert_semantic_edges(conn, snapshot_id, import_id)?;
     if state.extra_skips > 0 {
         state.skipped.push(format!("…({} more)", state.extra_skips));
     }

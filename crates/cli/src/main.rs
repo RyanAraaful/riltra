@@ -9,6 +9,7 @@
 
 mod args;
 mod doctor;
+mod edges;
 mod git;
 mod ignore;
 mod index;

@@ -364,6 +364,9 @@ fn build_full_inner(
     if carried {
         carry_semantic(&tx, snapshot_id, &meta, &nonce)?;
     }
+    // Graph lifecycle: re-derive from this snapshot's own facts after the
+    // semantic carry-over rebound every import. Edges are never copied.
+    crate::edges::rederive_after_carry(&tx, snapshot_id)?;
     finish_snapshot_tx(tx, snapshot_id, &mut summary, &meta)?;
     if carried {
         store::detach_src(&conn)?;
@@ -720,6 +723,8 @@ fn build_incremental(
     // Detach after commit: detaching inside the write transaction reports
     // the source locked, and the connection is dropped right below anyway.
     carry_semantic(&tx, snapshot_id, &meta, &nonce)?;
+    // Same graph rule as the full path: re-derive, never copy edges.
+    crate::edges::rederive_after_carry(&tx, snapshot_id)?;
     finish_snapshot_tx(tx, snapshot_id, &mut summary, &meta)?;
     store::detach_src(&conn)?;
     drop(conn);

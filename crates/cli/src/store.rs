@@ -355,8 +355,6 @@ pub struct CallRow {
 }
 
 /// One 1-based span + byte range, shared by call callee columns.
-// Task 3 wires the derivation; allow until then (staged plan, not dead design).
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct SpanCols {
     pub start_line: u32,
@@ -370,8 +368,6 @@ pub struct SpanCols {
 /// One graph endpoint. There is deliberately NO `Unknown` variant: unknown
 /// caller/target endpoints are stored as `None` with callsite/import
 /// location evidence, never a fabricated key, and BFS never expands them.
-// Task 3 wires the derivation; allow until then (staged plan, not dead design).
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum EdgeEndpoint {
     /// SCIP identity: producing import + symbol URI (+ document for locals).
@@ -390,8 +386,6 @@ pub enum EdgeEndpoint {
 
 /// One stored graph edge. `caller`/`callee` are `None` exactly when that
 /// endpoint is unresolved; `evidence` always carries the source location.
-// Task 3 wires the derivation; allow until then (staged plan, not dead design).
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct EdgeRow {
     pub snapshot_id: i64,
@@ -532,6 +526,82 @@ fn semantic_fact_from_row(snapshot_id: i64, row: &rusqlite::Row) -> rusqlite::Re
         relationships: row.get(14)?,
         external: row.get::<_, i64>(15)? != 0,
     })
+}
+
+/// All symbols of one snapshot, ordered by file then start byte.
+/// Derivation input for M6 graph edges.
+pub fn symbols_for(conn: &Connection, snapshot_id: i64) -> Result<Vec<SymbolRow>, String> {
+    let mut statement = conn
+        .prepare("SELECT file_id, kind, name, start_line, start_col, end_line, end_col, byte_start, byte_end, provider, grammar, language FROM symbols WHERE snapshot_id = ?1 ORDER BY file_id, byte_start")
+        .map_err(|e| e.to_string())?;
+    let mapped = statement
+        .query_map([snapshot_id], |row| {
+            Ok(SymbolRow {
+                file_id: row.get(0)?,
+                kind: row.get(1)?,
+                name: row.get(2)?,
+                start_line: row.get::<_, i64>(3)? as u32,
+                start_col: row.get::<_, i64>(4)? as u32,
+                end_line: row.get::<_, i64>(5)? as u32,
+                end_col: row.get::<_, i64>(6)? as u32,
+                byte_start: row.get::<_, i64>(7)? as usize,
+                byte_end: row.get::<_, i64>(8)? as usize,
+                provider: row.get(9)?,
+                grammar: row.get(10)?,
+                language: row.get(11)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    mapped
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())
+}
+
+/// All imports of one snapshot, ordered by file then start byte.
+pub fn imports_for(conn: &Connection, snapshot_id: i64) -> Result<Vec<ImportRow>, String> {
+    let mut statement = conn
+        .prepare("SELECT file_id, text, start_line, start_col, end_line, end_col, byte_start, byte_end, provider, grammar, language FROM imports WHERE snapshot_id = ?1 ORDER BY file_id, byte_start")
+        .map_err(|e| e.to_string())?;
+    let mapped = statement
+        .query_map([snapshot_id], |row| {
+            Ok(ImportRow {
+                file_id: row.get(0)?,
+                text: row.get(1)?,
+                start_line: row.get::<_, i64>(2)? as u32,
+                start_col: row.get::<_, i64>(3)? as u32,
+                end_line: row.get::<_, i64>(4)? as u32,
+                end_col: row.get::<_, i64>(5)? as u32,
+                byte_start: row.get::<_, i64>(6)? as usize,
+                byte_end: row.get::<_, i64>(7)? as usize,
+                provider: row.get(8)?,
+                grammar: row.get(9)?,
+                language: row.get(10)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    mapped
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())
+}
+
+/// All semantic facts of one import in one snapshot, ordered by path/line.
+/// Derivation input for M6 semantic-backed edges.
+pub fn semantic_facts_of_import(
+    conn: &Connection,
+    snapshot_id: i64,
+    import_id: i64,
+) -> Result<Vec<SemanticFact>, String> {
+    let mut statement = conn
+        .prepare("SELECT import_id, file_id, rel_path, file_digest, symbol_uri, display_name, roles, start_line, start_col, end_line, end_col, byte_start, byte_end, precision, relationships, external FROM semantic_facts WHERE snapshot_id = ?1 AND import_id = ?2 ORDER BY rel_path, start_line")
+        .map_err(|e| e.to_string())?;
+    let mapped = statement
+        .query_map(params![snapshot_id, import_id], |row| {
+            semantic_fact_from_row(snapshot_id, row)
+        })
+        .map_err(|e| e.to_string())?;
+    mapped
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())
 }
 
 /// All stored facts for one symbol in one snapshot, ordered by path/line.
@@ -1277,8 +1347,6 @@ fn read_span(row: &rusqlite::Row, base: usize) -> Result<Option<SpanCols>, rusql
 }
 
 /// All calls of one snapshot, including callee spans (`None` for legacy).
-// Task 3 wires the derivation; allow until then (staged plan, not dead design).
-#[allow(dead_code)]
 pub fn calls_for(conn: &Connection, snapshot_id: i64) -> Result<Vec<CallRow>, String> {
     let mut statement = conn
         .prepare("SELECT file_id, name, start_line, start_col, end_line, end_col, byte_start, byte_end, callee_start_line, callee_start_col, callee_end_line, callee_end_col, callee_byte_start, callee_byte_end, tcallee_start_line, tcallee_start_col, tcallee_end_line, tcallee_end_col, tcallee_byte_start, tcallee_byte_end, unresolved, provider, grammar, language FROM calls WHERE snapshot_id = ?1 ORDER BY id")
@@ -1358,6 +1426,8 @@ fn endpoint_parts(endpoint: &Option<EdgeEndpoint>) -> EndpointParts<'_> {
     }
 }
 
+// Task 4 queries are the production caller; allow until then.
+#[allow(dead_code)]
 fn read_endpoint(
     kind: &str,
     import_id: Option<i64>,
@@ -1383,8 +1453,6 @@ fn read_endpoint(
 }
 
 /// Store one graph edge. Unknown endpoints stay `None` — never fabricated.
-// Task 3 wires the derivation; allow until then (staged plan, not dead design).
-#[allow(dead_code)]
 pub fn insert_edge(conn: &Connection, edge: &EdgeRow) -> Result<i64, String> {
     let from = endpoint_parts(&edge.caller);
     let to = endpoint_parts(&edge.callee);
@@ -1422,6 +1490,8 @@ pub fn insert_edge(conn: &Connection, edge: &EdgeRow) -> Result<i64, String> {
     Ok(conn.last_insert_rowid())
 }
 
+// Task 4 queries are the production caller; allow until then.
+#[allow(dead_code)]
 fn read_edge(row: &rusqlite::Row) -> Result<EdgeRow, rusqlite::Error> {
     let caller_kind: String = row.get(3)?;
     let callee_kind: String = row.get(13)?;
@@ -1460,10 +1530,12 @@ fn read_edge(row: &rusqlite::Row) -> Result<EdgeRow, rusqlite::Error> {
     })
 }
 
+// Task 4 queries are the production caller; allow until then.
+#[allow(dead_code)]
 const EDGE_COLS: &str = "id, snapshot_id, file_id, caller_kind, caller_import_id, caller_uri, caller_doc, caller_path, caller_bs, caller_be, caller_file, caller_sbs, caller_sbe, callee_kind, callee_import_id, callee_uri, callee_doc, callee_path, callee_bs, callee_be, callee_name, edge_kind, precision, provider, evidence, unresolved";
 
 /// Outbound edges of one endpoint (callees direction), deterministic order.
-// Task 3 wires the derivation; allow until then (staged plan, not dead design).
+// Task 4 queries are the production caller; allow until then.
 #[allow(dead_code)]
 pub fn edges_outbound(
     conn: &Connection,
@@ -1476,7 +1548,7 @@ pub fn edges_outbound(
 }
 
 /// Inbound edges of one endpoint (callers direction), deterministic order.
-// Task 3 wires the derivation; allow until then (staged plan, not dead design).
+// Task 4 queries are the production caller; allow until then.
 #[allow(dead_code)]
 pub fn edges_inbound(
     conn: &Connection,
@@ -1488,6 +1560,8 @@ pub fn edges_inbound(
     query_edges(conn, snapshot_id, "callee", to, limit, offset)
 }
 
+// Task 4 queries are the production caller; allow until then.
+#[allow(dead_code)]
 fn query_edges(
     conn: &Connection,
     snapshot_id: i64,
