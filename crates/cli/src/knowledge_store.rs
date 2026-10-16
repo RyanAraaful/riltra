@@ -220,7 +220,11 @@ fn ensure_knowledge_dir(chome: &Path, create: bool) -> Result<PathBuf, String> {
             "knowledge path is not a directory: '{}'",
             kdir.display()
         )),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+        Err(_) => {
+            // Missing and unusable paths (e.g. ENOTDIR under a file on Unix)
+            // share one outcome: without `create` the store is absent; with
+            // `create` the attempt fails here with a uniform message on every
+            // platform instead of leaking OS-specific error kinds.
             if !create {
                 return Err("no knowledge store: knowledge directory is absent".to_string());
             }
@@ -244,10 +248,6 @@ fn ensure_knowledge_dir(chome: &Path, create: bool) -> Result<PathBuf, String> {
             }
             Ok(c)
         }
-        Err(e) => Err(format!(
-            "cannot inspect knowledge directory '{}': {e}",
-            kdir.display()
-        )),
     }
 }
 
@@ -1386,6 +1386,13 @@ mod tests {
         bytes.extend_from_slice(&[0x66u8, 0x6f, 0x80, 0x6f]);
         let home = PathBuf::from(std::ffi::OsString::from_vec(bytes));
         let _ = std::fs::remove_dir_all(&home);
+        // Some filesystems (e.g. APFS) cannot represent non-UTF-8 names at
+        // all: probe creation first and report NOT TESTED instead of failing
+        // an environment limitation as a code defect.
+        if std::fs::create_dir_all(&home).is_err() {
+            eprintln!("NOT TESTED: filesystem rejects non-UTF-8 names");
+            return;
+        }
         let root = tmpdir("m7-root");
         let repo = RepoEntry {
             name: "nonutf".to_string(),
