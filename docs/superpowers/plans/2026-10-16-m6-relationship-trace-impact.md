@@ -187,11 +187,18 @@ Cases (each as a minimal fixture, direct + golden JSON): direct calls, ref-witho
 - Create: `docs/m6-validation.md`
 - Test: manual pilot (NOT committed fixtures of external repos)
 
-Pilot: one TS fixture repo via scip-typescript 0.4.0 (import + `callers` spot-check: SCIP-backed CALLS present, LSP never claimed as resolved calls); one Rust fixture crate via `RILTRA_TEST_LSP` rust-analyzer (refs stay REFERENCES/POTENTIAL_CALL, never CALLS). Record `elapsed_ms, visits, rss_kb, output_bytes` warm.
+Pilot: one isolated TS fixture repo via installed scip-typescript 0.4.0
+(actual producer artifact, no-reindex import, strict CALLS and negative cases);
+one dependency-free Rust fixture via explicit `--lsp-server` rust-analyzer.
+LSP yields ephemeral location-only evidence and no persisted graph edges or
+SCIP identity. `RILTRA_TEST_LSP` gates a historical mock test, not the actual
+external-provider pilot. Record elapsed time, visits, best-effort working set,
+output bytes and repeated proof parsing separately from ingestion reparses.
+The expanded user-approved Task 8 contract governs this final local checkpoint.
 
-- [ ] **Step 1: Run pilot commands, paste evidence into `docs/m6-validation.md`** (gates, Tier A counts, Tier B observations, limitations incl. Windows symlink note carry-over).
-- [ ] **Step 2: Run gates** — Run: `cargo fmt --all -- --check && cargo check --locked && cargo clippy --all-targets -- -D warnings && cargo test --locked` Expected: all green.
-- [ ] **Step 3: Commit** — `git add docs/m6-validation.md && git commit -m "m6: validation with Tier A/B evidence and perf ledger"`
+- [x] **Step 1: Run pilot commands, paste evidence into `docs/m6-validation.md`** — both real providers passed source-truth assertions; Windows native and isolated instrumented measurements, 79 cases/494 goldens, limitations and reproducible opt-in scripts recorded. No production code, dependency, schema or golden changes.
+- [x] **Step 2: Run gates** — fmt/check/warning-denying Clippy/test/build all exit 0 locally; 402 tests (zero failed/ignored). Final M6 Windows/Ubuntu/macOS CI remains NOT TESTED, not implied by this local result.
+- [x] **Step 3: Commit** — local DCO checkpoint carrying the final validation report, preserved historical Task 4 report, opt-in pilot/profile scripts and portable evidence. Independent read-only review has no critical/important findings; final provider assertion replay exits 0. Keep local and STOP for Task 8 audit. M6 remains open pending separately authorized three-OS CI; no push or M7/M8 work.
 
 ## Acceptance Gates
 

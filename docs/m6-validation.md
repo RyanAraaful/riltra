@@ -1,182 +1,287 @@
-# M6 Task 4 validation — callers / callees
+# M6 validation — real providers and final local checkpoint
 
-Task 4 checkpoint, based on `8ce51f2` (Tasks 1–3). This continues the
-unfinished CLI working-tree changes; it does not implement Tasks 5–8.
-The local checkpoint commit carrying this document is the audit unit.
+Task 8 on branch `m6-task7-multilanguage-corpus`, based on accepted correction
+`6e54d5e5579a6810b386063d0ee77925f94873ee`. The local DCO commit carrying this
+report is the audit unit. Production Rust, schema v4, dependencies and existing
+goldens are unchanged. Scope is the two real pilots, measurements and regression.
 
-## CLI and wire contract
+**M6 is not CLOSED.** Final Windows/Ubuntu/macOS CI is NOT TESTED. No push,
+M7/M8 work, installation, binary download or package installation script was performed.
 
-```text
-riltra callers --repo R --path P --line L --col C [--symbol URI] [--limit N] [--offset N]
-riltra callees --repo R --path P --line L --col C [--symbol URI] [--limit N] [--offset N]
+## Acceptance ledger
+
+| Gate | Status | Evidence |
+| --- | --- | --- |
+| Task 1: full/terminal callee spans | PASS | Existing span/raw-byte regressions |
+| Task 2: v4 migration/storage | PASS | v1/v2/v3 migration, fresh DB, NULL spans and promotion tests |
+| Task 3: strict edges/lifecycle | PASS | Terminal overlap, target/owner proof, digest and competing-target regressions |
+| Task 4: callers/callees | PASS | [Task 4 assertion map](m6-task4-validation.md), transaction/order/pagination tests |
+| Task 5: bounded deterministic trace | PASS | [Task 5](m6-task5-validation.md), destination/cycles/mappings/bounds/concurrency |
+| Task 6: conservative impact | PASS | [Task 6](m6-task6-validation.md), UNKNOWN-first, zero SAFE/LOW |
+| Task 7: multilingual corpus | PASS | [Task 7](m6-task7-validation.md): 79 cases / 494 full responses, unchanged and rerun |
+| Task 7: persisted proof compatibility | PASS | [Correction](m6-task7-correction-validation.md), upgrade and rollback regressions rerun |
+| Task 8: real scip-typescript CALLS + negatives | PASS | Actual artifact, no syntax reindex, source assertions |
+| Task 8: real rust-analyzer locations | PASS | Correct definition/references, zero persisted semantic identities/CALLS |
+| Resource/repeated-parsing ledger | PASS | Actual small-fixture measurements; unmeasured fields explicit |
+| Local Windows fmt/check/Clippy/test/build | PASS | All exit 0, 402 tests, zero failed/ignored |
+| Independent read-only review | PASS | No critical/important findings; minor harness restoration finding fixed and reviewed |
+| Final CI Windows/Ubuntu/macOS | NOT TESTED | Separate push permission required; earlier milestone CI does not certify M6 |
+
+## Environment, licenses and exact reproduction
+
+Measured 2026-10-16, Windows x64 10.0.26100, Intel Core i5-8250U @ 1.60 GHz,
+8 logical CPUs, 21,353,435,136 bytes visible RAM. Hardware via Node `os`; CIM
+was unavailable in the sandbox. Debug build, stable MSVC rustc 1.99.0
+(`b940084d7`), cargo 1.99.0 (`5f94df478`). No release-build, large-repository
+or competitive performance claim is made.
+
+| Existing component | Version | License/provenance |
+| --- | --- | --- |
+| Node.js / npm | 22.23.3 / 10.9.9 | Existing runtime; MIT plus bundled notices |
+| `@sourcegraph/scip-typescript` | 0.4.0 | Apache-2.0; installed package.json and LICENSE inspected |
+| Its TypeScript runtime | 5.9.3 | Apache-2.0; installed dependency package.json inspected |
+| rust-analyzer | 1.99.0 (`b940084d`, 2026-09-28) | Existing rustup component; upstream [Apache](https://github.com/rust-lang/rust-analyzer/blob/master/LICENSE-APACHE) / [MIT](https://github.com/rust-lang/rust-analyzer/blob/master/LICENSE-MIT) licenses |
+
+Run sequentially from the repository root with existing PowerShell 7 and
+Node 22. The runner uses experimental built-in Node SQLite, not an npm dependency:
+
+```powershell
+cargo build --locked -p riltra
+node --version
+npm --version
+scip-typescript --version
+rust-analyzer --version
+node docs/pilots/m6-real-providers.cjs `
+  C:/Users/ryan/AppData/Roaming/npm/node_modules/@sourcegraph/scip-typescript/dist/src/main.js `
+  C:/Users/ryan/.rustup/toolchains/stable-x86_64-pc-windows-msvc/bin/rust-analyzer.exe
+# Use the directory printed by the preceding command:
+node docs/pilots/m6-profile.cjs target/m6-pilot-An19ih
 ```
 
-Positions are 1-based lines and UTF-8 byte columns in decoded text. Evidence
-spans are half-open offsets into the original raw source, including UTF-16
-BOMs where applicable. SCIP producer UTF8/UTF16/UTF32 occurrence columns
-are normalized through their stored byte offsets, not compared directly
-with CLI columns. M5 storage and query conventions remain unchanged.
+Supply existing absolute provider paths on another machine. The runner creates
+unique fixture roots and RILTRA_HOME under gitignored `target/`, asserts results,
+and records argv, exit codes, raw JSON, SQLite rows and metrics. Successful
+measured run: `target/m6-pilot-An19ih/`. Selected portable raw results:
+[m6-windows-evidence.json](pilots/m6-windows-evidence.json). Nonces/artifact IDs
+change across runs. The actual external indexer command is:
 
-`schema_version: 1` includes repository, snapshot ID/nonce/revision,
-direction, anchor identity/location/precision/uncertainty, freshness,
-verification, completeness, edges/evidence, limits, continuation, and
-truncation. Existing manual JSON serialization is retained; no dependency
-or schema migration was added. Runtime timings are deliberately excluded
-by user decision so repeated queries on the same state are byte-identical.
+```powershell
+node <installed-scip-main.js> index --cwd <isolated-ts-code> --output index.scip --no-progress-bar
+```
 
-Semantic anchors use the narrowest containing occurrence with valid SCIP
-provenance. Tied distinct identities/imports produce an explicit data
-error. `--symbol` checks the positional identity; it cannot merge imports.
-Syntax fallback is explicitly `syntax-fallback` / `Heuristic` with
-`anchor_uncertainty`, and requires a digest-matching source file. For stale
-semantic anchors, uniquely recorded syntax line bases can locate old
-single-line occurrences; missing coordinate proof fails rather than guesses.
+Final assertion replay also exited 0 in `target/m6-pilot-GqNqPb/`, including
+the exact four expected CALLS, same-import target definitions and cross-file
+terminal span checks added during review. It does not replace the measured
+An19ih run. Native binary SHA-256 for these runs:
+`5759bfeb624e246ce351ce99dfb7052114e51e28af713de48f0deaf88758e15b`.
 
-One SQLite read transaction covers the snapshot, anchor, edge selection,
-counts, evidence, and query-local `import_verdict()` memo. The `freshness`
-object reports M4 syntax-snapshot freshness; semantic import drift is also
-reported through verification and `stale_imports`. `Exact` never elevates
-`Unverified` to `Current`; source/import drift downgrades to `Stale` even
-for empty pages.
+Only plain single-project mode is used: no yarn/pnpm discovery or package scripts.
+LSP runs solely via explicit `--lsp-server <absolute-executable>`. The harness sets
+`CARGO_NET_OFFLINE=true`. Rust fixture has its own `[workspace]`, no dependency,
+build script, proc macro or executable. No user source program is executed.
+No upload command, hosted indexer or telemetry endpoint is configured. Network
+traffic was not packet-captured. Terapetra Knowledge/GitNexus source was not used.
 
-## Relationships, provenance, and coverage
+## TypeScript: source truth and real producer output
 
-Exact endpoint matching preserves repository, snapshot, import, and local
-document scope. Syntax-owner aliases for semantic `callees` reuse the
-same digest-bound, unambiguous owner mapping as graph derivation. They
-retrieve unresolved outbound calls without changing their identities or
-promoting them to `CALLS`.
+The runner contains the complete fixture: three TS files, 567 source bytes before
+the edit. `lib.ts`: leaf, middle → leaf, non-call `return leaf`, parameter-shadowed
+leaf(). `main.ts`: imported entry → middle, alias call, nested local function.
+`other.ts`: unrelated same-name leaf and another local function. Source is not executed.
 
-Inbound syntax candidates are restricted to the same file or conservative
-direct imports. Recognized bindings cover Python imports, literal relative
-JS/TS imports and C/C++ includes, and Rust `use crate::...`; this is not a
-general module resolver. Imported names are not mistaken for module names.
-Candidates remain `POTENTIAL_CALL`, with null unresolved targets. Semantic
-candidates from a different import are excluded. Unknown owners remain null.
+Syntax indexing precedes the unmodified real producer artifact. Semantic import
+is the next writer, with no syntax reindex: snapshots and files tables remain
+identical; nonce is unchanged; semantic generation becomes 1. First import:
+27 facts, 12 edges = 4 CALLS + 2 POTENTIAL_CALL + 5 REFERENCES + 1 IMPORTS.
+Two CALLS target document-scoped locals, with callee_doc equal to source document.
+The real producer assigned distinct local URIs; duplicate-local-URI collision
+isolation is additionally covered by deterministic tests, not claimed from this pilot.
 
-Evidence includes source path, raw byte span, callee/terminal/reference
-sub-spans where available, source digest, provider, and proven producer
-import identity/artifact/revision/content binding. Unknown-endpoint semantic
-edges retain their producer import in evidence; query-time overlap guessing
-is forbidden. Legacy v4 unresolved edges without that metadata keep unknown
-provenance rather than borrowing another import. Rebuild/reimport regenerates
-their evidence; no migration or cross-request cache is needed.
+Source checks: `lib.ts` bytes [87,91) are `leaf`, inside call [87,93) and named
+owner middle. Terminal/reference spans agree. `main.ts` [79,85) is `middle`,
+with target definition in lib.ts in the same import. `callers` finds both direct
+relations; syntax-fallback `callees` and `trace` expose outbound CALLS. Example
+excerpt (full schemas/provenance are in the evidence JSON):
 
-The page limit defaults to 50 and permits 1–1000. Shared SQL predicates
-drive count and page selection, with a total order over caller path/start,
-full callee key, remaining endpoint/span/relation/provider fields, and row ID.
-Filters precede pagination; offsets beyond 1000 work. `next_offset` exists
-only when more rows remain. Continue only within the same snapshot nonce;
-restart pagination after promotion.
+```json
+{"kind":"CALLS","precision":"Exact","callee_name":"leaf","verification":"Unverified","evidence":{"path":"lib.ts","span":[87,93],"callee_span":[87,91],"terminal_span":[87,91],"reference_span":[87,91],"digest":"fe5e52b5052a37fb","provider":"scip-import"}}
+```
 
-`covered` counts returned rows; `total` counts all matching stored rows.
-`denominator.observed_edges` is query-scoped; unknown relationship/provider
-and file counters conservatively cover the repository. Diagnostic counters
-can overlap and are not a coverage percentage. Unsupported, missing-provider,
-dynamic, ambiguous, unknown-owner/target, stale-import, skipped, and parse-error
-counts prevent `complete`. Empty results, uncertain anchors, omitted earlier
-pages, and further pages also prevent `complete`. Even `complete` describes
-only an observed static result set, never execution safety or `Current`.
+Evidence includes import_id 1, scip-typescript 0.4.0, artifact digest, source
+revision/nonce and content identity. The bundle additionally records SHA-256 of
+the original artifact. Existing Riltra digest formats remain unchanged. Every
+Exact CALLS remains Unverified; source edit changes query verification to Stale.
+Neither exact precision nor successful traversal establishes Current.
 
-## Regression evidence
+Negatives: non-call [138,142) remains REFERENCES; parameter and alias calls are
+POTENTIAL_CALL with null targets; unrelated other.ts leaf has no incoming edges.
+Impact remains UNKNOWN/partial. Five warm repetitions are structurally identical;
+adjacent one-item pages match slices of the complete same-state result.
 
-Inherited tests were already green: no historical RED is claimed for them.
-The following failures were observed before their respective fixes:
+Producer boundary: scip-typescript 0.4.0 emits empty definition display names here.
+Accepted proof cannot bridge these semantic owner identities to SyntaxDef.
+Name-position semantic callees/trace can therefore be empty/partial despite a
+syntax-owner CALLS. Column 8 on `function` explicitly resolves syntax-fallback,
+Heuristic, anchor_uncertainty and no symbol_uri. Trace returns a plausible one-hop
+entry → middle and never invents a bridge to continue to leaf. No proof rule was relaxed.
 
-| Regression | Observed RED | GREEN evidence |
-|---|---|---|
-| Initial CLI gaps | Six failures: missing JSON contract, false `complete`, changed-source fallback accepted, zero position accepted, total capped at 1000, imported name treated as module | `task4_json_contract_and_source_evidence`, `task4_unresolved_and_empty_are_not_complete`, `task4_syntax_fallback_rejects_changed_source`, `task4_rejects_zero_positions_and_limit`, `task4_pagination_beyond_one_thousand`, `task4_import_name_is_not_module_identity` |
-| Conflicting owner digest and path escaping | Matching row ID bridged old digest; malformed evidence JSON | `edges_bridge_matching_file_id_does_not_override_changed_digest`, `edges_evidence_escapes_source_paths` |
-| Unknown producer | Unknown-owner semantic edge lost producer import (0 instead of 1) | `task4_unicode_terminal_and_unknown_owner_have_no_fabrication` |
-| Import and page isolation | Other-import candidate returned; last page incorrectly `complete` | `task4_cross_import_identity_and_ambiguous_anchor`, `task4_last_page_is_not_full_coverage` |
-| Unobserved callees | Unknown call elsewhere ignored by completeness | `task4_unresolved_elsewhere_is_not_proof_of_complete_callers` |
-| Owner and source proof | Ambiguous owner selected first; stale reference/target yielded `CALLS` | `edges_bridge_ambiguous_semantic_owners_stays_syntax`, `edges_stale_reference_or_target_digest_never_proves_calls` |
-| Independent review findings | Semantic `callees` returned 0 unresolved edges instead of 1; UTF16-position identifier byte column 11 selected fallback | `task4_semantic_callees_keeps_unresolved_syntax_owner_edges`, `task4_semantic_anchor_uses_byte_columns_for_all_scip_encodings` |
-| Binary coverage | Skipped binary source still reported `complete` | `task4_binary_source_is_an_explicit_coverage_gap` |
-| Multiple dispatch candidates | One terminal with two symbol identities produced 2 `CALLS` | `edges_two_semantic_targets_at_one_terminal_are_potential_only`: 0 `CALLS`, 1 ambiguous candidate |
+## Rust: ephemeral LSP location evidence
 
-Additional coverage proves same-name/cross-repository isolation, local symbols
-in two documents, stale empty-page verification, UTF-16 raw evidence,
-half-open Unicode boundaries, full JSON goldens, deterministic repetition,
-empty/overshoot pages, rollback, and incremental/full lifecycle preservation.
-The live LSP mock test executes locally without an opt-in environment flag:
-the graph response is identical before/after the query and no provider is
-persisted.
+Dependency-free Rust library: 3 functions, 109 bytes:
 
-`task4_actual_query_pins_anchor_edges_and_evidence_across_promotion` pauses
-the actual query after its first snapshot read, joins a writer thread that
-adds a file and promotes an incremental index through another connection,
-then finishes the original query. It retains the original nonce, one edge,
-anchor, and source digest; the following query sees the new nonce and two
-edges. The old result is `Stale`. No sleeps or global hooks are involved.
+```rust
+pub fn leaf() -> i32 { 7 }
+pub fn caller() -> i32 { leaf() }
+pub fn reference_only() -> fn() -> i32 { leaf }
+```
 
-Small Task 3 repairs are limited to evidence escaping, source binding,
-ambiguous owner/terminal proof, and persisting the producer import for
-unresolved edges. Their regressions are listed above. No M0–M5 refactor,
-new dependency, database version change, trace, or impact implementation.
+```powershell
+riltra semantic query --repo rs --path src/lib.rs --line 2 --col 26 --lsp-server <absolute-rust-analyzer.exe>
+riltra semantic query --repo rs --path src/lib.rs --line 1 --col 8 --refs --lsp-server <absolute-rust-analyzer.exe>
+```
 
-## CLI smoke and JSON examples
+Both exit 0. Definition: raw [7,11), zero-based (0,7)-(0,11), exactly declaration
+`leaf`. References include [52,56) at call, [102,106) at non-call, and declaration
+because the adapter requests it. Every hit is sliced against source and must equal
+leaf. Provider lsp-subprocess, symbol_uri null, Heuristic, Unverified; no fake SCIP
+identity/import_id. All captured meta, snapshot, file, semantic-import/fact and
+edge rows remain identical across live queries and unavailable-provider query.
+Semantic imports/facts and persisted CALLS remain zero.
 
-An isolated two-file Python repository was registered and indexed using
-the built CLI. A minimal real protobuf SCIP artifact was imported using
-`semantic import`, without reindexing. All successful commands exited 0;
-zero line exited 2 with empty stdout, and out-of-range anchor exited 3.
-After changing `lib.py`, the same semantic query returned `Stale`.
+Missing absolute executable returns exit 0 with explicit fallback and no invented
+locations; core syntax callees still works. Timeout, crash, malformed protocol,
+flooding and bounded cleanup run through existing deterministic mocks. Failure
+injection against the real provider was not separately performed. Real successful
+queries still report the existing 15-second analysis-wait diagnostic; returned
+locations do not certify analysis completeness. Nothing enters the persistent graph.
 
-| Query | Anchor | Relation / verification | Wall time | Output bytes |
-|---|---|---|---:|---:|
-| callers, syntax | syntax-fallback | POTENTIAL_CALL / Unverified | 17.39 ms | 1681 |
-| callees, syntax | syntax-fallback | POTENTIAL_CALL / Unverified | 16.41 ms | 1685 |
-| callers, SCIP | semantic | CALLS / Exact / Unverified | 16.01 ms | 2017 |
-| callees, SCIP | semantic | CALLS / Exact / Unverified | 15.16 ms | 2021 |
-| callers after edit | semantic | CALLS / Exact / Stale | 16.73 ms | 2059 |
+Initial fixture setup lacked its own [workspace] and used column 25 instead of 26.
+Empty answers were rejected; fixture setup was corrected. These were harness
+corrections, not production bugs. No Task 8 production RED→GREEN fix is claimed.
 
-These are single local process measurements, not benchmarks or speed claims.
-Snapshot nonce remained identical across syntax indexing and semantic import.
-Repeated callers output was identical. The SCIP artifact inside the demo
-repository is an unsupported file, so coverage remains honestly `partial`.
+## Freshness, proof compatibility and atomicity
 
-Full examples, asserted as parsed JSON goldens (only nonce and producer
-artifact identity normalized):
+A real artifact truncated near its end fails import with exit 3 and leaves captured
+database rows, graph marker and generation unchanged: no partial graph survives.
+First proof token is `m6-task7-source-proof-1:<same-nonce>:1`. No-op index ingestion
+reparsed=0; a single-file edit reparsed=1. Successful import/reimport does not mint
+snapshot rows. Reimport advances generation to 2; duplicate import anchors fail
+explicitly as ambiguous instead of merging identities.
 
-- [SCIP callers](../crates/cli/tests/golden/m6-callers-scip.json)
-- [SCIP callees](../crates/cli/tests/golden/m6-callees-scip.json)
-- [Syntax callers](../crates/cli/tests/golden/m6-callers-syntax.json)
-- [Syntax callees](../crates/cli/tests/golden/m6-callees-syntax.json)
+Deleting the isolated marker blocks queries with graph-proof-incompatible.
+Successful import revalidates syntax and all 3 imports, generation=3, without changing
+source snapshot/files. Old-writer generation mismatch, all-four-query upgrade
+rejection/recovery, late rollback, retained-connection rollback and concurrent
+promotion are also rerun in correction tests. Those upgrade tests remain distinct
+from the real-provider compatibility pilot.
 
-Reproduce the smoke path through `cargo test --locked --test edges`; the
-tests write the protobuf artifacts and execute the actual CLI. For manual
-inspection, set `RILTRA_HOME` to a disposable directory, register the fixture,
-then run `index`, `callers`, `callees`, `semantic import`, and repeat queries.
+## Resource and repeated parsing
 
-## Validation gates and limits
+[m6-measure.ps1](pilots/m6-measure.ps1) records direct-process launch-to-exit wall
+time, including managed launch/wait overhead, UTF-8 stdout bytes, and best-effort
+sampled PeakWorkingSet64. Short-lived process peaks can be missed: null means
+not measured. Windows peak working set is an RSS analogue, not heap or aggregate
+child-tree memory. rust-analyzer child RSS is not measured. Index/import rows are
+single observations. Warm queries are 5 fresh processes with OS/SQLite caches warm,
+not a persistent server/cache. External indexer time is separate from native import.
 
-Final local gates (Windows, all exit 0):
+| Operation | elapsed_ms | Peak working set bytes | Output bytes | Visits nodes/edges |
+| --- | ---: | ---: | ---: | --- |
+| Full syntax index | 827.769 | 8,208,384 | 497 | not measured |
+| No-op incremental | 421.524 | 8,568,832 | 496 | not measured |
+| Single-file refresh | 467.307 | 8,577,024 | 497 | not measured |
+| First SCIP import | 211.367 | 8,163,328 | 207 | not measured |
+| Semantic reimport | 134.070 | 8,171,520 | 207 | not measured |
+| Incompatible-proof revalidation | 163.205 | 8,306,688 | 207 | not measured |
+| Warm callers, median | 42.309 | 7,258,112 max sample | 4,565 | not instrumented |
+| Warm syntax callees, median | 44.591 | 7,499,776 max | 2,082 | not instrumented |
+| Warm syntax trace, median | 44.522 | 7,659,520 max | 2,437 | 2 / 1 |
+| Warm impact, median | 40.627 | 7,516,160 max | 5,565 | 1 / 4 |
+| External scip-typescript | 1,174.617 | 144,465,920 | producer text in bundle | n/a |
+| Opted-in LSP definition, end-to-end | 15,333.301 | 5,873,664 parent only | 555 | n/a |
+| Opted-in LSP references, end-to-end | 15,354.082 | 5,795,840 parent only | 991 | n/a |
 
-| Command | Result |
-|---|---|
-| `cargo fmt --all -- --check` | PASS |
-| `cargo check --locked` | PASS, no warnings |
-| `cargo clippy --all-targets -- -D warnings` | PASS |
-| `cargo test --locked` | PASS: 285 tests, 0 failed/ignored |
+Warm ranges ms: callers 39.719–44.441, callees 37.886–50.042, trace 41.919–52.062,
+impact 37.809–51.982. Three syntax files, 11 definitions, 6 syntax calls; first
+import has 27 facts/12 edges. This small fixture does not justify throughput extrapolation.
 
-Test breakdown: 191 unit + 16 CLI + 30 edges + 21 index + 15 semantic +
-12 syntax. The inherited baseline had 261 passing tests; 24 tests were added.
-The initial Clippy failures were repaired; final gates have no suppressions
-added for Task 4. A local independent reviewer reproduced two important
-findings, verified their RED/GREEN fixes, and reported no new important
-findings in the focused follow-up review.
+[m6-profile.cjs](pilots/m6-profile.cjs) archives the baseline to target/, inserts
+scope timers only in that copy, and builds in a separate Cargo target directory.
+It instruments derive_syntax_edges, upsert_semantic_edges, rederive_after_carry,
+source_proofs and each relationship_proof call. Same source/artifact, isolated
+database. It temporarily restores original fixture source for the initial index,
+then restores final bytes in finally. Run after native pilot exits. Production
+source/binary remain unchanged; counters are not shipped.
 
-Testing is local Windows; this checkpoint does not claim a new remote CI or real external
-language-provider run. Existing opt-in external-provider/pilot tests remain
-gated. No remote push was performed.
+Counts below are actual instrumented calls, not inference from reparsed. Proof
+parse time includes Tree-sitter plus relationship-proof extraction, excluding
+source IO/hash. Enclosing derivation times include nested work, SQL and logging
+overhead. Inclusive columns must not be summed. Instrumented timing is distinct
+from the native table above; no optimization was attempted.
 
-Page materialization is bounded to 1000 edges; source reads retain the 1 MB
-cap and canonical confinement. Freshness/file coverage still use the existing
-repository walk, so runtime is not constant in repository size. There is no
-Task 5 traversal/time budget or cross-request cache. Sparse changed-source
-coordinates without snapshot proof require reindexing. Conservative import
-candidate recognition can omit unresolved candidates, always with partial
-coverage rather than invented targets.
+Instrumented run: `target/m6-profile-1CYjk2/`, archived baseline above.
 
-Stop at this checkpoint for GO / REVISE / BLOCKED audit before Task 5.
+| Operation | Ingestion files parsed | Proof parses | Proof passes | Proof parse ms | Source-proof ms | Whole derivation ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| full | 3 | 3 | 1 | 0.983 | 2.148 | 3.533 |
+| import | 0 | 3 | 1 | 1.250 | 2.226 | 4.431 |
+| noop | 0 | 6 | 2 | 2.239 | 4.335 | 7.149 |
+| delta | 1 | 6 | 2 | 1.816 | 3.869 | 6.232 |
+| reimport | 0 | 3 | 1 | 1.227 | 2.216 | 4.109 |
+| revalidate | 0 | 12 | 4 | 3.722 | 7.598 | 14.029 |
+
+The four instrumented queries emit zero proof/derivation events: no query-time
+Tree-sitter parse or graph derivation. Revalidation has three imports, hence
+one syntax + three semantic passes across three files (12 actual proof parses).
+
+Zero ingestion reparses still costs syntax-proof plus a pass per semantic import.
+Incompatible certification revalidates all imports. This measures actual repeated
+work without claiming large-repository scalability.
+
+## Regression, review and remaining gates
+
+All local commands exit 0:
+
+```powershell
+cargo fmt --all -- --check
+cargo check --locked
+cargo clippy --all-targets -- -D warnings
+cargo test --locked
+cargo build --locked -p riltra
+```
+
+402 tests: 201 unit + 16 CLI + 137 edges + 21 index + 15 semantic + 12 syntax;
+zero failed/ignored. Existing goldens unchanged. Some platform/provider-gated test
+bodies return early; passing counts alone do not prove those paths ran. Actual
+external-provider evidence above is separate. No new Rust test was necessary
+because Task 8 changes no production behavior; manual pilot assertions cover its gaps.
+
+All 79 multilingual cases/494 responses and mandatory zero-false-safe assertions
+rerun: never SAFE/LOW, clean leaves and insufficient evidence UNKNOWN, traversal
+completion never graph completeness. Existing suite also checks alias/parameter/
+anonymous/competing targets, CALLS vs REFERENCES/POTENTIAL_CALL, strict endpoint
+and import/document/repository scope, unresolved endpoints, full/delta parity,
+no-reindex import, atomicity/concurrent promotion, stale verification, pagination
+and actual query read transactions. Linked checkpoint reports retain test-name
+maps and historical RED/GREEN. Task 8 makes no production bug-fix RED/GREEN claim.
+
+Independent read-only review checked raw pilot outputs against the portable bundle,
+source spans and negatives, unchanged source snapshot/SQLite state, proof lifecycle,
+measurement counters, 402-test totals and 79-case/494-response corpus inventory.
+It found no critical/important issues. A minor harness restoration concern was
+fixed: source mutation is now inside try/finally, with completed-target-fixture
+input confinement. Wrong-path rejection exits 1 before mutation. The reviewer
+did not rerun providers, measure large-repository scalability, inject real-provider
+failures, capture network traffic or certify Linux/macOS. Those remain outside
+the review's evidence; final cross-platform CI remains NOT TESTED.
+
+Known limitations: incomplete semantic coverage and unsupported/provider gaps;
+empty producer display names preventing owner bridges; append-only reimports causing
+explicit ambiguity; plausible static trace never runtime proof; cooperative 2000 ms
+traversal deadline rather than a hard whole-command limit. Walks, verification,
+SQL and subprocesses have separate costs/bounds. Repeated parsing grows with files
+× import passes. Windows symlink bodies may require privileges, and local Windows
+evidence does not establish Linux/macOS behavior.
+
+Recommendation: proceed to separately authorized final cross-platform validation
+after Task 8 audit. M6 remains open. STOP here; no push or new milestone.
