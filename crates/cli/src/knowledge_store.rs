@@ -1332,28 +1332,57 @@ mod tests {
 
     #[test]
     fn knowledge_store_open_fresh_create_refuses_retarget() {
-        // The entry was retargeted to another tree before the first
-        // knowledge store was created: the recorded string no longer matches
-        // the live canonical root, so creation must fail.
+        // The recorded path is rebound to another tree before the first
+        // knowledge store is created: the live canonical root no longer
+        // matches the recorded string, so creation must fail. Rebinding the
+        // path itself (rather than swapping the entry string) detects the
+        // retarget on every platform, including filesystems where a raw path
+        // already equals its canonical form.
         let (home, repo) = setup("retarget");
-        let other_root = tmpdir("m7-retarget-root");
-        let moved = RepoEntry {
-            name: repo.name.clone(),
-            root: other_root.to_string_lossy().into_owned(),
-            added_unix: 1,
-        };
-        let err = open_knowledge_at(&home, &moved, true).unwrap_err();
+        let other = tmpdir("m7-retarget-target");
+        if !repoint_dir_to(Path::new(&repo.root), &other) {
+            eprintln!("NOT TESTED: cannot rebind directories in this environment");
+            return;
+        }
+        let err = open_knowledge_at(&home, &repo, true).unwrap_err();
         assert!(err.contains("retarget"), "unexpected: {err}");
         assert!(
             !knowledge_db_path(&home, "retarget").exists(),
             "refused creation must leave no store file behind"
         );
+    }
+
+    #[test]
+    fn knowledge_store_open_fresh_create_compatible_root() {
         // The normal compatible path still works: the recorded canonical
         // root creates fine, as does the no-index case (other tests).
+        let (home, repo) = setup("retarget-ok");
         open_knowledge_at(&home, &repo, true)
             .unwrap()
             .close()
             .unwrap();
+    }
+
+    /// Replace the directory at `link` with a link to `target`, so the
+    /// recorded path resolves to another tree. Returns false when the
+    /// environment cannot create the link (caller reports NOT TESTED).
+    fn repoint_dir_to(link: &Path, target: &Path) -> bool {
+        if std::fs::remove_dir_all(link).is_err() {
+            return false;
+        }
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(target, link).is_ok()
+        }
+        #[cfg(windows)]
+        {
+            plant_link(link, target).is_some()
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = (link, target);
+            false
+        }
     }
 
     #[test]
@@ -1836,19 +1865,29 @@ mod tests {
         let gen_before = read_generation(&conn).unwrap();
         conn.close().unwrap();
         let db = knowledge_db_path(&home, "revalidate");
-        let wal = companion(&db, "-wal");
-        let _ = std::fs::remove_file(&wal);
-        // Open the writer while the paths are clean, then plant a hostile
-        // companion between open and write: the mutation itself must refuse
-        // with no head or generation change.
+        // Open the writer on clean paths, then clear any companions SQLite
+        // maintains itself: companion lifecycle across open is
+        // platform-dependent, so planting must start from a verified-absent
+        // state with no SQLite call between clearing and planting.
+        // The -journal path is used because SQLite never holds it open while
+        // this connection is idle (WAL mode never uses it; a rollback write
+        // never starts since revalidation runs first).
         let mut conn = open_knowledge_at(&home, &repo, true).unwrap();
+        for suffix in ["-wal", "-shm", "-journal"] {
+            let _ = std::fs::remove_file(companion(&db, suffix));
+        }
+        let journal = companion(&db, "-journal");
+        assert!(
+            !journal.exists(),
+            "companion must be absent before planting"
+        );
         let outside = tmpdir("m7-outside-reval");
         let target = outside.join("evil-wal");
         std::fs::write(&target, b"SENTINEL").unwrap();
         #[cfg(unix)]
-        std::os::unix::fs::symlink(&target, &wal).unwrap();
+        std::os::unix::fs::symlink(&target, &journal).unwrap();
         #[cfg(windows)]
-        match plant_link(&wal, &target) {
+        match plant_link(&journal, &target) {
             Some(mech) => eprintln!("revalidation link planted via {mech}"),
             None => {
                 eprintln!("NOT TESTED: cannot plant links in this environment");
@@ -1860,9 +1899,27 @@ mod tests {
             err.contains("link") || err.contains("escape"),
             "unexpected: {err}"
         );
-        assert_eq!(show_record(&conn, "d1", None).unwrap().revision, 1);
-        assert_eq!(read_generation(&conn).unwrap(), gen_before);
-        conn.close().unwrap();
+        // Drop the poisoned connection without insisting on a clean close,
+        // remove the planted link, and verify nothing changed through a fresh
+        // connection: reads through the hostile companion are not trusted.
+        // Junctions plant as directories on Windows, so removal falls back
+        // from file to directory removal.
+        let _ = conn.close();
+        std::fs::remove_file(&journal)
+            .or_else(|_| std::fs::remove_dir(&journal))
+            .unwrap();
+        let check = open_knowledge_at(&home, &repo, false).unwrap();
+        assert_eq!(show_record(&check, "d1", None).unwrap().revision, 1);
+        assert_eq!(read_generation(&check).unwrap(), gen_before);
+        let hits: i64 = check
+            .query_row(
+                "SELECT count(*) FROM knowledge_fts WHERE knowledge_fts MATCH 't2'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(hits, 0, "refused update must not leak into the index");
+        check.close().unwrap();
         assert_eq!(std::fs::read(&target).unwrap(), b"SENTINEL");
     }
 
@@ -1876,16 +1933,23 @@ mod tests {
         // Writer commits exactly on the boundary between the reader's
         // generation validation and its row reads. No sleeps: barriers order
         // the two threads deterministically.
+        // Both connections are opened sequentially up front: the barrier
+        // orders the commit boundary deterministically, and no concurrent
+        // SQLite open ever races WAL initialization.
         let barrier = Arc::new(Barrier::new(2));
-        let home2 = home.clone();
-        let repo2 = repo.clone();
+        let mut writer_conn = open_knowledge_at(&home, &repo, true).unwrap();
         let parked = barrier.clone();
         let released = barrier.clone();
         let writer = std::thread::spawn(move || {
-            let mut w = open_knowledge_at(&home2, &repo2, true).unwrap();
             parked.wait();
-            update_record(&mut w, "d1", 1, &update_to("writer zqxwtwo", "active")).unwrap();
-            w.close().unwrap();
+            update_record(
+                &mut writer_conn,
+                "d1",
+                1,
+                &update_to("writer zqxwtwo", "active"),
+            )
+            .unwrap();
+            writer_conn.close().unwrap();
             released.wait();
         });
         let conn = open_knowledge_at(&home, &repo, false).unwrap();
@@ -1969,13 +2033,17 @@ mod tests {
         drop(first);
         // Both writers read head rev 1 first then rendezvous, so the two
         // expected-1 updates genuinely overlap instead of merely following
-        // each other.
+        // each other. Connections open sequentially up front so no concurrent
+        // SQLite open ever races WAL initialization; only the updates overlap.
         let barrier = Arc::new(Barrier::new(3));
+        let mut writers = Vec::new();
+        for _ in ["zqxpwina", "zqxpwinb"] {
+            writers.push(open_knowledge_at(&home, &repo, true).unwrap());
+        }
         let mut handles = Vec::new();
-        for term in ["zqxpwina", "zqxpwinb"] {
-            let (h, r, b) = (home.clone(), repo.clone(), barrier.clone());
+        for (term, mut w) in ["zqxpwina", "zqxpwinb"].into_iter().zip(writers) {
+            let b = barrier.clone();
             handles.push(std::thread::spawn(move || {
-                let mut w = open_knowledge_at(&h, &r, true).unwrap();
                 assert_eq!(show_record(&w, "d1", None).unwrap().revision, 1);
                 b.wait();
                 let out = update_record(&mut w, "d1", 1, &update_to(term, "active"));
