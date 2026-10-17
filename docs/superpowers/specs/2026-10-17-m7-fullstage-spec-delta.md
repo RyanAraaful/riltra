@@ -361,12 +361,13 @@ Three line types in this order:
 
 1. **meta** (exactly one, first line):
 ```json
-{"type":"meta","format":"riltra-knowledge","version":1,"repo":"krepo","records":2,"relations":1,"digest":"<digest of canonical serialization of all record+relation lines, hex, lowercase>"}
+{"type":"meta","format":"riltra-knowledge","version":1,"repo":"krepo","records":2,"relations":1}
 ```
-The digest covers record + relation lines only (not the meta line). Per D6, if
-no hash dependency is approved the `digest` field is omitted and integrity is
-verified structurally. A file whose declared counts are not met, or whose
-digest (when present) does not match, is corrupt.
+Per D6/D9, there is **no digest field**: no hash dependency is approved, so
+byte-level checksums are not computed. File integrity is verified
+**structurally** (declared counts, canonical ordering, duplicate-id checks,
+and re-import validation). A file whose declared counts are not met, or whose
+content is not canonically ordered, is corrupt.
 
 2. **record** (one per record id, sorted by id, binary collation):
 ```json
@@ -391,7 +392,80 @@ state — store counters, not record data.
 files (no timestamps, no map ordering; `evidence` keeps captured order;
 `measurement` metrics keep authored order).
 
-### 3.3 Markdown import/export contract (D4)
+### 3.3 Canonical field mapping (D9 finalized)
+
+Complete mapping from persistent storage (Foundation v2 tables) to canonical
+JSONL. Storage source of truth: `records`, `heads`, `evidence`, `relations`,
+`retractions`, `measurements`, `metric_values`, `record_lifecycle`,
+`relation_lifecycle`.
+
+**Record line** — field → storage mapping:
+
+| JSONL field | Storage source | Rules |
+| --- | --- | --- |
+| `id` | `records.id` | PK; 1–128 ASCII `[a-z0-9][a-z0-9._-]*` |
+| `kind` | `records.kind` | `decision`/`constraint`/`benchmark` |
+| `head_revision` | `heads.current_revision` | Derived: max(revision) per id; rebuilt on import |
+| `status` | head row `records.status` | `active`/`archived`/`superseded`/`retracted` |
+| `revisions[].revision` | `records.revision` | ascending |
+| `revisions[].title`/`body`/`author`/`created_unix` | `records` columns | byte-exact |
+| `revisions[].status` | `records.status` | per-revision |
+| `revisions[].evidence[]` | `evidence` (id, revision, seq) | `path`,`byte_start`,`byte_end`,`digest`,`git_head`,`git_branch`; captured at write, immutable |
+| `revisions[].measurement` | `measurements` + `metric_values` | `method`,`environment`,`sample_count`,`metrics[{name,value,unit}]` |
+| `revisions[].superseded_by` | `record_lifecycle` (supersede) target | present only when non-null |
+| `revisions[].retracted_reason`/`retracted_author` | `record_lifecycle` (retract) | present only when non-null |
+| `revisions[].confirm_state` | derived from `record_lifecycle` (confirm) | `candidate` default |
+
+**Relation line** — field → storage mapping:
+
+| JSONL field | Storage source | Rules |
+| --- | --- | --- |
+| `relation_id` | `relations.relation_id` | PK |
+| `src_id`/`src_revision`/`dst_id`/`dst_revision` | `relations` columns | pinned endpoint revisions |
+| `kind` | `relations.kind` | `relates_to`/`supports`/`contradicts`/`supersedes` |
+| `author`/`rationale`/`created_unix` | `relations` columns | byte-exact |
+| `retracted` | `retractions.relation_id IS NOT NULL` | derived from `retractions` |
+| `retraction_author`/`retraction_reason` | `retractions` columns | present only when retracted |
+| `confirm_state` | derived from `relation_lifecycle` (confirm) | `candidate` default |
+
+**Lifecycle events** are exported through the record/relation line fields
+above (`superseded_by`, `retracted_reason`/`retracted_author`,
+`confirm_state`); there is no separate lifecycle line type. The append-only
+`record_lifecycle`/`relation_lifecycle` rows are the source of truth for these
+derived fields and re-import losslessly.
+
+**Canonical vs derived/rebuildable:**
+
+- **Canonical (stored, round-trips):** every field in the two tables above.
+- **Derived/rebuilt on import (not round-tripped):** `heads` (rebuilt as max
+  revision per id), the FTS index (rebuilt from head revisions),
+  `knowledge_generation` (a store counter — import bumps as it writes and
+  does not restore a stored value), and `meta` bindings (re-derived from the
+  registry at open; never stored in the export).
+- **Recomputed at read (never stored, never exported):** evidence freshness,
+  `next_offset`, `total`/`truncated`, search ordering.
+
+**Determinism rules:** total order = meta, then records by `id` (binary), then
+relations by (`src`, `src_revision`, `dst`, `dst_revision`, `kind`,
+`relation_id`) binary; revisions ascending; evidence in captured `seq` order;
+metrics in authored order; LF newlines; UTF-8; no clock data. Optional/null
+rules: null optional fields are **omitted** from the line when null
+(`superseded_by`, `retracted_reason`, `retracted_author`, `retraction_author`,
+`retraction_reason`, `git_head`, `git_branch`, `byte_start`, `byte_end`,
+`measurement`); booleans as `true`/`false`; no empty-string placeholders.
+
+**Digest/checksum (D9 resolved):** there is **no digest**. No hash dependency
+is approved (D6). Export and backup integrity is **structural only** — counts,
+canonical ordering, duplicate-id checks, re-import validation, and (for
+backups) `PRAGMA integrity_check`. Structural integrity detects truncation and
+structural corruption; it is **not** a checksum and **not** cryptographic
+authenticity. Accidental-corruption detection = structural checks; cryptographic
+authenticity = not implemented, not claimed.
+
+**Markdown-wrapper preserved:** the canonical JSONL lines above are the
+fenced-block payload in Markdown export/import; prose is presentational (§3.4).
+
+### 3.4 Markdown import/export contract (D4)
 
 Markdown alone cannot carry revision history, evidence digests, retraction
 reasons, or lifecycle events. To satisfy the roadmap's Markdown import/export
@@ -418,7 +492,7 @@ Second — beta
   rendered from current head revisions. The fenced region is the payload; prose
   is decoration.
 - **Import** extracts fenced ```json blocks, concatenates them, and feeds them
-  to the §3.2/§3.4 JSONL parser. Prose outside fenced blocks is **presentational
+  to the §3.2/§3.5 JSONL parser. Prose outside fenced blocks is **presentational
   and ignored** — the canonical JSONL blocks are the **only** structured source
   of truth.
 - **Round-trip claim bounds:** Markdown → import is lossless for supported
@@ -443,10 +517,10 @@ Second — beta
 | Fenced blocks not in canonical order / counts inconsistent | Malformed → exit 2, no write. |
 | Prose containing JSON-like text outside fenced blocks | Ignored (presentational). |
 
-All block-level validation follows §3.4 ordering (validation completes before
+All block-level validation follows §3.5 ordering (validation completes before
 the single write transaction promotes data as authoritative).
 
-### 3.4 Import semantics (D5)
+### 3.5 Import semantics (D5)
 
 **Input:** `knowledge import --repo R --file <path>` (file, not stdin — stdin
 is capped at 1 MiB). **Resource limits (over-limit → exit 2, before any
@@ -479,18 +553,18 @@ transaction commits and promotes the data as authoritative.** No partial import
 is ever left behind; an interrupted import leaves the store unchanged because
 the transaction never commits.
 
-### 3.5 Malformed and hostile input
+### 3.6 Malformed and hostile input
 
 - Invalid JSON line, unknown line type, missing required field, wrong type,
   unknown relation kind, duplicate record id within the file, non-canonical
   ordering, unresolved relation endpoint → exit 2.
-- Digest mismatch, truncated file (declared counts not met) → exit 3
+- Truncated file (declared counts not met, non-canonical ordering) → exit 3
   (integrity class), no state change.
 - Unsupported `version` in meta → exit 2.
 - Over-limit file/line/counts → exit 2 (before any write).
 - Import into a store whose schema is forward-versioned → exit 3.
 
-### 3.6 Storage and transaction invariants
+### 3.7 Storage and transaction invariants
 
 - Import writes revisions, evidence, heads, FTS, lifecycle tables, relations,
   and generation bumps in the **one** transaction; export and verify are
@@ -498,7 +572,7 @@ the transaction never commits.
 - Relation retraction events and `record_lifecycle`/`relation_lifecycle`
   events export and re-import losslessly.
 
-### 3.7 Security and trust boundaries
+### 3.8 Security and trust boundaries
 
 - Exported files are inert data: no code execution, no templates, no provider
   launch. Import parses strictly (duplicate/unknown field rejection per
@@ -507,10 +581,10 @@ the transaction never commits.
 - Repository binding: import does not rebind stores across repositories; it
   writes only into the named repo's store.
 
-### 3.8 Positive acceptance cases
+### 3.9 Positive acceptance cases
 
-1. Export empty store → meta with zero counts (+ digest if available); import
-   into empty store → no change, exit 0.
+1. Export empty store → meta with zero counts; import into empty store → no
+   change, exit 0.
 2. Export store S → import into empty store → content-equal store (all
    supported fields).
 3. Re-import the same file twice → second import is a no-op (no generation
@@ -522,11 +596,11 @@ the transaction never commits.
 7. Referential validation: a relation referencing a revision absent from the
    file and the store → exit 2, no write.
 
-### 3.9 Negative / adversarial cases
+### 3.10 Negative / adversarial cases
 
 1. Malformed JSON line / unknown line type / duplicate id in file → exit 2,
    no state change.
-2. Truncated file / digest mismatch → exit 3, no state change.
+2. Truncated file / counts-not-met → exit 3, no state change.
 3. Divergent revision content → exit 3, atomic rollback, no partial import.
 4. Unsupported version → exit 2. Over-limit file/line/counts → exit 2.
 5. Markdown prose containing fake JSON outside fenced blocks → ignored; only
@@ -535,14 +609,14 @@ the transaction never commits.
 7. Markdown file with no fenced blocks (prose only) → exit 2 (missing payload).
 8. Markdown with duplicate record blocks → exit 3, atomic failure.
 
-### 3.10 Regression evidence required
+### 3.11 Regression evidence required
 
 - All Foundation tests unchanged and passing.
 - New tests: each positive/negative case above; determinism (two exports
   byte-identical); round-trip equality over every supported field; export
   read-only (store bytes + generation unchanged); Markdown round-trip.
 
-### 3.11 STOP / GO
+### 3.12 STOP / GO
 
 - **GO** when round-trip, idempotence, merge, limits, atomicity, and all
   negative cases pass, Markdown round-trip holds (if D4 adopts the contract),
@@ -551,13 +625,13 @@ the transaction never commits.
   export, any generation bump on a no-op import, or any resource limit exceeded
   without a clean exit 2.
 
-### 3.12 Compatibility and migration
+### 3.13 Compatibility and migration
 
 - Export files are new artifacts; no Foundation file format changes.
 - Import accepts only `version:1` files; a future version bump is a new
   decision, not automatic.
 
-### 3.13 Unresolved decisions
+### 3.14 Unresolved decisions
 
 - **D5:** per-record vs batched transactions for large imports. Resolved by
   reviewer: one transaction (recommended); batching is a future performance
@@ -593,10 +667,13 @@ the snapshot is a standalone database and carries no WAL state.
 **Manifest:** the backup is two files: `<path>.db` (the snapshot) and
 `<path>.manifest.json`:
 ```json
-{"format":"riltra-knowledge-backup","version":1,"repo":"krepo","canonical_root":"C:\\repo\\krepo","schema_version":2,"records":2,"relations":1,"digest":"<digest of the .db bytes, hex, lowercase>"}
+{"format":"riltra-knowledge-backup","version":1,"repo":"krepo","canonical_root":"C:\\repo\\krepo","schema_version":2,"records":2,"relations":1}
 ```
+Per D6/D9 there is **no digest**: no hash dependency is approved. Integrity is
+verified via `PRAGMA integrity_check` + structural verification (schema
+version, meta binding, table presence, manifest counts matching actual counts).
 The manifest binds the backup to the registered repository name and canonical
-root, and records schema version, entity counts, and (optionally) a digest.
+root, and records schema version and entity counts.
 DB and manifest are consistent when: the DB opens, its meta binding matches
 the manifest's `repo`/`canonical_root`, its `user_version` matches
 `schema_version`, and its actual record/relation counts match the manifest
@@ -610,18 +687,18 @@ Three distinct properties, none implying the others:
   current; meta binding matches; required tables present; manifest counts
   match actual counts. This detects **corruption, truncation, and structural
   damage**.
-- **Checksum:** the manifest digest (when present) detects byte-level change
-  of the `.db`. Requires a hash dependency — **not authorized** (D6).
+- **Checksum:** **not implemented.** A byte-level digest would require a hash
+  dependency — **not authorized** (D6/D9). Export and backup files carry no
+  digest field.
 - **Authenticity:** proof that a specific party produced this backup. **Not
   claimed.** There is no key, signature, or authenticated manifest.
 
 **Tamper-detection limit (explicit):** `integrity_check` and structural
 verification do **not** detect all malicious modification. A structurally
 valid database with altered rows, or a swapped valid database from another
-store with matching counts, passes structural checks. Only the optional
-digest (checksum) detects byte-level change, and even that is not
-authenticity. This delta makes no promise that all malicious modification is
-detected.
+store with matching counts, passes structural checks. Without a checksum there
+is no byte-level change detection at all. This delta makes no promise that all
+malicious modification is detected.
 
 ### 4.4 Verification contract
 
@@ -629,7 +706,7 @@ detected.
 perform: `PRAGMA integrity_check` → `ok`; `user_version` ≤ current;
 `user_version` == `meta.knowledge_schema_version`; meta binding matches the
 registered repo (name + canonical root); required tables present; manifest
-counts match actual counts; digest recomputed and compared (when present). Any
+counts match actual counts. Any
 failure → exit 3 with a specific reason; the store/backup is left untouched.
 
 ### 4.5 Restore contract
@@ -669,7 +746,7 @@ files are copied from the backup.
 ### 4.6 Corrupt, tampered, missing, unsupported input
 
 - Missing `.db` or manifest → exit 3, no state change.
-- Digest mismatch / `integrity_check` failure / structural mismatch / count
+- Truncated file / `integrity_check` failure / structural mismatch / count
   mismatch / binding mismatch → exit 3, corruption reported by name; the
   backup is not restored and the live store is untouched.
 - Unsupported backup version → exit 3.
@@ -840,7 +917,19 @@ command maps confirmed → verified, or fresh evidence → confirmed.
   in JSON output only.
 - No schema migration beyond §1.3 (additive lifecycle tables).
 
-## 6. Interface contracts — finalized command surface (D8)
+## 6. Cross-gate acceptance matrix
+
+| Gate | Positive cases | Negative cases | Regression | STOP/GO |
+| --- | --- | --- | --- | --- |
+| G-LIFE | §2.6 | §2.7 | §2.8 | §2.9 |
+| G-PORT | §3.9 | §3.10 | §3.11 | §3.12 |
+| G-BACK | §4.8 | §4.9 | §4.10 | §4.11 |
+| G-PROV | §5.9 | §5.10 | §5.11 | §5.12 |
+
+Each gate's GO requires all its listed evidence plus an intact Foundation suite
+(498 tests at the time of this delta). No gate requires the others.
+
+## 7. Interface contracts — finalized command surface (D8)
 
 **No production CLI implementation is authorized by this delta.** The proposed
 surface:
@@ -870,26 +959,28 @@ riltra knowledge verify --repo R                               (new)
 - JSON responses gain optional fields only when Full-stage data exists;
   Foundation field names and values are unchanged.
 
-## 7. Decisions D1–D9 — resolutions
+## 8. Decisions D1–D9 — resolutions
 
 - **D1 — schema:** schema v2 with guarded migration (§1.3). Resolved by
   reviewer.
 - **D2/D3 — lifecycle/search:** implicit atomic `supersedes` relation kept, made exact (§1.4), and the supersedes lineage is **acyclic** (generic Foundation relations stay cyclic); search default = active only, explicit flags for the rest (§1.5). Resolved by reviewer.
-- **D4 — Markdown:** Markdown-wrapper import/export **approved**; canonical JSONL blocks are the only structured source of truth, prose is presentational; missing/duplicate/malformed/unsupported block treatment and round-trip bounds defined (§3.3). Resolved by reviewer.
-- **D5 — import:** one transaction, resource limits (§3.4), validation before
+- **D4 — Markdown:** Markdown-wrapper import/export **approved**; canonical JSONL blocks are the only structured source of truth, prose is presentational; missing/duplicate/malformed/unsupported block treatment and round-trip bounds defined (§3.4). Resolved by reviewer.
+- **D5 — import:** one transaction, resource limits (§3.5), validation before
   promotion. Resolved by reviewer.
 - **D6 — backup:** SQLite-consistent backup; structural vs checksum vs
   authenticity distinguished; no hash dependency; tamper-detection limits
   explicit (§4.3). Resolved by reviewer.
 - **D7 — provenance:** default `candidate` approved; explicit-assertion vs
   authenticated identity distinguished (§5.3). Resolved by reviewer.
-- **D8 — command surface:** finalized in §6.
-- **D9 — JSONL/manifest schemas:** finalized in §3.2 and §4.2, with examples.
+- **D8 — command surface:** finalized in §7.
+- **D9 — JSONL/manifest schemas:** finalized in §3.2, §3.3 (canonical field
+  mapping), and §4.2, with field-level mappings, determinism/null rules, and
+  examples. Resolved by reviewer.
 
-**Still open:** D4 scope (Markdown-wrapper vs JSONL-only), and ratification
-of the finalized schemas (D9).
+**Still open:** ratification of the finalized schemas (D9) and the G-PROV
+blueprint (§5 remains a stand-in). All other decisions (D1–D8) are resolved.
 
-## 8. Dependency and schema implications
+## 9. Dependency and schema implications
 
 - **Dependencies:** none added by this delta. A SHA-256 crate for digests (D6
   alternative) is **not** authorized here and would require a separate
@@ -904,7 +995,7 @@ of the finalized schemas (D9).
   events; M6 isolation; root binding; exit codes; byte limits; deterministic
   JSON.
 
-## 9. Security and correctness risks (residual)
+## 10. Security and correctness risks (residual)
 
 - **Lifecycle conflation:** mapping `superseded`/`retracted` to `archived` or
   conflating record retraction with relation retraction. Mitigated by distinct
@@ -922,20 +1013,19 @@ of the finalized schemas (D9).
 - **Resource exhaustion:** import limits (§3.4) prevent hostile-file memory
   growth within documented bounds.
 
-## 10. Areas not specific enough for implementation
+## 11. Areas not specific enough for implementation
 
-- **D4 scope:** whether the Markdown-wrapper contract satisfies the roadmap's
-  Markdown import/export target or whether G-PORT is re-scoped to JSONL-only
-  with Markdown as a separate gate.
 - **G-PROV blueprint:** the approved design spec references a "blueprint" for
   provenance semantics, but no blueprint document exists. §5 is a stand-in that
   may be refined by the blueprint.
+- **D9 ratification:** the finalized JSONL/manifest schemas (§3.2, §3.3, §4.2)
+  are pending reviewer sign-off.
 - **Import batch size / performance bounds:** one transaction is specified;
   large-store import performance is untested.
 - **Windows overwrite semantics:** exact `MoveFileEx`/`ReplaceFile` behavior
   is platform-detail work for implementation, not spec.
 
-## 11. Read-only consistency review (vs Foundation + design spec)
+## 12. Read-only consistency review (vs Foundation + design spec)
 
 - Status set: Foundation `active`/`archived` preserved; `superseded`/`retracted`
   additive; create rejects the new statuses.
