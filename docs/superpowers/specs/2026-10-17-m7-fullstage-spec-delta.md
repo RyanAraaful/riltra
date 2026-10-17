@@ -66,6 +66,17 @@ Full-stage ships as **schema version 2**. Foundation stores are schema version
   rejected by its existing forward-version check. **An old Foundation binary
   cannot open, read, or adopt a Full-stage v2 store.**
 
+**Explicit v1-read / v2-missing behavior:**
+
+- A Full-stage **read** against a v1 store never migrates and never errors on
+  missing v2 tables. Reads that derive state from v2 lifecycle tables
+  (`confirm_state`, lifecycle events) against a v1 store return the documented
+  defaults (`candidate`, no lifecycle events) without migrating.
+- A Full-stage **write** that needs v2 tables against a v1 store performs the
+  migration as the first step inside its own write transaction (above), then
+  proceeds. There is no code path that needs v2 tables without migrating
+  first, and no code path that migrates without a Full-stage write.
+
 **When migration runs:**
 
 - Migration is **never** triggered by a read. Reads (including Foundation
@@ -132,11 +143,19 @@ absence of events in `record_lifecycle`. Default is `candidate` (see G-PROV).
   relation endpoints), must not be the superseded record itself, and must not
   be a `retracted` record (a superseded transition of a retracted record is
   already rejected).
-- Cycle/conflict rules: supersession **cycles are permitted** as authored
-  events (A supersedes B at one time, B supersedes A later — each is a distinct
-  revision event; the lifecycle table records both). A duplicate active
-  `supersedes` tuple (same src/dst/kind) is rejected per Foundation's
-  duplicate-active-tuple rule. Self-supersession is rejected.
+- Cycle/conflict rules: the authoritative `supersedes` lineage is **acyclic**.
+  Generic Foundation relations (`relates_to`, `supports`, `contradicts`) remain
+  freely cyclic; only the supersedes lineage is constrained. Before writing a
+  supersede transition, the transaction checks that adding the edge
+  (superseding revision → superseded revision) would not create a cycle:
+  walking supersedes edges from the superseded record must never reach the
+  superseding record. Self-supersession, direct cycles (A supersedes B, then B
+  supersedes A), and indirect cycles (A supersedes B, B supersedes C, C
+  supersedes A) are all rejected (exit 2, no write, no generation bump). A
+  duplicate active `supersedes` tuple is rejected per Foundation's
+  duplicate-active-tuple rule. Atomicity and immutable history are preserved:
+  the cycle check runs inside the supersede transaction, so a rejected cycle
+  leaves no revision, no event, no relation, no generation bump.
 
 ### 1.5 Search visibility (D2/D3)
 
@@ -195,7 +214,8 @@ record has no history to supersede or retract.
   `supersedes` relation (§1.4), (5) bumps `knowledge_generation`, commits. Any
   failure rolls back all five plus the migration if it was in this transaction.
 - Re-superseding an already-`superseded` record to a **different** valid
-  target is allowed (new revision, new target, new event, new relation id).
+  target is allowed (new revision, new target, new event, new relation id),
+  provided the resulting `supersedes` lineage stays acyclic (§1.4).
   Superseding to the **same** target is rejected (exit 2, no write, no
   generation bump).
 - Superseding an already-`retracted` record is rejected (exit 2): a withdrawn
@@ -215,7 +235,8 @@ record has no history to supersede or retract.
 **Invalid transitions (exit 2, no write, no generation bump):** missing
 `superseded_by` or `reason` on supersede; missing `reason` on retract;
 self-supersession; supersede/retracted on create; double-retract; supersede of a
-retracted record; supersede to the same target.
+retracted record; supersede to the same target; any supersede that would create
+a `supersedes`-lineage cycle (direct or indirect, §1.4).
 
 **Conflicting transitions:** two concurrent `update` calls with the same
 `--expected-revision` — exactly one wins (existing optimistic concurrency), the
@@ -263,7 +284,8 @@ loser fails with a revision-conflict error, no write, no generation bump.
    default search hides it; `--include-retracted` reveals it with status and
    history intact.
 3. superseded record with a new target → history shows both supersede events
-   and two distinct `supersedes` relations.
+   and two distinct `supersedes` relations. Acyclic chain (A supersedes B, then
+   B supersedes C) → allowed; two lineage edges, no cycle.
 4. update with status omitted → regular revision, no lifecycle event.
 5. Migration: v1 store opened read-only by Full-stage binary → no migration;
    first Full-stage write migrates atomically; store is v2 afterwards.
@@ -272,7 +294,9 @@ loser fails with a revision-conflict error, no write, no generation bump.
 
 1. supersede with missing `superseded_by` / `reason` → exit 2, no write.
 2. supersede with unknown target revision → exit 3, no write.
-3. supersede self → exit 2. Supersede same target twice → exit 2.
+3. supersede self (self-reference) → exit 2. Supersede same target twice →
+   exit 2. Supersede with a non-existent `superseded_by.revision` (invalid
+   superseding revision) → exit 3.
 4. supersede a retracted record → exit 2. Retract twice → exit 2.
 5. `superseded`/`retracted` in create payload → exit 2.
 6. Concurrent supersede with stale `--expected-revision` → loser exit 3, no
@@ -282,6 +306,13 @@ loser fails with a revision-conflict error, no write, no generation bump.
 8. Migration failure injection → rollback, store still v1, tables absent,
    generation unchanged; corrupt v2 store → exit 3, fail closed.
 9. Old Foundation binary opening a v2 store → refused (forward version).
+10. Direct supersedes cycle (A supersedes B, then B supersedes A via a new B
+    revision) → exit 2, no write. Indirect cycle (A supersedes B, B supersedes
+    C, C supersedes A) → exit 2, no write. A `relates_to` cycle A↔B remains
+    allowed (generic relations stay cyclic).
+11. Full-stage read (e.g. `show`, `search --include-retracted`) against a v1
+    store → no migration, defaults returned for v2-derived fields
+    (`confirm_state` = candidate).
 
 ### 2.8 Regression evidence required
 
@@ -387,16 +418,33 @@ Second — beta
   rendered from current head revisions. The fenced region is the payload; prose
   is decoration.
 - **Import** extracts fenced ```json blocks, concatenates them, and feeds them
-  to the §3.2/§3.4 JSONL parser. Prose outside fenced blocks is ignored.
-- **Round-trip is lossless for supported fields** because the payload is the
-  canonical JSONL. This is the simplest contract that preserves supported
-  fields without a new parser or dependency.
+  to the §3.2/§3.4 JSONL parser. Prose outside fenced blocks is **presentational
+  and ignored** — the canonical JSONL blocks are the **only** structured source
+  of truth.
+- **Round-trip claim bounds:** Markdown → import is lossless for supported
+  fields **only when** the fenced blocks form a complete canonical payload (meta
+  + all record + relation lines, canonical order, matching counts). Prose is not
+  round-tripped. A Markdown export that omits or truncates fenced blocks is not
+  a lossless export and must not be claimed as one.
 
-> **Decision D4 (needs approval):** adopt the Markdown-wrapper contract above
-> (recommended) vs change G-PORT scope to JSONL-only with Markdown as a
-> separate gate. If neither is approved, **G-PORT cannot PASS** for the
-> roadmap's full Markdown import/export target — only the JSONL half would be
-> met. G-PORT PASS claims must state which half is satisfied.
+> **Decision D4 (resolved by reviewer):** Markdown-wrapper import/export is
+> **approved**. The canonical JSONL blocks are the only structured source of
+> truth; prose is presentational. G-PORT's JSONL half and Markdown half are both
+> satisfied under this contract.
+
+**Block treatment (import):**
+
+| Block condition | Treatment |
+| --- | --- |
+| No fenced ```json blocks at all | Malformed (missing payload) → exit 2, no write. |
+| Fenced block with invalid JSON | Malformed → exit 2, no write. |
+| Fenced block with unsupported `version` or unknown line `type` | Unsupported → exit 2, no write. |
+| Duplicate canonical line (e.g. two `record` lines with the same id, or a duplicated meta) | Conflict → exit 3, atomic failure. |
+| Fenced blocks not in canonical order / counts inconsistent | Malformed → exit 2, no write. |
+| Prose containing JSON-like text outside fenced blocks | Ignored (presentational). |
+
+All block-level validation follows §3.4 ordering (validation completes before
+the single write transaction promotes data as authoritative).
 
 ### 3.4 Import semantics (D5)
 
@@ -484,6 +532,8 @@ the transaction never commits.
 5. Markdown prose containing fake JSON outside fenced blocks → ignored; only
    fenced blocks are parsed.
 6. Markdown fenced block with invalid JSON → exit 2.
+7. Markdown file with no fenced blocks (prose only) → exit 2 (missing payload).
+8. Markdown with duplicate record blocks → exit 3, atomic failure.
 
 ### 3.10 Regression evidence required
 
@@ -824,11 +874,8 @@ riltra knowledge verify --repo R                               (new)
 
 - **D1 — schema:** schema v2 with guarded migration (§1.3). Resolved by
   reviewer.
-- **D2/D3 — lifecycle/search:** implicit atomic `supersedes` relation kept,
-  made exact (§1.4); search default = active only, explicit flags for the
-  rest (§1.5). Resolved by reviewer.
-- **D4 — Markdown:** Markdown-wrapper contract proposed (§3.3); scope
-  decision (adopt vs JSONL-only gate) still open.
+- **D2/D3 — lifecycle/search:** implicit atomic `supersedes` relation kept, made exact (§1.4), and the supersedes lineage is **acyclic** (generic Foundation relations stay cyclic); search default = active only, explicit flags for the rest (§1.5). Resolved by reviewer.
+- **D4 — Markdown:** Markdown-wrapper import/export **approved**; canonical JSONL blocks are the only structured source of truth, prose is presentational; missing/duplicate/malformed/unsupported block treatment and round-trip bounds defined (§3.3). Resolved by reviewer.
 - **D5 — import:** one transaction, resource limits (§3.4), validation before
   promotion. Resolved by reviewer.
 - **D6 — backup:** SQLite-consistent backup; structural vs checksum vs
