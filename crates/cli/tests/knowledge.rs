@@ -3942,6 +3942,148 @@ fn backup_restore_failed_replacement_preserves_original_and_cleans_staging() {
 }
 
 #[test]
+fn backup_restore_clears_stale_companions_before_promotion() {
+    let h = home("back-companion");
+    port_seed(&h);
+    let base = h.join("bk");
+    assert_eq!(backup(&h, "krepo", &base).0, 0, "seed backup");
+    let orig = h.join("orig.jsonl");
+    assert_eq!(export(&h, "krepo", &["--out", orig.to_str().unwrap()]).0, 0);
+    // The store moves on after the backup.
+    assert_eq!(create(&h, "krepo", "d4", "Fourth", "body four").0, 0);
+    let db = db_path(&h, "krepo");
+    // A directory squats on a companion path; it cannot be deleted. Clearing
+    // companions by rename before promotion neutralizes it; replacing the
+    // store first and deleting companions after would fail with the backup
+    // already promoted.
+    let squat = with_suffix(&db, "-wal");
+    std::fs::create_dir(&squat).unwrap();
+    let (code, _, err) = restore(&h, "krepo", &base, true);
+    assert_eq!(
+        code, 0,
+        "the squatter must be cleared before promotion: {err}"
+    );
+    assert!(!squat.exists(), "the canonical companion path must be free");
+    let after = h.join("after.jsonl");
+    assert_eq!(
+        export(&h, "krepo", &["--out", after.to_str().unwrap()]).0,
+        0
+    );
+    assert_eq!(
+        read_text(&after),
+        read_text(&orig),
+        "the store must be the backup"
+    );
+    assert_eq!(verify(&h, "krepo").0, 0);
+    let names = dir_names(db.parent().unwrap());
+    assert!(
+        !names.iter().any(|n| n.contains("restore-tmp")),
+        "staging must be cleaned: {names:?}"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn backup_restore_refuses_a_pinned_stale_wal_without_replacing_the_store() {
+    let h = home("back-wal-pin");
+    port_seed(&h);
+    let base = h.join("bk");
+    assert_eq!(backup(&h, "krepo", &base).0, 0, "seed backup");
+    let db = db_path(&h, "krepo");
+    // The store moves on after the backup.
+    assert_eq!(create(&h, "krepo", "d4", "Fourth", "body four").0, 0);
+    // A later committed write whose frames live only in the WAL, as after a
+    // crash: built on a scratch copy so no live handle pins the real store.
+    let scratch = h.join("scratch");
+    std::fs::create_dir(&scratch).unwrap();
+    let sdb = scratch.join("krepo.db");
+    std::fs::copy(&db, &sdb).unwrap();
+    let conn = rusqlite::Connection::open(&sdb).unwrap();
+    conn.execute_batch(
+        "PRAGMA journal_mode=WAL; BEGIN; \
+         INSERT INTO records (id, revision, kind, title, body, status, author, created_unix) \
+         VALUES ('d5', 1, 'decision', 'Fifth', 'body five', 'active', 'a', 0); \
+         INSERT INTO heads (id, current_revision) VALUES ('d5', 1); COMMIT;",
+    )
+    .unwrap();
+    let swal = with_suffix(&sdb, "-wal");
+    assert!(swal.is_file(), "fixture: the scratch WAL must exist");
+    let wal = with_suffix(&db, "-wal");
+    std::fs::copy(&swal, &wal).unwrap();
+    drop(conn);
+    let before = std::fs::read(&db).unwrap();
+    // A non-SQLite handle without delete sharing pins the WAL: it can be
+    // neither deleted nor renamed. Promoting over the store anyway would
+    // leave SQLite free to adopt the stale WAL into the restored snapshot,
+    // so the restore must refuse before promotion.
+    use std::os::windows::fs::OpenOptionsExt;
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(&wal)
+        .unwrap();
+    let (code, _, err) = restore(&h, "krepo", &base, true);
+    assert_eq!(code, 3, "a pinned companion must refuse the restore: {err}");
+    assert!(err.contains("companion"), "{err}");
+    assert_eq!(
+        std::fs::read(&db).unwrap(),
+        before,
+        "the original store must survive a refused restore untouched"
+    );
+    let names = dir_names(db.parent().unwrap());
+    assert!(
+        !names
+            .iter()
+            .any(|n| n.contains("restore-tmp") || n.contains("restore-old")),
+        "nothing may be left staging or aside after a refusal: {names:?}"
+    );
+    drop(lock);
+    // The original store still owns its committed WAL frames.
+    let (code, out, err) = run(&h, &["knowledge", "show", "--repo", "krepo", "--id", "d5"]);
+    assert_eq!(
+        code, 0,
+        "the original store keeps its WAL data: {err} {out}"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn backup_restore_rejects_junction_targets() {
+    let h = home("back-junction");
+    port_seed(&h);
+    let base = h.join("bk");
+    assert_eq!(backup(&h, "krepo", &base).0, 0);
+    let db = db_path(&h, "krepo");
+    std::fs::remove_file(&db).unwrap();
+    let target = h.join("junction-target");
+    std::fs::create_dir(&target).unwrap();
+    let made = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(&db)
+        .arg(&target)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !made {
+        return; // no mklink here; nothing to prove.
+    }
+    let (code, _, err) = restore(&h, "krepo", &base, true);
+    assert_eq!(code, 3, "junction target: {err}");
+    assert!(err.contains("escapes via link"), "{err}");
+    assert!(
+        std::fs::symlink_metadata(&db)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the junction must survive the refusal"
+    );
+    assert!(
+        target.is_dir(),
+        "the junction target must survive the refusal"
+    );
+}
+
+#[test]
 fn backup_reads_a_consistent_snapshot_while_the_store_is_writing() {
     let h = home("back-snapshot");
     port_seed(&h);
