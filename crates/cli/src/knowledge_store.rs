@@ -17,8 +17,12 @@ use crate::knowledge::{NewRecord, RecordVersion, UpdateRecord};
 use crate::paths;
 use crate::registry::RepoEntry;
 
-/// Independent knowledge schema version (`PRAGMA user_version`).
-pub const KNOWLEDGE_SCHEMA_VERSION: u32 = 1;
+/// Independent knowledge schema version (`PRAGMA user_version`). Full-stage
+/// ships schema v2; Foundation stores are v1 and migrate lazily on the first
+/// Full-stage write (see [`ensure_lifecycle_schema`]). Fresh stores are still
+/// created at v1: a store that never uses Full-stage features stays readable
+/// by a Foundation binary.
+pub const KNOWLEDGE_SCHEMA_VERSION: u32 = 2;
 
 /// Per-repository knowledge database file (never inside repositories).
 pub fn knowledge_db_path(home: &Path, repo: &str) -> PathBuf {
@@ -125,14 +129,17 @@ fn open_inner(
     if !existed {
         init_schema(&mut conn, repo, &croot, inject_init_failure)?;
     } else {
-        if version != KNOWLEDGE_SCHEMA_VERSION {
+        // Accepted schema versions: 1 (Foundation) and 2 (Full-stage). A
+        // version-0/garbage stamp and any disagreement between the two
+        // version stamps fail closed; the store is never deleted or rebuilt.
+        if version != 1 && version != KNOWLEDGE_SCHEMA_VERSION {
             return Err(format!(
                 "corrupt knowledge store for '{}': unexpected schema version {version}",
                 repo.name
             ));
         }
-        check_schema_complete(&conn, repo)?;
-        check_meta(&conn, repo, &croot)?;
+        check_schema_complete(&conn, repo, version)?;
+        check_meta(&conn, repo, &croot, version)?;
     }
     // Best-effort like the code index: exotic filesystems fall back to
     // rollback mode (still correct, less concurrent). Read-only opens ignore
@@ -369,9 +376,91 @@ const REQUIRED_TABLES: [&str; 9] = [
     "knowledge_fts",
 ];
 const REQUIRED_TRIGGERS: [&str; 2] = ["heads_fts_sync_insert", "heads_fts_sync_update"];
+/// Additional tables a schema-v2 store must contain. A v2 store without them
+/// is corrupt and fails closed at open.
+const LIFECYCLE_TABLES: [&str; 2] = ["record_lifecycle", "relation_lifecycle"];
 
-fn check_schema_complete(conn: &Connection, repo: &RepoEntry) -> Result<(), String> {
-    for table in REQUIRED_TABLES {
+/// Schema v2 additions, created only by the guarded v1→v2 migration inside a
+/// Full-stage write transaction. `record_lifecycle` is append-only, keyed by
+/// the revision it describes; `relation_lifecycle` is append-only, keyed by
+/// the confirmed relation. Neither table has an update or delete path.
+const MIGRATION_V2_SQL: &str = "
+CREATE TABLE IF NOT EXISTS record_lifecycle (
+  id TEXT NOT NULL, revision INTEGER NOT NULL, event TEXT NOT NULL,
+  target_id TEXT, target_revision INTEGER, reason TEXT,
+  author TEXT NOT NULL, created_unix INTEGER NOT NULL,
+  PRIMARY KEY (id, revision)
+);
+CREATE TABLE IF NOT EXISTS relation_lifecycle (
+  relation_id TEXT PRIMARY KEY, event TEXT NOT NULL,
+  author TEXT NOT NULL, created_unix INTEGER NOT NULL
+);
+";
+
+/// Guarded v1→v2 migration, run as the first step of a Full-stage write
+/// transaction. Reads never call this; a v2 store is a no-op. The migration
+/// only creates two empty tables and moves the version metadata — existing
+/// rows stay byte-identical and the generation is untouched. Because it
+/// shares the caller's transaction, any later failure (or a failure here)
+/// rolls back the tables and both version stamps together; a crash after
+/// commit leaves a consistent v2 store and never a partial migration.
+fn ensure_lifecycle_schema(tx: &Transaction) -> Result<(), String> {
+    ensure_lifecycle_schema_inner(tx, false)
+}
+
+fn ensure_lifecycle_schema_inner(tx: &Transaction, inject_failure: bool) -> Result<(), String> {
+    let version: u32 = tx
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .map_err(|e| format!("cannot read knowledge schema version: {e}"))?;
+    match version {
+        2 => Ok(()),
+        1 => {
+            tx.execute_batch(MIGRATION_V2_SQL)
+                .map_err(|e| format!("cannot migrate knowledge schema: {e}"))?;
+            if inject_failure {
+                // Test hook: fail after table creation and before either
+                // version stamp, proving the whole migration rolls back.
+                return Err("injected migration failure".to_string());
+            }
+            let stamped = tx
+                .execute(
+                    "UPDATE meta SET value = '2' WHERE key = 'knowledge_schema_version'",
+                    [],
+                )
+                .map_err(|e| format!("cannot migrate knowledge schema: {e}"))?;
+            if stamped != 1 {
+                return Err("corrupt knowledge store: schema marker missing".to_string());
+            }
+            tx.execute_batch("PRAGMA user_version = 2")
+                .map_err(|e| format!("cannot migrate knowledge schema: {e}"))?;
+            Ok(())
+        }
+        _ => Err(format!(
+            "corrupt knowledge store: unexpected schema version {version}"
+        )),
+    }
+}
+
+/// Test-only entry that exercises the migration exactly as a Full-stage write
+/// would: one immediate transaction, migration first, commit. Later tasks
+/// wire `ensure_lifecycle_schema` into the real write paths.
+#[cfg(test)]
+fn migrate_to_v2_for_test(conn: &mut Connection, inject_failure: bool) -> Result<(), String> {
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|e| format!("cannot begin knowledge write: {e}"))?;
+    ensure_lifecycle_schema_inner(&tx, inject_failure)?;
+    tx.commit()
+        .map_err(|e| format!("cannot commit knowledge migration: {e}"))?;
+    Ok(())
+}
+
+fn check_schema_complete(conn: &Connection, repo: &RepoEntry, version: u32) -> Result<(), String> {
+    let tables = REQUIRED_TABLES
+        .iter()
+        .copied()
+        .chain(LIFECYCLE_TABLES.iter().copied().filter(|_| version >= 2));
+    for table in tables {
         let n: i64 = conn
             .query_row(
                 "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
@@ -427,10 +516,17 @@ fn check_fresh_root_binding(repo: &RepoEntry, croot: &Path) -> Result<(), String
 }
 
 /// The store belongs to exactly one registered repository: name, canonical
-/// root and schema marker must all match on every open. The stored root must
-/// also still resolve to itself, so a moved or deleted root fails instead of
-/// being accepted on a stale string comparison.
-fn check_meta(conn: &Connection, repo: &RepoEntry, croot: &Path) -> Result<(), String> {
+/// root and schema marker must all match on every open. The marker must
+/// agree with the store's own `user_version` (v1 stores carry '1', migrated
+/// stores '2'), so a store whose version stamps disagree fails closed. The
+/// stored root must also still resolve to itself, so a moved or deleted root
+/// fails instead of being accepted on a stale string comparison.
+fn check_meta(
+    conn: &Connection,
+    repo: &RepoEntry,
+    croot: &Path,
+    version: u32,
+) -> Result<(), String> {
     let name = meta_value(conn, "repo_name")?;
     let root = meta_value(conn, "canonical_root")?;
     let marker = meta_value(conn, "knowledge_schema_version")?;
@@ -439,7 +535,7 @@ fn check_meta(conn: &Connection, repo: &RepoEntry, croot: &Path) -> Result<(), S
         .unwrap_or(false);
     if name != repo.name
         || root != croot.to_string_lossy().as_ref()
-        || marker != KNOWLEDGE_SCHEMA_VERSION.to_string()
+        || marker != version.to_string()
         || !root_alive
     {
         return Err(format!(
@@ -1839,7 +1935,10 @@ mod tests {
         let version: u32 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, KNOWLEDGE_SCHEMA_VERSION);
+        // Fresh stores are created at v1; schema v2 arrives only through the
+        // guarded Full-stage migration, so a store that never uses Full-stage
+        // features stays readable by a Foundation binary.
+        assert_eq!(version, 1);
         for table in [
             "meta",
             "records",
@@ -1926,6 +2025,193 @@ mod tests {
         };
         let err = open_knowledge_at(&home, &moved, false).unwrap_err();
         assert!(err.contains("mismatch"), "root: unexpected: {err}");
+    }
+
+    #[test]
+    fn knowledge_store_open_fresh_create_leaves_lifecycle_tables_absent() {
+        let (home, repo) = setup("fresh-nolife");
+        let conn = open_knowledge_at(&home, &repo, true).unwrap();
+        let n: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name IN ('record_lifecycle','relation_lifecycle')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            n, 0,
+            "lifecycle tables are created only by the v1→v2 migration"
+        );
+    }
+
+    #[test]
+    fn knowledge_schema_migration_stamps_v2_and_creates_lifecycle_tables() {
+        let (home, repo) = setup("migrate");
+        let mut conn = open_knowledge_at(&home, &repo, true).unwrap();
+        create_record(&mut conn, &new_record("d1", "migrate me")).unwrap();
+        let before_gen = read_generation(&conn).unwrap();
+        let before_rows: Vec<(i64, String, String)> = {
+            let mut stmt = conn
+                .prepare("SELECT revision, title, status FROM records ORDER BY id, revision")
+                .unwrap();
+            let rows = stmt
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            rows
+        };
+        migrate_to_v2_for_test(&mut conn, false).unwrap();
+        let version: u32 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 2);
+        let marker: String = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'knowledge_schema_version'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(marker, "2");
+        for table in ["record_lifecycle", "relation_lifecycle"] {
+            let n: i64 = conn
+                .query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                    [table],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1, "migration must create {table}");
+        }
+        assert_eq!(
+            read_generation(&conn).unwrap(),
+            before_gen,
+            "migration itself must not bump the generation"
+        );
+        let after_rows: Vec<(i64, String, String)> = {
+            let mut stmt = conn
+                .prepare("SELECT revision, title, status FROM records ORDER BY id, revision")
+                .unwrap();
+            let rows = stmt
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            rows
+        };
+        assert_eq!(before_rows, after_rows, "existing rows must be untouched");
+        conn.close().unwrap();
+        // The migrated store reopens through the guarded open path.
+        let mut conn = open_knowledge_at(&home, &repo, true).unwrap();
+        // A second migration attempt is a no-op on an already-migrated store.
+        migrate_to_v2_for_test(&mut conn, false).unwrap();
+        let marker: String = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'knowledge_schema_version'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(marker, "2");
+        conn.close().unwrap();
+    }
+
+    #[test]
+    fn knowledge_schema_migration_failure_rolls_back_to_v1() {
+        let (home, repo) = setup("migrate-fail");
+        let mut conn = open_knowledge_at(&home, &repo, true).unwrap();
+        create_record(&mut conn, &new_record("d1", "stay v1")).unwrap();
+        let gen = read_generation(&conn).unwrap();
+        let err = migrate_to_v2_for_test(&mut conn, true).unwrap_err();
+        assert!(err.contains("injected"), "unexpected: {err}");
+        // The failed migration left no trace: still v1, no tables, no marker
+        // change, no generation bump.
+        let version: u32 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 1);
+        let tables: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name IN ('record_lifecycle','relation_lifecycle')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            tables, 0,
+            "no lifecycle table may survive a failed migration"
+        );
+        let marker: String = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'knowledge_schema_version'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(marker, "1");
+        assert_eq!(read_generation(&conn).unwrap(), gen);
+        conn.close().unwrap();
+        // The store still opens as v1 and serves Foundation reads.
+        let conn = open_knowledge_at(&home, &repo, false).unwrap();
+        let record = show_record(&conn, "d1", None).unwrap();
+        assert_eq!(record.status, "active");
+    }
+
+    #[test]
+    fn knowledge_store_open_corrupt_v2_missing_lifecycle_tables_rejected() {
+        let (home, repo) = setup("v2-corrupt");
+        open_knowledge_at(&home, &repo, true)
+            .unwrap()
+            .close()
+            .unwrap();
+        let raw = rusqlite::Connection::open(knowledge_db_path(&home, "v2-corrupt")).unwrap();
+        raw.execute_batch("PRAGMA user_version = 2").unwrap();
+        raw.execute(
+            "UPDATE meta SET value = '2' WHERE key = 'knowledge_schema_version'",
+            [],
+        )
+        .unwrap();
+        raw.close().unwrap();
+        let err = open_knowledge_at(&home, &repo, false).unwrap_err();
+        assert!(err.contains("record_lifecycle"), "unexpected: {err}");
+        // Fail closed: the store is left in place, never deleted or rebuilt.
+        assert!(knowledge_db_path(&home, "v2-corrupt").is_file());
+    }
+
+    #[test]
+    fn knowledge_store_open_v2_meta_disagreement_rejected() {
+        let (home, repo) = setup("v2-mismatch");
+        let mut conn = open_knowledge_at(&home, &repo, true).unwrap();
+        migrate_to_v2_for_test(&mut conn, false).unwrap();
+        conn.close().unwrap();
+        let raw = rusqlite::Connection::open(knowledge_db_path(&home, "v2-mismatch")).unwrap();
+        raw.execute(
+            "UPDATE meta SET value = '1' WHERE key = 'knowledge_schema_version'",
+            [],
+        )
+        .unwrap();
+        raw.close().unwrap();
+        let err = open_knowledge_at(&home, &repo, false).unwrap_err();
+        assert!(err.contains("mismatch"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn knowledge_store_open_v1_reads_never_migrate() {
+        let (home, repo) = setup("v1-stays");
+        let mut conn = open_knowledge_at(&home, &repo, true).unwrap();
+        create_record(&mut conn, &new_record("d1", "zqxv1 stays v1")).unwrap();
+        conn.close().unwrap();
+        let conn = open_knowledge_at(&home, &repo, false).unwrap();
+        let _ = search(&conn, "zqxv1", None, false, 10, 0, None).unwrap();
+        let _ = history(&conn, "d1", 10, 0, None).unwrap();
+        let _ = show_record(&conn, "d1", None).unwrap();
+        conn.close().unwrap();
+        let conn = open_knowledge_at(&home, &repo, false).unwrap();
+        let version: u32 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 1, "reads must never migrate a v1 store");
     }
 
     #[test]
