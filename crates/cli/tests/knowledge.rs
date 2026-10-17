@@ -2575,3 +2575,658 @@ fn provenance_relation_confirm_via_cli() {
     );
     assert_eq!(code, 3, "revive retracted: {err}");
 }
+
+// --- G-PORT: canonical JSONL/Markdown export + import -----------------------
+
+fn export(home: &Path, repo: &str, extra: &[&str]) -> (i32, String, String) {
+    let mut args = vec!["knowledge", "export", "--repo", repo];
+    args.extend_from_slice(extra);
+    run(home, &args)
+}
+
+fn import(home: &Path, repo: &str, file: &Path) -> (i32, String, String) {
+    run(
+        home,
+        &[
+            "knowledge",
+            "import",
+            "--repo",
+            repo,
+            "--file",
+            file.to_str().unwrap(),
+        ],
+    )
+}
+
+fn read_text(path: &Path) -> String {
+    String::from_utf8(std::fs::read(path).unwrap()).unwrap()
+}
+
+fn write_text(path: &Path, text: &str) {
+    std::fs::write(path, text).unwrap();
+}
+
+/// A minimal canonical payload line pair for hand-built import files.
+fn meta_line(records: usize, relations: usize) -> String {
+    format!(
+        "{{\"type\":\"meta\",\"format\":\"riltra-knowledge\",\"version\":1,\"repo\":\"krepo\",\"records\":{records},\"relations\":{relations}}}"
+    )
+}
+
+fn record_line(id: &str, title: &str, body: &str) -> String {
+    format!(
+        "{{\"type\":\"record\",\"id\":\"{id}\",\"kind\":\"decision\",\"head_revision\":1,\"status\":\"active\",\
+         \"revisions\":[{{\"revision\":1,\"title\":\"{title}\",\"body\":\"{body}\",\"status\":\"active\",\
+         \"author\":\"a\",\"created_unix\":10,\"evidence\":[],\"events\":[]}}]}}"
+    )
+}
+
+/// Rich store: record supersede/retract/confirm events, an evidence binding, a
+/// benchmark measurement, a confirmed and a retracted relation, and the
+/// implicit `supersedes` relation written by the supersede transition.
+fn port_seed(home: &Path) -> PathBuf {
+    let dir = mkrepo(home, "krepo");
+    init(home, &dir, "krepo");
+    std::fs::write(dir.join("a.py"), "alpha beta gamma").unwrap();
+    let (code, _, err) = run_stdin(
+        home,
+        &["knowledge", "create", "--repo", "krepo", "--input", "-"],
+        br#"{"id":"d1","kind":"decision","title":"First","body":"body one","status":"active","author":"a","evidence":[{"path":"a.py","byte_start":0,"byte_end":5}]}"#,
+    );
+    assert_eq!(code, 0, "create d1: {err}");
+    assert_eq!(create(home, "krepo", "d2", "Second", "body two").0, 0);
+    assert_eq!(create(home, "krepo", "d3", "Third", "body three").0, 0);
+    let (code, _, err) = run_stdin(
+        home,
+        &["knowledge", "create", "--repo", "krepo", "--input", "-"],
+        br#"{"id":"b1","kind":"benchmark","title":"Perf","body":"body bench","status":"active","author":"a","evidence":[],"measurement":{"method":"m","environment":"e","sample_count":3,"metrics":{"latency":{"value":1.5,"unit":"ms"},"p99":{"value":42.0,"unit":"ms"}}}}"#,
+    );
+    assert_eq!(code, 0, "create b1: {err}");
+    let (code, _, err) = update(
+        home,
+        "krepo",
+        "d1",
+        1,
+        &supersede_input("First v2", "d2", 1, "replaced by d2"),
+    );
+    assert_eq!(code, 0, "supersede d1: {err}");
+    let (code, _, err) = update(
+        home,
+        "krepo",
+        "d2",
+        1,
+        &confirm_input("Second v2", "body two v2"),
+    );
+    assert_eq!(code, 0, "confirm d2: {err}");
+    let (code, _, err) = update(home, "krepo", "d3", 1, &retract_input("Third", "was wrong"));
+    assert_eq!(code, 0, "retract d3: {err}");
+    let (code, _, err) = link(
+        home,
+        "krepo",
+        &link_input("r1", "d2", 2, "d1", 2, "supports", "the reason", true),
+    );
+    assert_eq!(code, 0, "link r1: {err}");
+    let (code, _, err) = link(
+        home,
+        "krepo",
+        &link_input("r2", "d3", 2, "d1", 2, "relates_to", "maybe", false),
+    );
+    assert_eq!(code, 0, "link r2: {err}");
+    let (code, _, err) = run_stdin(
+        home,
+        &[
+            "knowledge",
+            "unlink",
+            "--repo",
+            "krepo",
+            "--relation",
+            "r2",
+            "--input",
+            "-",
+        ],
+        br#"{"author":"a","reason":"mistake"}"#,
+    );
+    assert_eq!(code, 0, "unlink r2: {err}");
+    dir
+}
+
+#[test]
+fn port_jsonl_round_trip_is_byte_identical_and_preserves_audit_events() {
+    let h1 = home("port-jsonl-1");
+    port_seed(&h1);
+    let x = h1.join("x.jsonl");
+    let (code, out, err) = export(&h1, "krepo", &["--out", x.to_str().unwrap()]);
+    assert_eq!(code, 0, "export: {err}");
+    assert!(out.contains("\"operation\":\"export\""), "{out}");
+    let x_text = read_text(&x);
+    // Lifecycle audit metadata rides as structured events; the withdrawn
+    // draft fields never appear.
+    assert!(x_text.contains("\"event\":\"supersede\""), "{x_text}");
+    assert!(
+        x_text.contains("\"target_id\":\"d2\",\"target_revision\":1,\"reason\":\"replaced by d2\""),
+        "{x_text}"
+    );
+    assert!(x_text.contains("\"event\":\"confirm\""), "{x_text}");
+    assert!(
+        x_text.contains("\"event\":\"retract\",\"reason\":\"was wrong\""),
+        "{x_text}"
+    );
+    assert!(x_text.contains("\"reason\":\"mistake\""), "{x_text}");
+    assert!(
+        x_text.contains("\"relation_id\":\"supersedes:d2:1:d1:2\""),
+        "{x_text}"
+    );
+    assert!(x_text.contains("\"digest\":"), "{x_text}");
+    assert!(x_text.contains("\"value\":1.5"), "{x_text}");
+    assert!(x_text.contains("\"value\":42.0"), "{x_text}");
+    for withdrawn in [
+        "superseded_by",
+        "confirm_state",
+        "retracted_reason",
+        "retracted_author",
+        "retraction_author",
+        "retraction_reason",
+    ] {
+        assert!(
+            !x_text.contains(withdrawn),
+            "withdrawn field {withdrawn}: {x_text}"
+        );
+    }
+    assert_eq!(field_num(&x_text, "records"), 4, "{x_text}");
+    assert_eq!(field_num(&x_text, "relations"), 3, "{x_text}");
+
+    // Independent home, same repo name: byte-identical re-export.
+    let h2 = home("port-jsonl-2");
+    let dir2 = mkrepo(&h2, "krepo");
+    init(&h2, &dir2, "krepo");
+    let (code, out, err) = import(&h2, "krepo", &x);
+    assert_eq!(code, 0, "import: {err}");
+    assert!(out.contains("\"operation\":\"import\""), "{out}");
+    assert_eq!(
+        user_version(&h2, "krepo"),
+        2,
+        "imported events must migrate"
+    );
+    let y = h2.join("y.jsonl");
+    let (code, _, err) = export(&h2, "krepo", &["--out", y.to_str().unwrap()]);
+    assert_eq!(code, 0, "export 2: {err}");
+    assert_eq!(
+        read_text(&y),
+        x_text,
+        "export -> import -> export must be byte-identical"
+    );
+    // User-facing state semantics are rebuilt from the imported events.
+    let (code, out, err) = run(&h2, &["knowledge", "show", "--repo", "krepo", "--id", "d1"]);
+    assert_eq!(code, 0, "show d1: {err}");
+    assert!(
+        out.contains("\"superseded_by\":{\"id\":\"d2\",\"revision\":1}"),
+        "{out}"
+    );
+    let (code, out, err) = run(&h2, &["knowledge", "show", "--repo", "krepo", "--id", "d2"]);
+    assert_eq!(code, 0, "show d2: {err}");
+    assert!(out.contains("\"confirm_state\":\"confirmed\""), "{out}");
+    let (code, out, err) = run(
+        &h2,
+        &[
+            "knowledge",
+            "related",
+            "--repo",
+            "krepo",
+            "--id",
+            "d3",
+            "--direction",
+            "outbound",
+            "--include-retracted",
+        ],
+    );
+    assert_eq!(code, 0, "related: {err}");
+    assert!(out.contains("\"retracted\":true"), "{out}");
+
+    // Repeated identical import: no writes, no generation bump.
+    let g = field_num(&out, "generation");
+    let (code, out, err) = import(&h2, "krepo", &x);
+    assert_eq!(code, 0, "re-import: {err}");
+    assert!(out.contains("\"records_inserted\":0"), "{out}");
+    assert!(out.contains("\"relations_inserted\":0"), "{out}");
+    assert_eq!(
+        field_num(&out, "generation"),
+        g,
+        "no-op import must not bump generation"
+    );
+}
+
+#[test]
+fn port_markdown_round_trip_and_import_extraction_rules() {
+    let h1 = home("port-md-1");
+    port_seed(&h1);
+    let m1 = h1.join("m1.md");
+    let (code, _, err) = export(
+        &h1,
+        "krepo",
+        &["--format", "md", "--out", m1.to_str().unwrap()],
+    );
+    assert_eq!(code, 0, "md export: {err}");
+    let m1_text = read_text(&m1);
+    assert!(m1_text.contains("# Riltra knowledge export"), "{m1_text}");
+    assert!(m1_text.contains("```json"), "{m1_text}");
+    assert!(
+        m1_text.contains("## d1 — decision (current revision 2, superseded)"),
+        "{m1_text}"
+    );
+    let x1 = h1.join("x.jsonl");
+    assert_eq!(export(&h1, "krepo", &["--out", x1.to_str().unwrap()]).0, 0);
+
+    // Markdown import carries the same canonical content as the JSONL export.
+    let h2 = home("port-md-2");
+    let dir2 = mkrepo(&h2, "krepo");
+    init(&h2, &dir2, "krepo");
+    let (code, _, err) = import(&h2, "krepo", &m1);
+    assert_eq!(code, 0, "md import: {err}");
+    let x2 = h2.join("x2.jsonl");
+    assert_eq!(export(&h2, "krepo", &["--out", x2.to_str().unwrap()]).0, 0);
+    assert_eq!(read_text(&x2), read_text(&x1));
+    let m2 = h2.join("m2.md");
+    assert_eq!(
+        export(
+            &h2,
+            "krepo",
+            &["--format", "md", "--out", m2.to_str().unwrap()]
+        )
+        .0,
+        0
+    );
+    assert_eq!(read_text(&m2), m1_text, "markdown export is deterministic");
+
+    // Prose JSON-lookalikes outside fenced blocks are presentational only.
+    let poisoned = h2.join("poisoned.md");
+    let fake = "{\"type\":\"record\",\"id\":\"zzz\",\"kind\":\"decision\",\"head_revision\":1,\"status\":\"active\",\"revisions\":[]}";
+    write_text(
+        &poisoned,
+        &format!("=== notes ===\n{fake}\n=== payload ===\n{m1_text}"),
+    );
+    let h3 = home("port-md-3");
+    let dir3 = mkrepo(&h3, "krepo");
+    init(&h3, &dir3, "krepo");
+    let (code, _, err) = import(&h3, "krepo", &poisoned);
+    assert_eq!(code, 0, "prose must be ignored: {err}");
+    let x3 = h3.join("x3.jsonl");
+    assert_eq!(export(&h3, "krepo", &["--out", x3.to_str().unwrap()]).0, 0);
+    assert_eq!(read_text(&x3), read_text(&x1));
+
+    // Missing fences, invalid fenced JSON, and an unterminated fence: exit 2,
+    // store untouched.
+    let h4 = home("port-md-4");
+    let dir4 = mkrepo(&h4, "krepo");
+    init(&h4, &dir4, "krepo");
+    assert_eq!(create(&h4, "krepo", "d1", "First", "body").0, 0);
+    let before = std::fs::read(db_path(&h4, "krepo")).unwrap();
+    for (tag, text, needle) in [
+        ("nofence", "just prose\nno payload\n", "fenced"),
+        (
+            "badjson",
+            "```json\n{\"type\":\"meta\",\n```\n",
+            "invalid import payload",
+        ),
+        (
+            "unterminated",
+            "```json\n{\"type\":\"meta\"}\n",
+            "unterminated",
+        ),
+    ] {
+        let f = h4.join(format!("{tag}.md"));
+        write_text(&f, text);
+        let (code, _, err) = import(&h4, "krepo", &f);
+        assert_eq!(code, 2, "{tag} must be invalid: {err}");
+        assert!(err.contains(needle), "{tag}: {err}");
+    }
+    assert_eq!(
+        std::fs::read(db_path(&h4, "krepo")).unwrap(),
+        before,
+        "rejected markdown imports must not touch the store"
+    );
+}
+
+#[test]
+fn port_import_rejections_are_classified_and_atomic() {
+    let h = home("port-reject");
+    let dir = mkrepo(&h, "krepo");
+    init(&h, &dir, "krepo");
+    assert_eq!(create(&h, "krepo", "d1", "First", "body one").0, 0);
+    let before = std::fs::read(db_path(&h, "krepo")).unwrap();
+    let base = h.join("base.jsonl");
+    let (code, out, _) = export(&h, "krepo", &["--out", base.to_str().unwrap()]);
+    assert_eq!(code, 0);
+    let g = field_num(&out, "generation");
+
+    let d1_line = record_line("d1", "First", "body one");
+    let unsorted = format!("{}\n{}\n", record_line("d2", "Two", "b2"), d1_line);
+    let cases: Vec<(&str, String, i32, &str)> = vec![
+        (
+            "truncated",
+            format!("{}\n{{\"type\":\"record\",\"id\":\"d1\",\n", meta_line(0, 0)),
+            2,
+            "invalid import payload",
+        ),
+        (
+            "badversion",
+            "{\"type\":\"meta\",\"format\":\"riltra-knowledge\",\"version\":2,\"repo\":\"krepo\",\"records\":0,\"relations\":0}\n".to_string(),
+            2,
+            "invalid import payload",
+        ),
+        (
+            "dup",
+            format!("{}\n{d1_line}\n{d1_line}\n", meta_line(2, 0)),
+            3,
+            "corrupt import file",
+        ),
+        (
+            "counts",
+            format!("{}\n{d1_line}\n", meta_line(9, 0)),
+            3,
+            "corrupt import file",
+        ),
+        (
+            "unsorted",
+            format!("{}\n{unsorted}\n", meta_line(2, 0)),
+            3,
+            "corrupt import file",
+        ),
+        (
+            "divergent",
+            format!("{}\n{}\n", meta_line(1, 0), record_line("d1", "Changed", "body one")),
+            3,
+            "import conflict",
+        ),
+        (
+            "endpoint",
+            format!(
+                "{}\n{{\"type\":\"relation\",\"relation_id\":\"r9\",\"src_id\":\"nope\",\"src_revision\":1,\"dst_id\":\"d1\",\"dst_revision\":1,\"kind\":\"relates_to\",\"author\":\"a\",\"rationale\":\"why\",\"created_unix\":20,\"events\":[]}}\n",
+                meta_line(0, 1)
+            ),
+            2,
+            "invalid import payload",
+        ),
+        (
+            "badsupersede",
+            format!(
+                "{}\n{{\"type\":\"record\",\"id\":\"d9\",\"kind\":\"decision\",\"head_revision\":1,\"status\":\"active\",\"revisions\":[{{\"revision\":1,\"title\":\"Nine\",\"body\":\"b9\",\"status\":\"active\",\"author\":\"a\",\"created_unix\":10,\"evidence\":[],\"events\":[{{\"event\":\"supersede\",\"target_id\":\"nope\",\"target_revision\":1,\"reason\":\"r\",\"author\":\"a\",\"created_unix\":11}}]}}]}}\n",
+                meta_line(1, 0)
+            ),
+            2,
+            "invalid import payload",
+        ),
+    ];
+    for (tag, text, want_code, needle) in cases {
+        let f = h.join(format!("{tag}.jsonl"));
+        write_text(&f, &text);
+        let (code, _, err) = import(&h, "krepo", &f);
+        assert_eq!(code, want_code, "{tag}: {err}");
+        assert!(err.contains(needle), "{tag}: {err}");
+    }
+    // Oversized line and oversized file are refused before any parse or write.
+    let long = h.join("longline.jsonl");
+    write_text(
+        &long,
+        &format!(
+            "{}\n{}\n",
+            meta_line(0, 0),
+            "x".repeat(16 * 1024 * 1024 + 1)
+        ),
+    );
+    let (code, _, err) = import(&h, "krepo", &long);
+    assert_eq!(code, 2, "long line: {err}");
+    assert!(err.contains("line"), "long line: {err}");
+    let huge = h.join("huge.jsonl");
+    let fh = std::fs::File::create(&huge).unwrap();
+    fh.set_len(256 * 1024 * 1024 + 1).unwrap();
+    drop(fh);
+    let (code, _, err) = import(&h, "krepo", &huge);
+    assert_eq!(code, 2, "huge file: {err}");
+    assert!(err.contains("too large"), "huge file: {err}");
+
+    // Nothing above changed the store: same bytes, same generation, same head
+    // revision content.
+    assert_eq!(
+        std::fs::read(db_path(&h, "krepo")).unwrap(),
+        before,
+        "rejections must not mutate the store"
+    );
+    let after = h.join("after.jsonl");
+    let (_, out, err) = export(&h, "krepo", &["--out", after.to_str().unwrap()]);
+    assert!(err.is_empty(), "post-rejection export: {err}");
+    assert_eq!(field_num(&out, "generation"), g);
+    assert_eq!(read_text(&after), read_text(&base));
+}
+
+#[test]
+fn port_v1_store_export_import_keeps_foundation_compatibility() {
+    let h = home("port-v1");
+    let dir = mkrepo(&h, "krepo");
+    init(&h, &dir, "krepo");
+    // A store that does not exist yet exports an empty metadata-only payload
+    // and creates nothing.
+    let (code, out, err) = export(&h, "krepo", &[]);
+    assert_eq!(code, 0, "absent store export: {err}");
+    assert!(out.contains("\"records\":0,\"relations\":0"), "{out}");
+    assert!(
+        !db_path(&h, "krepo").exists(),
+        "export must not create the store"
+    );
+    // Malformed input never creates a store either.
+    let bad = h.join("bad.jsonl");
+    write_text(&bad, "not json\n");
+    let (code, _, err) = import(&h, "krepo", &bad);
+    assert_eq!(code, 2, "malformed import must be exit 2: {err}");
+    assert!(
+        !db_path(&h, "krepo").exists(),
+        "invalid payload must not create a store"
+    );
+    assert_eq!(create(&h, "krepo", "d1", "First", "body one").0, 0);
+    assert_eq!(user_version(&h, "krepo"), 1);
+    // Without `--out` the raw payload goes to stdout.
+    let (code, out, err) = export(&h, "krepo", &[]);
+    assert_eq!(code, 0, "export: {err}");
+    assert!(out.starts_with("{\"type\":\"meta\""), "{out}");
+    assert!(out.contains("\"events\":[]"), "{out}");
+    assert!(!out.contains("confirm_state"), "{out}");
+    assert_eq!(user_version(&h, "krepo"), 1, "export must not migrate");
+
+    // A Foundation-only payload round-trips without raising the schema.
+    let f = h.join("v1.jsonl");
+    write_text(&f, &out);
+    let (code, _, err) = import(&h, "krepo", &f);
+    assert_eq!(code, 0, "no-op import: {err}");
+    let (code, out2, err) = import(&h, "krepo", &f);
+    assert_eq!(code, 0, "re-import: {err}");
+    assert!(out2.contains("\"records_inserted\":0"), "{out2}");
+    assert_eq!(
+        user_version(&h, "krepo"),
+        1,
+        "a Foundation-only payload must not migrate the store"
+    );
+
+    // A payload that writes an event migrates exactly then.
+    let ev = h.join("ev.jsonl");
+    write_text(
+        &ev,
+        &format!(
+            "{}\n{{\"type\":\"record\",\"id\":\"d9\",\"kind\":\"decision\",\"head_revision\":1,\"status\":\"active\",\"revisions\":[{{\"revision\":1,\"title\":\"Nine\",\"body\":\"b9\",\"status\":\"active\",\"author\":\"a\",\"created_unix\":10,\"evidence\":[],\"events\":[{{\"event\":\"confirm\",\"author\":\"a\",\"created_unix\":11}}]}}]}}\n",
+            meta_line(1, 0)
+        ),
+    );
+    let (code, _, err) = import(&h, "krepo", &ev);
+    assert_eq!(code, 0, "event import: {err}");
+    assert_eq!(
+        user_version(&h, "krepo"),
+        2,
+        "an event-carrying payload migrates the store"
+    );
+}
+
+#[test]
+fn port_merge_appends_supersets_skips_subsets_and_rejects_divergence() {
+    let h1 = home("port-merge-1");
+    let dir1 = mkrepo(&h1, "krepo");
+    init(&h1, &dir1, "krepo");
+    assert_eq!(create(&h1, "krepo", "d1", "First", "body one").0, 0);
+    let sub = h1.join("sub.jsonl");
+    assert_eq!(export(&h1, "krepo", &["--out", sub.to_str().unwrap()]).0, 0);
+    assert_eq!(
+        update(
+            &h1,
+            "krepo",
+            "d1",
+            1,
+            "{\"title\":\"First v2\",\"body\":\"body two\",\"status\":\"active\",\"author\":\"a\",\"evidence\":[]}"
+        )
+        .0,
+        0
+    );
+    let full = h1.join("full.jsonl");
+    assert_eq!(
+        export(&h1, "krepo", &["--out", full.to_str().unwrap()]).0,
+        0
+    );
+
+    // Full import, then the identical-prefix subset: no change, no shrink.
+    let h2 = home("port-merge-2");
+    let dir2 = mkrepo(&h2, "krepo");
+    init(&h2, &dir2, "krepo");
+    let (code, _, err) = import(&h2, "krepo", &full);
+    assert_eq!(code, 0, "full: {err}");
+    let (code, out, err) = import(&h2, "krepo", &sub);
+    assert_eq!(code, 0, "subset: {err}");
+    assert!(out.contains("\"records_inserted\":0"), "{out}");
+    assert!(out.contains("\"records_unchanged\":1"), "{out}");
+    let y2 = h2.join("y2.jsonl");
+    assert_eq!(export(&h2, "krepo", &["--out", y2.to_str().unwrap()]).0, 0);
+    assert_eq!(
+        read_text(&y2),
+        read_text(&full),
+        "subset import must not shrink the store"
+    );
+
+    // Subset first, then the superset: the missing revision is appended.
+    let h3 = home("port-merge-3");
+    let dir3 = mkrepo(&h3, "krepo");
+    init(&h3, &dir3, "krepo");
+    assert_eq!(import(&h3, "krepo", &sub).0, 0);
+    let (code, out, err) = import(&h3, "krepo", &full);
+    assert_eq!(code, 0, "append: {err}");
+    assert!(out.contains("\"revisions_appended\":1"), "{out}");
+    let y3 = h3.join("y3.jsonl");
+    assert_eq!(export(&h3, "krepo", &["--out", y3.to_str().unwrap()]).0, 0);
+    assert_eq!(read_text(&y3), read_text(&full));
+
+    // Same revision, different content: conflict, atomic failure.
+    let div = h3.join("div.jsonl");
+    write_text(
+        &div,
+        &format!(
+            "{}\n{}\n",
+            meta_line(1, 0),
+            record_line("d1", "First v9", "body nine")
+        ),
+    );
+    let (code, _, err) = import(&h3, "krepo", &div);
+    assert_eq!(code, 3, "divergence: {err}");
+    assert!(err.contains("import conflict"), "{err}");
+    let y4 = h3.join("y4.jsonl");
+    assert_eq!(export(&h3, "krepo", &["--out", y4.to_str().unwrap()]).0, 0);
+    assert_eq!(
+        read_text(&y4),
+        read_text(&full),
+        "a conflicting import must not change the store"
+    );
+}
+
+#[test]
+fn port_relation_merge_rules() {
+    let h1 = home("port-rel-1");
+    let dir1 = mkrepo(&h1, "krepo");
+    init(&h1, &dir1, "krepo");
+    assert_eq!(create(&h1, "krepo", "d1", "First", "body one").0, 0);
+    assert_eq!(create(&h1, "krepo", "d2", "Second", "body two").0, 0);
+    assert_eq!(
+        link(
+            &h1,
+            "krepo",
+            &link_input("r1", "d2", 1, "d1", 1, "supports", "the reason", false)
+        )
+        .0,
+        0
+    );
+    assert_eq!(
+        link(
+            &h1,
+            "krepo",
+            &link_input("r2", "d2", 1, "d1", 1, "relates_to", "maybe", false)
+        )
+        .0,
+        0
+    );
+    assert_eq!(
+        run_stdin(
+            &h1,
+            &[
+                "knowledge",
+                "unlink",
+                "--repo",
+                "krepo",
+                "--relation",
+                "r2",
+                "--input",
+                "-",
+            ],
+            br#"{"author":"a","reason":"mistake"}"#,
+        )
+        .0,
+        0
+    );
+    let full = h1.join("rel.jsonl");
+    assert_eq!(
+        export(&h1, "krepo", &["--out", full.to_str().unwrap()]).0,
+        0
+    );
+    let base = read_text(&full);
+
+    let h2 = home("port-rel-2");
+    let dir2 = mkrepo(&h2, "krepo");
+    init(&h2, &dir2, "krepo");
+    assert_eq!(import(&h2, "krepo", &full).0, 0);
+
+    // Same relation id, different content: conflict.
+    let diff = h2.join("diff.jsonl");
+    write_text(
+        &diff,
+        &base.replace("\"rationale\":\"maybe\"", "\"rationale\":\"other\""),
+    );
+    let (code, _, err) = import(&h2, "krepo", &diff);
+    assert_eq!(code, 3, "{err}");
+    assert!(err.contains("import conflict"), "{err}");
+
+    // New id, identical live tuple: conflict (one live assertion per tuple).
+    let dup = h2.join("dup.jsonl");
+    write_text(
+        &dup,
+        &base.replace("\"relation_id\":\"r1\"", "\"relation_id\":\"r9\""),
+    );
+    let (code, _, err) = import(&h2, "krepo", &dup);
+    assert_eq!(code, 3, "{err}");
+    assert!(err.contains("import conflict"), "{err}");
+
+    // A retracted store tuple does not block a new live relation id.
+    let relive = h2.join("relive.jsonl");
+    write_text(
+        &relive,
+        &base.replace("\"relation_id\":\"r2\"", "\"relation_id\":\"r8\""),
+    );
+    let (code, _, err) = import(&h2, "krepo", &relive);
+    assert_eq!(code, 0, "retracted tuple must not block: {err}");
+    let y = h2.join("y.jsonl");
+    assert_eq!(export(&h2, "krepo", &["--out", y.to_str().unwrap()]).0, 0);
+    assert!(
+        read_text(&y).contains("\"relation_id\":\"r8\""),
+        "r8 must be stored"
+    );
+}

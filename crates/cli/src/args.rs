@@ -161,6 +161,15 @@ pub enum KnowledgeOp {
         offset: Option<String>,
         generation: Option<String>,
     },
+    Export {
+        repo: String,
+        format: Option<String>,
+        out: Option<String>,
+    },
+    Import {
+        repo: String,
+        file: String,
+    },
 }
 
 /// Parse full argv (including argv[0]-style first token). `Err` is the usage
@@ -653,6 +662,21 @@ fn parse_knowledge_op(sub: &str, args: &[String]) -> Result<KnowledgeOp, String>
                 limit: v.get("--limit").cloned(),
                 offset: v.get("--offset").cloned(),
                 generation: v.get("--generation").cloned(),
+            })
+        }
+        "export" => {
+            let (v, _) = knowledge_flags(args, 2, &["--repo", "--format", "--out"], &[])?;
+            Ok(KnowledgeOp::Export {
+                repo: knowledge_value(&v, "--repo")?,
+                format: v.get("--format").cloned(),
+                out: v.get("--out").cloned(),
+            })
+        }
+        "import" => {
+            let (v, _) = knowledge_flags(args, 2, &["--repo", "--file"], &[])?;
+            Ok(KnowledgeOp::Import {
+                repo: knowledge_value(&v, "--repo")?,
+                file: knowledge_value(&v, "--file")?,
             })
         }
         _ => Err(crate::usage()),

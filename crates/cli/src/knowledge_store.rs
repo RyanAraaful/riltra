@@ -2299,6 +2299,1855 @@ pub fn relation_by_id(conn: &Connection, relation_id: &str) -> Result<RelationVi
     .ok_or_else(|| format!("unknown relation id: '{relation_id}'"))
 }
 
+// --- G-PORT: canonical JSONL/Markdown port ---------------------------------
+//
+// Canonical export is deterministic from the store contents alone: lifecycle
+// audit metadata rides as structured event objects mirroring the append-only
+// tables, and no derived field, no clock reading, and no store identity is
+// emitted. Import is a two-phase operation: a pure parse pass that never
+// touches a store, then one `Immediate` transaction that re-validates
+// referential integrity across the file and the store and merges under an
+// explicit policy. Malformed, oversized, or unparseable input therefore never
+// reaches a store; a payload that parses but fails in-transaction validation
+// (unresolved endpoints, merge conflicts) rolls back cleanly, though opening
+// an absent store for that attempt may have created it empty first.
+
+use crate::knowledge::JVal;
+
+/// Export formats: raw canonical JSONL, or a Markdown wrapper carrying the
+/// same payload in one fenced block plus presentational prose.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ExportFormat {
+    Jsonl,
+    Markdown,
+}
+
+/// A rendered export: the text plus payload counts for envelopes and tests.
+#[derive(Debug, PartialEq)]
+pub struct ExportDocument {
+    pub text: String,
+    pub records: usize,
+    pub relations: usize,
+}
+
+/// Import report for the CLI envelope.
+#[derive(Debug, PartialEq)]
+pub struct ImportReport {
+    pub records_inserted: usize,
+    pub revisions_appended: usize,
+    pub relations_inserted: usize,
+    pub records_unchanged: usize,
+    pub relations_unchanged: usize,
+    pub generation: u64,
+}
+
+/// Resource bounds enforced before any write. The file bound is also applied
+/// by the CLI before reading.
+pub const MAX_IMPORT_FILE_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_IMPORT_LINE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_IMPORT_RECORD_LINES: usize = 1_000_000;
+const MAX_IMPORT_RELATION_LINES: usize = 2_000_000;
+const MAX_EVIDENCE_DIGEST_BYTES: usize = 4096;
+
+type EventRow = (
+    String,
+    Option<String>,
+    Option<i64>,
+    Option<String>,
+    String,
+    i64,
+);
+type RelationRow = (String, i64, String, i64, String, String, String, i64);
+
+/// Field-for-field port of one lifecycle audit event: a `record_lifecycle`
+/// row, a `relation_lifecycle` row, or a `retractions` row.
+#[derive(Debug, Clone, PartialEq)]
+struct PortEvent {
+    event: String,
+    target_id: Option<String>,
+    target_revision: Option<u64>,
+    reason: Option<String>,
+    author: String,
+    created_unix: i64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct PortEvidence {
+    path: String,
+    byte_start: Option<i64>,
+    byte_end: Option<i64>,
+    digest: String,
+    git_head: Option<String>,
+    git_branch: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct PortMetric {
+    name: String,
+    value: f64,
+    unit: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct PortMeasurement {
+    method: String,
+    environment: String,
+    sample_count: u64,
+    metrics: Vec<PortMetric>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct PortRevision {
+    revision: u64,
+    title: String,
+    body: String,
+    status: String,
+    author: String,
+    created_unix: i64,
+    evidence: Vec<PortEvidence>,
+    measurement: Option<PortMeasurement>,
+    events: Vec<PortEvent>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct PortRecord {
+    id: String,
+    kind: String,
+    head_revision: u64,
+    status: String,
+    revisions: Vec<PortRevision>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct PortRelation {
+    relation_id: String,
+    src_id: String,
+    src_revision: u64,
+    dst_id: String,
+    dst_revision: u64,
+    kind: String,
+    author: String,
+    rationale: String,
+    created_unix: i64,
+    events: Vec<PortEvent>,
+}
+
+/// One presentational record block in the Markdown wrapper.
+struct PortProse {
+    id: String,
+    kind: String,
+    head_revision: u64,
+    status: String,
+    title: String,
+    body: String,
+}
+
+/// A parsed, fully validated import payload. Fields stay private: callers
+/// only hand it back to [`import_payload`].
+#[derive(Debug, PartialEq)]
+pub struct ImportPayload {
+    records: Vec<PortRecord>,
+    relations: Vec<PortRelation>,
+    needs_lifecycle: bool,
+}
+
+fn invalid_msg(msg: impl std::fmt::Display) -> String {
+    format!("invalid import payload: {msg}")
+}
+
+fn corrupt_msg(msg: impl std::fmt::Display) -> String {
+    format!("corrupt import file: {msg}")
+}
+
+fn conflict_msg(msg: impl std::fmt::Display) -> String {
+    format!("import conflict: {msg}")
+}
+
+// --- emission ---------------------------------------------------------------
+
+fn event_json(e: &PortEvent) -> String {
+    let mut s = format!("{{\"event\":\"{}\"", crate::json::escape(&e.event));
+    if let Some(t) = &e.target_id {
+        s.push_str(&format!(",\"target_id\":\"{}\"", crate::json::escape(t)));
+    }
+    if let Some(r) = e.target_revision {
+        s.push_str(&format!(",\"target_revision\":{r}"));
+    }
+    if let Some(r) = &e.reason {
+        s.push_str(&format!(",\"reason\":\"{}\"", crate::json::escape(r)));
+    }
+    s.push_str(&format!(
+        ",\"author\":\"{}\",\"created_unix\":{}}}",
+        crate::json::escape(&e.author),
+        e.created_unix
+    ));
+    s
+}
+
+fn evidence_json(e: &PortEvidence) -> String {
+    let mut s = format!("{{\"path\":\"{}\"", crate::json::escape(&e.path));
+    if let Some(b) = e.byte_start {
+        s.push_str(&format!(",\"byte_start\":{b}"));
+    }
+    if let Some(b) = e.byte_end {
+        s.push_str(&format!(",\"byte_end\":{b}"));
+    }
+    s.push_str(&format!(
+        ",\"digest\":\"{}\"",
+        crate::json::escape(&e.digest)
+    ));
+    if let Some(g) = &e.git_head {
+        s.push_str(&format!(",\"git_head\":\"{}\"", crate::json::escape(g)));
+    }
+    if let Some(g) = &e.git_branch {
+        s.push_str(&format!(",\"git_branch\":\"{}\"", crate::json::escape(g)));
+    }
+    s.push('}');
+    s
+}
+
+/// Shortest round-trip float text (serde_json/ryu). Store reads reject
+/// non-finite values before emission can see them.
+fn metric_json(m: &PortMetric) -> String {
+    let value = serde_json::to_string(&m.value).unwrap_or_else(|_| "null".to_string());
+    format!(
+        "{{\"name\":\"{}\",\"value\":{value},\"unit\":\"{}\"}}",
+        crate::json::escape(&m.name),
+        crate::json::escape(&m.unit)
+    )
+}
+
+fn measurement_json(m: &PortMeasurement) -> String {
+    let metrics: Vec<String> = m.metrics.iter().map(metric_json).collect();
+    format!(
+        "{{\"method\":\"{}\",\"environment\":\"{}\",\"sample_count\":{},\"metrics\":[{}]}}",
+        crate::json::escape(&m.method),
+        crate::json::escape(&m.environment),
+        m.sample_count,
+        metrics.join(",")
+    )
+}
+
+fn revision_json(r: &PortRevision) -> String {
+    let evidence: Vec<String> = r.evidence.iter().map(evidence_json).collect();
+    let events: Vec<String> = r.events.iter().map(event_json).collect();
+    let mut s = format!(
+        "{{\"revision\":{},\"title\":\"{}\",\"body\":\"{}\",\"status\":\"{}\",\"author\":\"{}\",\"created_unix\":{},\"evidence\":[{}]",
+        r.revision,
+        crate::json::escape(&r.title),
+        crate::json::escape(&r.body),
+        crate::json::escape(&r.status),
+        crate::json::escape(&r.author),
+        r.created_unix,
+        evidence.join(",")
+    );
+    if let Some(m) = &r.measurement {
+        s.push_str(&format!(",\"measurement\":{}", measurement_json(m)));
+    }
+    s.push_str(&format!(",\"events\":[{}]}}", events.join(",")));
+    s
+}
+
+fn record_json_line(rec: &PortRecord) -> String {
+    let revisions: Vec<String> = rec.revisions.iter().map(revision_json).collect();
+    format!(
+        "{{\"type\":\"record\",\"id\":\"{}\",\"kind\":\"{}\",\"head_revision\":{},\"status\":\"{}\",\"revisions\":[{}]}}",
+        crate::json::escape(&rec.id),
+        crate::json::escape(&rec.kind),
+        rec.head_revision,
+        crate::json::escape(&rec.status),
+        revisions.join(",")
+    )
+}
+
+fn relation_json_line(rel: &PortRelation) -> String {
+    let events: Vec<String> = rel.events.iter().map(event_json).collect();
+    format!(
+        "{{\"type\":\"relation\",\"relation_id\":\"{}\",\"src_id\":\"{}\",\"src_revision\":{},\"dst_id\":\"{}\",\"dst_revision\":{},\"kind\":\"{}\",\"author\":\"{}\",\"rationale\":\"{}\",\"created_unix\":{},\"events\":[{}]}}",
+        crate::json::escape(&rel.relation_id),
+        crate::json::escape(&rel.src_id),
+        rel.src_revision,
+        crate::json::escape(&rel.dst_id),
+        rel.dst_revision,
+        crate::json::escape(&rel.kind),
+        crate::json::escape(&rel.author),
+        crate::json::escape(&rel.rationale),
+        rel.created_unix,
+        events.join(",")
+    )
+}
+
+fn meta_json_line(repo: &str, records: usize, relations: usize) -> String {
+    format!(
+        "{{\"type\":\"meta\",\"format\":\"riltra-knowledge\",\"version\":1,\"repo\":\"{}\",\"records\":{records},\"relations\":{relations}}}",
+        crate::json::escape(repo)
+    )
+}
+
+fn flush_record(
+    current: &mut Option<PortRecord>,
+    record_lines: &mut Vec<String>,
+    prose: &mut Vec<PortProse>,
+) {
+    if let Some(rec) = current.take() {
+        record_lines.push(record_json_line(&rec));
+        if let Some(last) = rec.revisions.last() {
+            prose.push(PortProse {
+                id: rec.id,
+                kind: rec.kind,
+                head_revision: rec.head_revision,
+                status: rec.status,
+                title: last.title.clone(),
+                body: last.body.clone(),
+            });
+        }
+    }
+}
+
+// --- store readers ----------------------------------------------------------
+
+fn store_evidence(conn: &Connection, id: &str, revision: i64) -> Result<Vec<PortEvidence>, String> {
+    let items = read_evidence(conn, id, revision)?;
+    Ok(items
+        .into_iter()
+        .map(|e| PortEvidence {
+            path: e.path,
+            byte_start: e.byte_start,
+            byte_end: e.byte_end,
+            digest: e.digest,
+            git_head: e.git_head,
+            git_branch: e.git_branch,
+        })
+        .collect())
+}
+
+fn store_measurement(
+    conn: &Connection,
+    id: &str,
+    revision: i64,
+) -> Result<Option<PortMeasurement>, String> {
+    let Some(m) = read_measurement(conn, id, revision)? else {
+        return Ok(None);
+    };
+    let mut metrics = Vec::with_capacity(m.metrics.len());
+    for metric in m.metrics {
+        if !metric.value.is_finite() {
+            return Err(format!(
+                "corrupt knowledge store: metric value of '{id}' revision {revision} is not finite"
+            ));
+        }
+        metrics.push(PortMetric {
+            name: metric.name,
+            value: metric.value,
+            unit: metric.unit,
+        });
+    }
+    Ok(Some(PortMeasurement {
+        method: m.method,
+        environment: m.environment,
+        sample_count: m.sample_count,
+        metrics,
+    }))
+}
+
+fn store_record_events(
+    conn: &Connection,
+    id: &str,
+    revision: i64,
+    has_lifecycle: bool,
+) -> Result<Vec<PortEvent>, String> {
+    if !has_lifecycle {
+        return Ok(Vec::new());
+    }
+    let row: Option<EventRow> = conn
+        .query_row(
+            "SELECT event, target_id, target_revision, reason, author, created_unix
+             FROM record_lifecycle WHERE id = ?1 AND revision = ?2",
+            rusqlite::params![id, revision],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|e| format!("cannot read lifecycle event: {e}"))?;
+    let Some((event, target_id, target_revision, reason, author, created_unix)) = row else {
+        return Ok(Vec::new());
+    };
+    let target_revision = match target_revision {
+        None => None,
+        Some(v) => Some(
+            u64::try_from(v)
+                .map_err(|_| "corrupt knowledge store: negative target revision".to_string())?,
+        ),
+    };
+    if !matches!(event.as_str(), "supersede" | "retract" | "confirm") {
+        return Err(format!(
+            "corrupt knowledge store: unknown record lifecycle event '{event}'"
+        ));
+    }
+    Ok(vec![PortEvent {
+        event,
+        target_id,
+        target_revision,
+        reason,
+        author,
+        created_unix,
+    }])
+}
+
+fn store_relation_events(
+    conn: &Connection,
+    relation_id: &str,
+    has_lifecycle: bool,
+) -> Result<Vec<PortEvent>, String> {
+    let mut events = Vec::new();
+    if has_lifecycle {
+        let confirm: Option<(String, String, i64)> = conn
+            .query_row(
+                "SELECT event, author, created_unix FROM relation_lifecycle WHERE relation_id = ?1",
+                [relation_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()
+            .map_err(|e| format!("cannot read relation lifecycle: {e}"))?;
+        if let Some((event, author, created_unix)) = confirm {
+            if event != "confirm" {
+                return Err(format!(
+                    "corrupt knowledge store: unknown relation lifecycle event '{event}'"
+                ));
+            }
+            events.push(PortEvent {
+                event,
+                target_id: None,
+                target_revision: None,
+                reason: None,
+                author,
+                created_unix,
+            });
+        }
+    }
+    let retract: Option<(String, String, i64)> = conn
+        .query_row(
+            "SELECT author, reason, created_unix FROM retractions WHERE relation_id = ?1",
+            [relation_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()
+        .map_err(|e| format!("cannot read retraction: {e}"))?;
+    if let Some((author, reason, created_unix)) = retract {
+        events.push(PortEvent {
+            event: "retract".to_string(),
+            target_id: None,
+            target_revision: None,
+            reason: Some(reason),
+            author,
+            created_unix,
+        });
+    }
+    events.sort_by(|a, b| {
+        (a.created_unix, a.event.as_str()).cmp(&(b.created_unix, b.event.as_str()))
+    });
+    Ok(events)
+}
+
+fn store_revision(
+    conn: &Connection,
+    id: &str,
+    revision: u64,
+    has_lifecycle: bool,
+) -> Result<PortRevision, String> {
+    let rev_i64 = i64::try_from(revision)
+        .map_err(|_| "corrupt knowledge store: revision out of range".to_string())?;
+    let row: Option<(String, String, String, String, i64)> = conn
+        .query_row(
+            "SELECT title, body, status, author, created_unix FROM records
+             WHERE id = ?1 AND revision = ?2",
+            rusqlite::params![id, rev_i64],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .optional()
+        .map_err(|e| format!("cannot read record revision: {e}"))?;
+    let Some((title, body, status, author, created_unix)) = row else {
+        return Err(format!(
+            "corrupt knowledge store: record '{id}' has no revision {revision}"
+        ));
+    };
+    Ok(PortRevision {
+        revision,
+        title,
+        body,
+        status,
+        author,
+        created_unix,
+        evidence: store_evidence(conn, id, rev_i64)?,
+        measurement: store_measurement(conn, id, rev_i64)?,
+        events: store_record_events(conn, id, rev_i64, has_lifecycle)?,
+    })
+}
+
+fn store_relation(
+    conn: &Connection,
+    relation_id: &str,
+    has_lifecycle: bool,
+) -> Result<Option<PortRelation>, String> {
+    let row: Option<RelationRow> = conn
+        .query_row(
+            "SELECT src_id, src_revision, dst_id, dst_revision, kind, author, rationale, created_unix
+             FROM relations WHERE relation_id = ?1",
+            [relation_id],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                    r.get(7)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|e| format!("cannot read relation: {e}"))?;
+    let Some((src_id, src_rev, dst_id, dst_rev, kind, author, rationale, created_unix)) = row
+    else {
+        return Ok(None);
+    };
+    let src_revision = u64::try_from(src_rev)
+        .map_err(|_| "corrupt knowledge store: relation revision out of range".to_string())?;
+    let dst_revision = u64::try_from(dst_rev)
+        .map_err(|_| "corrupt knowledge store: relation revision out of range".to_string())?;
+    Ok(Some(PortRelation {
+        relation_id: relation_id.to_string(),
+        src_id,
+        src_revision,
+        dst_id,
+        dst_revision,
+        kind,
+        author,
+        rationale,
+        created_unix,
+        events: store_relation_events(conn, relation_id, has_lifecycle)?,
+    }))
+}
+
+// --- export -----------------------------------------------------------------
+
+/// Render the canonical export of one store. Read-only and deterministic from
+/// the store contents alone; record lines sort by id and revision, relation
+/// lines by endpoint tuple, kind, then relation id (all binary collation).
+pub fn export_document(conn: &Connection, format: ExportFormat) -> Result<ExportDocument, String> {
+    let repo = meta_value(conn, "repo_name")?;
+    let has_lifecycle = lifecycle_present(conn)?;
+
+    let mut record_lines: Vec<String> = Vec::new();
+    let mut prose: Vec<PortProse> = Vec::new();
+    {
+        let mut stmt = conn
+            .prepare("SELECT id, revision, kind FROM records ORDER BY id COLLATE BINARY, revision")
+            .map_err(|e| format!("cannot read records: {e}"))?;
+        let mut rows = stmt
+            .query([])
+            .map_err(|e| format!("cannot read records: {e}"))?;
+        let mut current: Option<PortRecord> = None;
+        while let Some(row) = rows
+            .next()
+            .map_err(|e| format!("cannot read records: {e}"))?
+        {
+            let id: String = row
+                .get(0)
+                .map_err(|e| format!("cannot read records: {e}"))?;
+            let revision: i64 = row
+                .get(1)
+                .map_err(|e| format!("cannot read records: {e}"))?;
+            let kind: String = row
+                .get(2)
+                .map_err(|e| format!("cannot read records: {e}"))?;
+            let revision = u64::try_from(revision)
+                .map_err(|_| "corrupt knowledge store: negative revision".to_string())?;
+            let rev = store_revision(conn, &id, revision, has_lifecycle)?;
+            let flush = match &current {
+                Some(rec) => rec.id != id,
+                None => false,
+            };
+            if flush {
+                flush_record(&mut current, &mut record_lines, &mut prose);
+            }
+            match &mut current {
+                Some(rec) => {
+                    rec.head_revision = revision;
+                    rec.status = rev.status.clone();
+                    rec.revisions.push(rev);
+                }
+                None => {
+                    current = Some(PortRecord {
+                        id,
+                        kind,
+                        head_revision: revision,
+                        status: rev.status.clone(),
+                        revisions: vec![rev],
+                    });
+                }
+            }
+        }
+        flush_record(&mut current, &mut record_lines, &mut prose);
+    }
+
+    let mut relation_lines: Vec<String> = Vec::new();
+    {
+        let mut stmt = conn
+            .prepare(
+                "SELECT relation_id, src_id, src_revision, dst_id, dst_revision, kind,
+                        author, rationale, created_unix
+                 FROM relations
+                 ORDER BY src_id COLLATE BINARY, src_revision, dst_id COLLATE BINARY,
+                          dst_revision, kind COLLATE BINARY, relation_id COLLATE BINARY",
+            )
+            .map_err(|e| format!("cannot read relations: {e}"))?;
+        let mut rows = stmt
+            .query([])
+            .map_err(|e| format!("cannot read relations: {e}"))?;
+        while let Some(row) = rows
+            .next()
+            .map_err(|e| format!("cannot read relations: {e}"))?
+        {
+            let relation_id: String = row
+                .get(0)
+                .map_err(|e| format!("cannot read relations: {e}"))?;
+            let src_id: String = row
+                .get(1)
+                .map_err(|e| format!("cannot read relations: {e}"))?;
+            let src_revision: i64 = row
+                .get(2)
+                .map_err(|e| format!("cannot read relations: {e}"))?;
+            let dst_id: String = row
+                .get(3)
+                .map_err(|e| format!("cannot read relations: {e}"))?;
+            let dst_revision: i64 = row
+                .get(4)
+                .map_err(|e| format!("cannot read relations: {e}"))?;
+            let kind: String = row
+                .get(5)
+                .map_err(|e| format!("cannot read relations: {e}"))?;
+            let author: String = row
+                .get(6)
+                .map_err(|e| format!("cannot read relations: {e}"))?;
+            let rationale: String = row
+                .get(7)
+                .map_err(|e| format!("cannot read relations: {e}"))?;
+            let created_unix: i64 = row
+                .get(8)
+                .map_err(|e| format!("cannot read relations: {e}"))?;
+            let rel = PortRelation {
+                src_revision: u64::try_from(src_revision)
+                    .map_err(|_| "corrupt knowledge store: relation revision out of range")?,
+                dst_revision: u64::try_from(dst_revision)
+                    .map_err(|_| "corrupt knowledge store: relation revision out of range")?,
+                events: store_relation_events(conn, &relation_id, has_lifecycle)?,
+                relation_id,
+                src_id,
+                dst_id,
+                kind,
+                author,
+                rationale,
+                created_unix,
+            };
+            relation_lines.push(relation_json_line(&rel));
+        }
+    }
+
+    let records = record_lines.len();
+    let relations = relation_lines.len();
+    let mut payload = meta_json_line(&repo, records, relations);
+    payload.push('\n');
+    for line in &record_lines {
+        payload.push_str(line);
+        payload.push('\n');
+    }
+    for line in &relation_lines {
+        payload.push_str(line);
+        payload.push('\n');
+    }
+    let text = match format {
+        ExportFormat::Jsonl => payload,
+        ExportFormat::Markdown => markdown_wrapper(&repo, &payload, &prose),
+    };
+    Ok(ExportDocument {
+        text,
+        records,
+        relations,
+    })
+}
+
+/// The export of a repository whose store does not exist yet: a metadata-only
+/// payload with zero counts. Reads answer empty and create nothing.
+pub fn empty_export(repo: &str, format: ExportFormat) -> ExportDocument {
+    let payload = format!("{}\n", meta_json_line(repo, 0, 0));
+    let text = match format {
+        ExportFormat::Jsonl => payload,
+        ExportFormat::Markdown => markdown_wrapper(repo, &payload, &[]),
+    };
+    ExportDocument {
+        text,
+        records: 0,
+        relations: 0,
+    }
+}
+
+/// A prose line that would open or close a fence gets its first backtick
+/// backslash-escaped, so imported prose can never alter what extraction sees.
+fn escape_prose_line(line: &str) -> String {
+    match line.find("```") {
+        Some(idx) => format!("{}\\{}", &line[..idx], &line[idx..]),
+        None => line.to_string(),
+    }
+}
+
+fn markdown_wrapper(repo: &str, payload: &str, prose: &[PortProse]) -> String {
+    let mut md = format!(
+        "# Riltra knowledge export — {repo}\n\n\
+         Lossless canonical payload in the fenced block below; the prose is\n\
+         presentational and import reads fenced `json` blocks only.\n\n\
+         ```json\n{payload}```\n"
+    );
+    for p in prose {
+        md.push_str(&format!(
+            "\n## {} — {} (current revision {}, {})\n\n",
+            p.id, p.kind, p.head_revision, p.status
+        ));
+        let block = format!("{}\n\n{}", p.title, p.body);
+        for line in block.lines() {
+            md.push_str(&escape_prose_line(line));
+            md.push('\n');
+        }
+    }
+    md
+}
+
+/// Normalize an import file to its canonical JSONL payload. A file whose
+/// first non-empty line starts with `{` passes through unchanged; anything
+/// else is treated as a Markdown wrapper and every fenced ```json block is
+/// concatenated in order.
+pub fn extract_import_payload(text: &str) -> Result<String, String> {
+    // A UTF-8 BOM (common from Windows editors) is stripped before format
+    // detection so a BOM-prefixed JSONL file is not mistaken for Markdown
+    // and does not fail the JSON parser.
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let mut saw_content = false;
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        saw_content = true;
+        if line.trim_start().starts_with('{') {
+            return Ok(text.to_string());
+        }
+        break;
+    }
+    if !saw_content {
+        return Err(invalid_msg("file is empty"));
+    }
+    let mut payload = String::new();
+    let mut blocks = 0usize;
+    let mut inside = false;
+    for line in text.lines() {
+        let trimmed = line.trim_end();
+        if inside {
+            if trimmed == "```" {
+                inside = false;
+            } else {
+                payload.push_str(line);
+                payload.push('\n');
+            }
+        } else if trimmed == "```json" {
+            inside = true;
+            blocks += 1;
+        }
+    }
+    if inside {
+        return Err(invalid_msg("unterminated fenced payload block"));
+    }
+    if blocks == 0 {
+        return Err(invalid_msg("no fenced payload blocks found"));
+    }
+    Ok(payload)
+}
+
+// --- parsing ----------------------------------------------------------------
+
+fn port_uint(value: &JVal, path: &str) -> Result<u64, String> {
+    match value {
+        JVal::Int(i) if *i >= 0 => Ok(*i as u64),
+        JVal::UInt(u) if *u <= i64::MAX as u64 => Ok(*u),
+        _ => Err(invalid_msg(format!(
+            "field `{path}` must be a non-negative integer in range"
+        ))),
+    }
+}
+
+fn port_positive(value: &JVal, path: &str) -> Result<u64, String> {
+    let n = port_uint(value, path)?;
+    if n == 0 {
+        return Err(invalid_msg(format!("field `{path}` must be at least 1")));
+    }
+    Ok(n)
+}
+
+fn req_val<'a>(obj: &'a [(String, JVal)], key: &str, path: &str) -> Result<&'a JVal, String> {
+    match crate::knowledge::find(obj, key) {
+        Some(v) => Ok(v),
+        None => Err(invalid_msg(format!(
+            "missing required field `{path}.{key}`"
+        ))),
+    }
+}
+
+fn port_text(text: &str, path: &str, max: usize) -> Result<(), String> {
+    if text.is_empty() {
+        return Err(invalid_msg(format!("field `{path}` must be non-empty")));
+    }
+    if text.len() > max {
+        return Err(invalid_msg(format!(
+            "field `{path}` is {} bytes, at most {max} allowed",
+            text.len()
+        )));
+    }
+    Ok(())
+}
+
+fn opt_str_field(obj: &[(String, JVal)], key: &str, path: &str) -> Result<Option<String>, String> {
+    match crate::knowledge::find(obj, key) {
+        None | Some(JVal::Null) => Ok(None),
+        Some(JVal::Str(s)) => Ok(Some(s.clone())),
+        Some(_) => Err(invalid_msg(format!(
+            "type mismatch: field `{path}.{key}` must be a string"
+        ))),
+    }
+}
+
+fn parse_port_events(value: &JVal, path: &str, max: usize) -> Result<Vec<PortEvent>, String> {
+    let items = match value {
+        JVal::Arr(items) => items,
+        _ => return Err(invalid_msg(format!("field `{path}` must be an array"))),
+    };
+    if items.len() > max {
+        return Err(invalid_msg(format!(
+            "field `{path}` carries {} events, at most {max} allowed",
+            items.len()
+        )));
+    }
+    let mut events = Vec::with_capacity(items.len());
+    for (i, item) in items.iter().enumerate() {
+        let p = format!("{path}[{i}]");
+        let obj = crate::knowledge::as_obj(item, &p).map_err(invalid_msg)?;
+        crate::knowledge::check_known(
+            obj,
+            &[
+                "event",
+                "target_id",
+                "target_revision",
+                "reason",
+                "author",
+                "created_unix",
+            ],
+            &p,
+        )
+        .map_err(invalid_msg)?;
+        let event = crate::knowledge::req_str(obj, "event", &p).map_err(invalid_msg)?;
+        if !matches!(event.as_str(), "supersede" | "retract" | "confirm") {
+            return Err(invalid_msg(format!(
+                "field `{p}.event` must be supersede, retract or confirm"
+            )));
+        }
+        let author = crate::knowledge::req_str(obj, "author", &p).map_err(invalid_msg)?;
+        check_actor(&author, &format!("{p}.author")).map_err(invalid_msg)?;
+        let created_unix = crate::knowledge::req_int_non_negative(
+            req_val(obj, "created_unix", &p)?,
+            &format!("{p}.created_unix"),
+        )
+        .map_err(invalid_msg)?;
+        let target_id = match crate::knowledge::find(obj, "target_id") {
+            Some(_) => Some(crate::knowledge::req_str(obj, "target_id", &p).map_err(invalid_msg)?),
+            None => None,
+        };
+        let target_revision = match crate::knowledge::find(obj, "target_revision") {
+            Some(v) => Some(port_positive(v, &format!("{p}.target_revision"))?),
+            None => None,
+        };
+        let reason = match crate::knowledge::find(obj, "reason") {
+            Some(_) => Some(crate::knowledge::req_str(obj, "reason", &p).map_err(invalid_msg)?),
+            None => None,
+        };
+        let mut out = PortEvent {
+            event: event.clone(),
+            target_id: None,
+            target_revision: None,
+            reason: None,
+            author,
+            created_unix,
+        };
+        if event == "supersede" {
+            let target = target_id
+                .ok_or_else(|| invalid_msg(format!("missing required field `{p}.target_id`")))?;
+            crate::knowledge::validate_id(&target).map_err(invalid_msg)?;
+            out.target_id = Some(target);
+            out.target_revision = Some(target_revision.ok_or_else(|| {
+                invalid_msg(format!("missing required field `{p}.target_revision`"))
+            })?);
+            let reason = reason
+                .ok_or_else(|| invalid_msg(format!("missing required field `{p}.reason`")))?;
+            port_text(
+                &reason,
+                &format!("{p}.reason"),
+                crate::knowledge::MAX_RATIONALE_BYTES,
+            )?;
+            out.reason = Some(reason);
+        } else {
+            if target_id.is_some() || target_revision.is_some() {
+                return Err(invalid_msg(format!(
+                    "field `{p}` may not carry target fields on a `{event}` event"
+                )));
+            }
+            if event == "retract" {
+                let reason = reason
+                    .ok_or_else(|| invalid_msg(format!("missing required field `{p}.reason`")))?;
+                port_text(
+                    &reason,
+                    &format!("{p}.reason"),
+                    crate::knowledge::MAX_RATIONALE_BYTES,
+                )?;
+                out.reason = Some(reason);
+            } else if reason.is_some() {
+                return Err(invalid_msg(format!(
+                    "field `{p}` may not carry a reason on a confirm event"
+                )));
+            }
+        }
+        events.push(out);
+    }
+    Ok(events)
+}
+
+fn check_relation_events(events: &[PortEvent]) -> Result<(), String> {
+    for e in events {
+        if e.event == "supersede" {
+            return Err(invalid_msg("a relation event must be confirm or retract"));
+        }
+    }
+    if let [a, b] = events {
+        if a.event == b.event {
+            return Err(invalid_msg(
+                "a relation carries at most one confirm and one retract event",
+            ));
+        }
+        if (a.created_unix, a.event.as_str()) >= (b.created_unix, b.event.as_str()) {
+            return Err(corrupt_msg("relation events are not in canonical order"));
+        }
+    }
+    Ok(())
+}
+
+fn parse_port_evidence(value: &JVal, path: &str) -> Result<Vec<PortEvidence>, String> {
+    let items = match value {
+        JVal::Arr(items) => items,
+        _ => return Err(invalid_msg(format!("field `{path}` must be an array"))),
+    };
+    if items.len() > crate::knowledge::MAX_EVIDENCE_REFS {
+        return Err(invalid_msg(format!(
+            "field `{path}` holds {} references, at most {} allowed",
+            items.len(),
+            crate::knowledge::MAX_EVIDENCE_REFS
+        )));
+    }
+    let mut refs = Vec::with_capacity(items.len());
+    for (i, item) in items.iter().enumerate() {
+        let p = format!("{path}[{i}]");
+        let obj = crate::knowledge::as_obj(item, &p).map_err(invalid_msg)?;
+        crate::knowledge::check_known(
+            obj,
+            &[
+                "path",
+                "byte_start",
+                "byte_end",
+                "digest",
+                "git_head",
+                "git_branch",
+            ],
+            &p,
+        )
+        .map_err(invalid_msg)?;
+        let ref_path = crate::knowledge::req_str(obj, "path", &p).map_err(invalid_msg)?;
+        port_text(
+            &ref_path,
+            &format!("{p}.path"),
+            crate::knowledge::MAX_RATIONALE_BYTES,
+        )?;
+        let mut byte_start = None;
+        let mut byte_end = None;
+        if let Some(v) = crate::knowledge::find(obj, "byte_start") {
+            byte_start = Some(
+                crate::knowledge::req_int_non_negative(v, &format!("{p}.byte_start"))
+                    .map_err(invalid_msg)?,
+            );
+        }
+        if let Some(v) = crate::knowledge::find(obj, "byte_end") {
+            byte_end = Some(
+                crate::knowledge::req_int_non_negative(v, &format!("{p}.byte_end"))
+                    .map_err(invalid_msg)?,
+            );
+        }
+        if let (Some(start), Some(end)) = (byte_start, byte_end) {
+            if end <= start {
+                return Err(invalid_msg(format!(
+                    "field `{p}` span must satisfy byte_end > byte_start"
+                )));
+            }
+        }
+        let digest = crate::knowledge::req_str(obj, "digest", &p).map_err(invalid_msg)?;
+        port_text(&digest, &format!("{p}.digest"), MAX_EVIDENCE_DIGEST_BYTES)?;
+        refs.push(PortEvidence {
+            path: ref_path,
+            byte_start,
+            byte_end,
+            digest,
+            git_head: opt_str_field(obj, "git_head", &p)?,
+            git_branch: opt_str_field(obj, "git_branch", &p)?,
+        });
+    }
+    Ok(refs)
+}
+
+fn parse_port_measurement(value: &JVal, path: &str) -> Result<PortMeasurement, String> {
+    let obj = crate::knowledge::as_obj(value, path).map_err(invalid_msg)?;
+    crate::knowledge::check_known(
+        obj,
+        &["method", "environment", "sample_count", "metrics"],
+        path,
+    )
+    .map_err(invalid_msg)?;
+    let method = crate::knowledge::req_str(obj, "method", path).map_err(invalid_msg)?;
+    let environment = crate::knowledge::req_str(obj, "environment", path).map_err(invalid_msg)?;
+    if method.is_empty() || environment.is_empty() {
+        return Err(invalid_msg(format!(
+            "field `{path}` method and environment are required"
+        )));
+    }
+    let sample_count = match req_val(obj, "sample_count", path)? {
+        JVal::Int(i) if *i > 0 => *i as u64,
+        JVal::UInt(u) if *u > 0 && *u <= i64::MAX as u64 => *u,
+        _ => {
+            return Err(invalid_msg(format!(
+                "field `{path}.sample_count` must be a positive integer in range"
+            )));
+        }
+    };
+    let metric_items = match req_val(obj, "metrics", path)? {
+        JVal::Arr(items) => items,
+        _ => {
+            return Err(invalid_msg(format!(
+                "field `{path}.metrics` must be an array"
+            )))
+        }
+    };
+    if metric_items.is_empty() {
+        return Err(invalid_msg(format!(
+            "field `{path}.metrics` must name at least one metric"
+        )));
+    }
+    let mut metrics: Vec<PortMetric> = Vec::with_capacity(metric_items.len());
+    for (i, item) in metric_items.iter().enumerate() {
+        let p = format!("{path}.metrics[{i}]");
+        let mobj = crate::knowledge::as_obj(item, &p).map_err(invalid_msg)?;
+        crate::knowledge::check_known(mobj, &["name", "value", "unit"], &p).map_err(invalid_msg)?;
+        let name = crate::knowledge::req_str(mobj, "name", &p).map_err(invalid_msg)?;
+        if name.is_empty() {
+            return Err(invalid_msg(format!("field `{p}.name` must be non-empty")));
+        }
+        if metrics.iter().any(|m| m.name == name) {
+            return Err(invalid_msg(format!(
+                "field `{path}.metrics` repeats the metric name '{name}'"
+            )));
+        }
+        let value = match req_val(mobj, "value", &p)? {
+            JVal::Int(i) => *i as f64,
+            JVal::UInt(u) => *u as f64,
+            JVal::Float(f) => {
+                crate::knowledge::validate_metric_value(*f).map_err(invalid_msg)?;
+                *f
+            }
+            _ => return Err(invalid_msg(format!("field `{p}.value` must be a number"))),
+        };
+        let unit = crate::knowledge::req_str(mobj, "unit", &p).map_err(invalid_msg)?;
+        if unit.is_empty() {
+            return Err(invalid_msg(format!("field `{p}.unit` must be explicit")));
+        }
+        metrics.push(PortMetric { name, value, unit });
+    }
+    Ok(PortMeasurement {
+        method,
+        environment,
+        sample_count,
+        metrics,
+    })
+}
+
+fn parse_port_record(obj: &[(String, JVal)], line_no: usize) -> Result<PortRecord, String> {
+    let p = format!("line {line_no}");
+    crate::knowledge::check_known(
+        obj,
+        &["type", "id", "kind", "head_revision", "status", "revisions"],
+        &p,
+    )
+    .map_err(invalid_msg)?;
+    let id = crate::knowledge::req_str(obj, "id", &p).map_err(invalid_msg)?;
+    crate::knowledge::validate_id(&id).map_err(invalid_msg)?;
+    let kind = crate::knowledge::req_str(obj, "kind", &p).map_err(invalid_msg)?;
+    crate::knowledge::validate_kind(&kind).map_err(invalid_msg)?;
+    let head_revision = port_positive(
+        req_val(obj, "head_revision", &p)?,
+        &format!("{p}.head_revision"),
+    )?;
+    let status = crate::knowledge::req_str(obj, "status", &p).map_err(invalid_msg)?;
+    crate::knowledge::validate_status(&status).map_err(invalid_msg)?;
+    let rev_items = match req_val(obj, "revisions", &p)? {
+        JVal::Arr(items) if !items.is_empty() => items,
+        JVal::Arr(_) => {
+            return Err(invalid_msg(format!(
+                "field `{p}.revisions` must hold at least one revision"
+            )));
+        }
+        _ => {
+            return Err(invalid_msg(format!(
+                "field `{p}.revisions` must be an array"
+            )))
+        }
+    };
+    let mut revisions = Vec::with_capacity(rev_items.len());
+    for (i, item) in rev_items.iter().enumerate() {
+        let rp = format!("{p}.revisions[{i}]");
+        let robj = crate::knowledge::as_obj(item, &rp).map_err(invalid_msg)?;
+        crate::knowledge::check_known(
+            robj,
+            &[
+                "revision",
+                "title",
+                "body",
+                "status",
+                "author",
+                "created_unix",
+                "evidence",
+                "measurement",
+                "events",
+            ],
+            &rp,
+        )
+        .map_err(invalid_msg)?;
+        let revision = port_positive(req_val(robj, "revision", &rp)?, &format!("{rp}.revision"))?;
+        if revision != (i as u64) + 1 {
+            return Err(corrupt_msg(format!(
+                "revisions of '{id}' are not contiguous from 1"
+            )));
+        }
+        let title = crate::knowledge::req_str(robj, "title", &rp).map_err(invalid_msg)?;
+        port_text(
+            &title,
+            &format!("{rp}.title"),
+            crate::knowledge::MAX_TITLE_BYTES,
+        )?;
+        let body = crate::knowledge::req_str(robj, "body", &rp).map_err(invalid_msg)?;
+        port_text(
+            &body,
+            &format!("{rp}.body"),
+            crate::knowledge::MAX_BODY_BYTES,
+        )?;
+        let rev_status = crate::knowledge::req_str(robj, "status", &rp).map_err(invalid_msg)?;
+        crate::knowledge::validate_status(&rev_status).map_err(invalid_msg)?;
+        let author = crate::knowledge::req_str(robj, "author", &rp).map_err(invalid_msg)?;
+        check_actor(&author, &format!("{rp}.author")).map_err(invalid_msg)?;
+        let created_unix = crate::knowledge::req_int_non_negative(
+            req_val(robj, "created_unix", &rp)?,
+            &format!("{rp}.created_unix"),
+        )
+        .map_err(invalid_msg)?;
+        let evidence =
+            parse_port_evidence(req_val(robj, "evidence", &rp)?, &format!("{rp}.evidence"))?;
+        let measurement = match crate::knowledge::find(robj, "measurement") {
+            None => None,
+            Some(v) => Some(parse_port_measurement(v, &format!("{rp}.measurement"))?),
+        };
+        let events = parse_port_events(req_val(robj, "events", &rp)?, &format!("{rp}.events"), 1)?;
+        revisions.push(PortRevision {
+            revision,
+            title,
+            body,
+            status: rev_status,
+            author,
+            created_unix,
+            evidence,
+            measurement,
+            events,
+        });
+    }
+    let last = revisions
+        .last()
+        .expect("revisions is non-empty by construction");
+    if head_revision != last.revision {
+        return Err(corrupt_msg(format!(
+            "head_revision of '{id}' does not match its last revision"
+        )));
+    }
+    if status != last.status {
+        return Err(corrupt_msg(format!(
+            "status of '{id}' does not match its last revision's status"
+        )));
+    }
+    Ok(PortRecord {
+        id,
+        kind,
+        head_revision,
+        status,
+        revisions,
+    })
+}
+
+fn parse_port_relation(obj: &[(String, JVal)], line_no: usize) -> Result<PortRelation, String> {
+    let p = format!("line {line_no}");
+    crate::knowledge::check_known(
+        obj,
+        &[
+            "type",
+            "relation_id",
+            "src_id",
+            "src_revision",
+            "dst_id",
+            "dst_revision",
+            "kind",
+            "author",
+            "rationale",
+            "created_unix",
+            "events",
+        ],
+        &p,
+    )
+    .map_err(invalid_msg)?;
+    let relation_id = crate::knowledge::req_str(obj, "relation_id", &p).map_err(invalid_msg)?;
+    crate::knowledge::validate_relation_reference(&relation_id).map_err(invalid_msg)?;
+    let src_id = crate::knowledge::req_str(obj, "src_id", &p).map_err(invalid_msg)?;
+    crate::knowledge::validate_id(&src_id).map_err(invalid_msg)?;
+    let src_revision = port_positive(
+        req_val(obj, "src_revision", &p)?,
+        &format!("{p}.src_revision"),
+    )?;
+    let dst_id = crate::knowledge::req_str(obj, "dst_id", &p).map_err(invalid_msg)?;
+    crate::knowledge::validate_id(&dst_id).map_err(invalid_msg)?;
+    let dst_revision = port_positive(
+        req_val(obj, "dst_revision", &p)?,
+        &format!("{p}.dst_revision"),
+    )?;
+    let kind = crate::knowledge::req_str(obj, "kind", &p).map_err(invalid_msg)?;
+    if kind == "supersedes" {
+        // Store-derived identity: the exact deterministic formula the
+        // supersede transition writes, never a caller-shaped id. The
+        // relation runs replacement (src) -> superseded revision (dst).
+        let expected = format!("supersedes:{src_id}:{src_revision}:{dst_id}:{dst_revision}");
+        if relation_id != expected {
+            return Err(invalid_msg(format!(
+                "field `{p}.relation_id` must be '{expected}' for a supersedes relation"
+            )));
+        }
+    } else {
+        crate::knowledge::validate_relation_kind(&kind).map_err(invalid_msg)?;
+    }
+    let author = crate::knowledge::req_str(obj, "author", &p).map_err(invalid_msg)?;
+    check_actor(&author, &format!("{p}.author")).map_err(invalid_msg)?;
+    let rationale = crate::knowledge::req_str(obj, "rationale", &p).map_err(invalid_msg)?;
+    check_rationale(&rationale, &format!("{p}.rationale")).map_err(invalid_msg)?;
+    let created_unix = crate::knowledge::req_int_non_negative(
+        req_val(obj, "created_unix", &p)?,
+        &format!("{p}.created_unix"),
+    )
+    .map_err(invalid_msg)?;
+    let events = parse_port_events(req_val(obj, "events", &p)?, &format!("{p}.events"), 2)?;
+    check_relation_events(&events)?;
+    Ok(PortRelation {
+        relation_id,
+        src_id,
+        src_revision,
+        dst_id,
+        dst_revision,
+        kind,
+        author,
+        rationale,
+        created_unix,
+        events,
+    })
+}
+
+/// Parse and fully validate an import payload without touching any store.
+/// Field-level, enumeration, and line-limit violations are
+/// `invalid import payload` (CLI exit 2); whole-file coherence violations
+/// (duplicates, ordering, counts, prefix consistency, event order) are
+/// `corrupt import file` (CLI exit 3).
+pub fn parse_import_payload(text: &str) -> Result<ImportPayload, String> {
+    let mut meta: Option<(String, usize, usize)> = None;
+    let mut records: Vec<PortRecord> = Vec::new();
+    let mut relations: Vec<PortRelation> = Vec::new();
+    let mut prev_id: Option<String> = None;
+    let mut prev_rel_key: Option<(String, u64, String, u64, String, String)> = None;
+    let mut seen_relation_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut seen_relation = false;
+    let mut content_index = 0usize;
+    for (idx, line) in text.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let line_no = idx + 1;
+        if line.len() > MAX_IMPORT_LINE_BYTES {
+            return Err(invalid_msg(format!(
+                "line {line_no} is {} bytes, at most {MAX_IMPORT_LINE_BYTES} allowed",
+                line.len()
+            )));
+        }
+        let value = crate::knowledge::parse_dupless(line)
+            .map_err(|e| invalid_msg(format!("line {line_no}: {e}")))?;
+        let obj =
+            crate::knowledge::as_obj(&value, &format!("line {line_no}")).map_err(invalid_msg)?;
+        let ty = match crate::knowledge::find(obj, "type") {
+            Some(JVal::Str(s)) => s.clone(),
+            Some(_) => {
+                return Err(invalid_msg(format!(
+                    "line {line_no}: `type` must be a string"
+                )));
+            }
+            None => {
+                return Err(invalid_msg(format!(
+                    "line {line_no}: missing required field `type`"
+                )));
+            }
+        };
+        match ty.as_str() {
+            "meta" => {
+                if content_index != 0 {
+                    return Err(corrupt_msg(format!(
+                        "line {line_no}: meta line is not first"
+                    )));
+                }
+                crate::knowledge::check_known(
+                    obj,
+                    &["type", "format", "version", "repo", "records", "relations"],
+                    &format!("line {line_no}"),
+                )
+                .map_err(invalid_msg)?;
+                let format = crate::knowledge::req_str(obj, "format", &format!("line {line_no}"))
+                    .map_err(invalid_msg)?;
+                if format != "riltra-knowledge" {
+                    return Err(invalid_msg(format!(
+                        "line {line_no}: unsupported format '{format}'"
+                    )));
+                }
+                let version = port_positive(
+                    req_val(obj, "version", &format!("line {line_no}"))?,
+                    &format!("line {line_no}.version"),
+                )?;
+                if version != 1 {
+                    return Err(invalid_msg(format!(
+                        "line {line_no}: unsupported format version {version}"
+                    )));
+                }
+                let repo = crate::knowledge::req_str(obj, "repo", &format!("line {line_no}"))
+                    .map_err(invalid_msg)?;
+                if repo.is_empty() {
+                    return Err(invalid_msg(format!(
+                        "line {line_no}: `repo` must be non-empty"
+                    )));
+                }
+                let declared_records = port_uint(
+                    req_val(obj, "records", &format!("line {line_no}"))?,
+                    &format!("line {line_no}.records"),
+                )?;
+                let declared_relations = port_uint(
+                    req_val(obj, "relations", &format!("line {line_no}"))?,
+                    &format!("line {line_no}.relations"),
+                )?;
+                let declared_records = usize::try_from(declared_records)
+                    .map_err(|_| invalid_msg("record count out of range"))?;
+                let declared_relations = usize::try_from(declared_relations)
+                    .map_err(|_| invalid_msg("relation count out of range"))?;
+                meta = Some((repo, declared_records, declared_relations));
+            }
+            "record" => {
+                if meta.is_none() {
+                    return Err(corrupt_msg(format!(
+                        "line {line_no}: record line before the meta line"
+                    )));
+                }
+                if seen_relation {
+                    return Err(corrupt_msg(format!(
+                        "line {line_no}: record line after relation lines"
+                    )));
+                }
+                if records.len() >= MAX_IMPORT_RECORD_LINES {
+                    return Err(invalid_msg(format!(
+                        "more than {MAX_IMPORT_RECORD_LINES} record lines"
+                    )));
+                }
+                let rec = parse_port_record(obj, line_no)?;
+                if let Some(prev) = &prev_id {
+                    if *prev == rec.id {
+                        return Err(corrupt_msg(format!(
+                            "line {line_no}: duplicate record line '{}'",
+                            rec.id
+                        )));
+                    }
+                    if *prev > rec.id {
+                        return Err(corrupt_msg(format!(
+                            "line {line_no}: record lines are not in canonical order"
+                        )));
+                    }
+                }
+                prev_id = Some(rec.id.clone());
+                records.push(rec);
+            }
+            "relation" => {
+                if meta.is_none() {
+                    return Err(corrupt_msg(format!(
+                        "line {line_no}: relation line before the meta line"
+                    )));
+                }
+                seen_relation = true;
+                if relations.len() >= MAX_IMPORT_RELATION_LINES {
+                    return Err(invalid_msg(format!(
+                        "more than {MAX_IMPORT_RELATION_LINES} relation lines"
+                    )));
+                }
+                let rel = parse_port_relation(obj, line_no)?;
+                if !seen_relation_ids.insert(rel.relation_id.clone()) {
+                    return Err(corrupt_msg(format!(
+                        "line {line_no}: duplicate relation line '{}'",
+                        rel.relation_id
+                    )));
+                }
+                let key = (
+                    rel.src_id.clone(),
+                    rel.src_revision,
+                    rel.dst_id.clone(),
+                    rel.dst_revision,
+                    rel.kind.clone(),
+                    rel.relation_id.clone(),
+                );
+                if let Some(prev) = &prev_rel_key {
+                    if *prev >= key {
+                        return Err(corrupt_msg(format!(
+                            "line {line_no}: relation lines are not in canonical order"
+                        )));
+                    }
+                }
+                prev_rel_key = Some(key);
+                relations.push(rel);
+            }
+            other => {
+                return Err(invalid_msg(format!(
+                    "line {line_no}: unknown line type '{other}'"
+                )));
+            }
+        }
+        content_index += 1;
+    }
+    let Some((_repo, declared_records, declared_relations)) = meta else {
+        return Err(invalid_msg("missing meta line"));
+    };
+    if records.len() != declared_records {
+        return Err(corrupt_msg(format!(
+            "declared record count {declared_records} does not match {} record lines",
+            records.len()
+        )));
+    }
+    if relations.len() != declared_relations {
+        return Err(corrupt_msg(format!(
+            "declared relation count {declared_relations} does not match {} relation lines",
+            relations.len()
+        )));
+    }
+    let needs_lifecycle = records
+        .iter()
+        .any(|r| r.revisions.iter().any(|v| !v.events.is_empty()))
+        || relations.iter().any(|r| !r.events.is_empty());
+    Ok(ImportPayload {
+        records,
+        relations,
+        needs_lifecycle,
+    })
+}
+
+// --- import -----------------------------------------------------------------
+
+/// Merge a parsed payload into one store under a single `Immediate`
+/// transaction. Referential integrity is validated across the file and the
+/// store before the first write, merge conflicts abort before any write, and
+/// the whole import is atomic: a failure rolls back every insert and any
+/// schema migration. Repeat imports of identical content are no-ops and leave
+/// the generation untouched. No clock value is ever minted: every timestamp
+/// comes from the payload.
+pub fn import_payload(
+    conn: &mut Connection,
+    payload: &ImportPayload,
+) -> Result<ImportReport, String> {
+    revalidate_open_paths(conn)?;
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|e| format!("cannot begin knowledge write: {e}"))?;
+    if payload.needs_lifecycle {
+        ensure_lifecycle_schema(&tx)?;
+    }
+    let has_lifecycle = lifecycle_present(&tx)?;
+
+    // Phase A: referential integrity across the file and the store.
+    let file_revs: std::collections::HashSet<(String, u64)> = payload
+        .records
+        .iter()
+        .flat_map(|r| r.revisions.iter().map(move |v| (r.id.clone(), v.revision)))
+        .collect();
+    let endpoint = |id: &str, rev: u64| -> Result<bool, String> {
+        if file_revs.contains(&(id.to_string(), rev)) {
+            return Ok(true);
+        }
+        let rev_i64 = i64::try_from(rev)
+            .map_err(|_| "corrupt import file: revision out of range".to_string())?;
+        endpoint_exists(&tx, id, rev_i64)
+    };
+    for rel in &payload.relations {
+        if !endpoint(&rel.src_id, rel.src_revision)? {
+            return Err(invalid_msg(format!(
+                "relation '{}' references unknown revision {}:{}",
+                rel.relation_id, rel.src_id, rel.src_revision
+            )));
+        }
+        if !endpoint(&rel.dst_id, rel.dst_revision)? {
+            return Err(invalid_msg(format!(
+                "relation '{}' references unknown revision {}:{}",
+                rel.relation_id, rel.dst_id, rel.dst_revision
+            )));
+        }
+    }
+    for rec in &payload.records {
+        for v in &rec.revisions {
+            for e in &v.events {
+                if e.event == "supersede" {
+                    let target = e
+                        .target_id
+                        .as_deref()
+                        .expect("supersede events always carry a target");
+                    let revision = e
+                        .target_revision
+                        .expect("supersede events always carry a target revision");
+                    if !endpoint(target, revision)? {
+                        return Err(invalid_msg(format!(
+                            "supersede event of '{}.{}' references unknown revision {target}:{revision}",
+                            rec.id, v.revision
+                        )));
+                    }
+                }
+            }
+        }
+    }
+
+    // Phase B: merge plan. Identical overlap is a silent no-op; any overlap
+    // with different content, or any duplicate live relation tuple, is a
+    // conflict detected before the first write.
+    let mut record_writes: Vec<(&PortRecord, u64)> = Vec::new();
+    let mut records_unchanged = 0usize;
+    for rec in &payload.records {
+        let store_max: Option<i64> = tx
+            .query_row(
+                "SELECT max(revision) FROM records WHERE id = ?1",
+                [rec.id.as_str()],
+                |r| r.get(0),
+            )
+            .map_err(|e| format!("cannot read record head: {e}"))?;
+        match store_max {
+            None => record_writes.push((rec, 0)),
+            Some(max) => {
+                let max = u64::try_from(max)
+                    .map_err(|_| "corrupt knowledge store: negative revision".to_string())?;
+                // The record kind is record-level and stored on every
+                // revision: a payload that renames it is divergence, not a
+                // compatible subset or superset.
+                let stored_kind: Option<String> = tx
+                    .query_row(
+                        "SELECT kind FROM records WHERE id = ?1 AND revision = 1",
+                        [rec.id.as_str()],
+                        |r| r.get(0),
+                    )
+                    .optional()
+                    .map_err(|e| format!("cannot read record kind: {e}"))?;
+                if stored_kind.as_deref() != Some(rec.kind.as_str()) {
+                    return Err(conflict_msg(format!(
+                        "record '{}' kind differs from the stored record",
+                        rec.id
+                    )));
+                }
+                for v in rec.revisions.iter().filter(|v| v.revision <= max) {
+                    let stored = store_revision(&tx, &rec.id, v.revision, has_lifecycle)?;
+                    if &stored != v {
+                        return Err(conflict_msg(format!(
+                            "record '{}' revision {} differs from the stored revision",
+                            rec.id, v.revision
+                        )));
+                    }
+                }
+                if rec.head_revision > max {
+                    record_writes.push((rec, max + 1));
+                } else {
+                    records_unchanged += 1;
+                }
+            }
+        }
+    }
+
+    let mut relation_writes: Vec<&PortRelation> = Vec::new();
+    let mut relations_unchanged = 0usize;
+    let mut planned_live: std::collections::HashMap<(String, u64, String, u64, String), String> =
+        std::collections::HashMap::new();
+    for rel in &payload.relations {
+        match store_relation(&tx, &rel.relation_id, has_lifecycle)? {
+            Some(stored) => {
+                if &stored == rel {
+                    relations_unchanged += 1;
+                } else {
+                    return Err(conflict_msg(format!(
+                        "relation '{}' differs from the stored relation",
+                        rel.relation_id
+                    )));
+                }
+            }
+            None => {
+                let retracted = rel.events.iter().any(|e| e.event == "retract");
+                if !retracted {
+                    let tuple = (
+                        rel.src_id.clone(),
+                        rel.src_revision,
+                        rel.dst_id.clone(),
+                        rel.dst_revision,
+                        rel.kind.clone(),
+                    );
+                    if let Some(other) = planned_live.get(&tuple) {
+                        return Err(conflict_msg(format!(
+                            "relation '{}' duplicates the live relation '{other}' \
+                             (same endpoints and kind)",
+                            rel.relation_id
+                        )));
+                    }
+                    let src_i64 = i64::try_from(rel.src_revision)
+                        .map_err(|_| "corrupt import file: revision out of range".to_string())?;
+                    let dst_i64 = i64::try_from(rel.dst_revision)
+                        .map_err(|_| "corrupt import file: revision out of range".to_string())?;
+                    let duplicate: Option<String> = tx
+                        .query_row(
+                            "SELECT r.relation_id FROM relations r
+                             LEFT JOIN retractions t ON t.relation_id = r.relation_id
+                             WHERE r.src_id = ?1 AND r.src_revision = ?2
+                               AND r.dst_id = ?3 AND r.dst_revision = ?4
+                               AND r.kind = ?5 AND t.relation_id IS NULL
+                               AND r.relation_id != ?6
+                             LIMIT 1",
+                            rusqlite::params![
+                                rel.src_id,
+                                src_i64,
+                                rel.dst_id,
+                                dst_i64,
+                                rel.kind,
+                                rel.relation_id
+                            ],
+                            |r| r.get(0),
+                        )
+                        .optional()
+                        .map_err(|e| format!("cannot read relations: {e}"))?;
+                    if let Some(other) = duplicate {
+                        return Err(conflict_msg(format!(
+                            "relation '{}' duplicates the live relation '{other}' \
+                             (same endpoints and kind)",
+                            rel.relation_id
+                        )));
+                    }
+                    planned_live.insert(tuple, rel.relation_id.clone());
+                }
+                relation_writes.push(rel);
+            }
+        }
+    }
+
+    // Phase C: apply. Everything conflicting has already been refused.
+    let mut records_inserted = 0usize;
+    let mut revisions_appended = 0usize;
+    let mut relations_inserted = 0usize;
+    let mut changed = false;
+    for (rec, first_new) in record_writes {
+        if first_new == 0 {
+            records_inserted += 1;
+        } else {
+            revisions_appended += (rec.head_revision - first_new + 1) as usize;
+        }
+        for rev in rec
+            .revisions
+            .iter()
+            .filter(|v| first_new == 0 || v.revision >= first_new)
+        {
+            let rev_i64 = i64::try_from(rev.revision)
+                .map_err(|_| "corrupt import file: revision out of range".to_string())?;
+            tx.execute(
+                "INSERT INTO records (id, revision, kind, title, body, status, author, created_unix)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                rusqlite::params![
+                    rec.id,
+                    rev_i64,
+                    rec.kind,
+                    rev.title,
+                    rev.body,
+                    rev.status,
+                    rev.author,
+                    rev.created_unix
+                ],
+            )
+            .map_err(|e| format!("cannot store record revision: {e}"))?;
+            let captured: Vec<crate::knowledge::CapturedEvidence> = rev
+                .evidence
+                .iter()
+                .map(|e| crate::knowledge::CapturedEvidence {
+                    path: e.path.clone(),
+                    byte_start: e.byte_start,
+                    byte_end: e.byte_end,
+                    digest: e.digest.clone(),
+                    git_head: e.git_head.clone(),
+                    git_branch: e.git_branch.clone(),
+                })
+                .collect();
+            write_evidence(&tx, &rec.id, rev_i64, &captured)?;
+            if let Some(m) = &rev.measurement {
+                let measurement = crate::knowledge::BenchmarkData {
+                    method: m.method.clone(),
+                    environment: m.environment.clone(),
+                    sample_count: m.sample_count,
+                    metrics: m
+                        .metrics
+                        .iter()
+                        .map(|x| crate::knowledge::MetricData {
+                            name: x.name.clone(),
+                            value: x.value,
+                            unit: x.unit.clone(),
+                        })
+                        .collect(),
+                };
+                write_measurement(&tx, &rec.id, rev_i64, &measurement)?;
+            }
+            if let Some(e) = rev.events.first() {
+                let target_i64 = match e.target_revision {
+                    None => None,
+                    Some(r) => Some(i64::try_from(r).map_err(|_| {
+                        "corrupt import file: target revision out of range".to_string()
+                    })?),
+                };
+                tx.execute(
+                    "INSERT INTO record_lifecycle
+                     (id, revision, event, target_id, target_revision, reason, author, created_unix)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    rusqlite::params![
+                        rec.id,
+                        rev_i64,
+                        e.event,
+                        e.target_id,
+                        target_i64,
+                        e.reason,
+                        e.author,
+                        e.created_unix
+                    ],
+                )
+                .map_err(|e| format!("cannot store lifecycle event: {e}"))?;
+            }
+        }
+        let head_i64 = i64::try_from(rec.head_revision)
+            .map_err(|_| "corrupt import file: revision out of range".to_string())?;
+        tx.execute(
+            "INSERT INTO heads (id, current_revision) VALUES (?1, ?2)
+             ON CONFLICT(id) DO UPDATE SET current_revision = excluded.current_revision",
+            rusqlite::params![rec.id, head_i64],
+        )
+        .map_err(|e| format!("cannot store record head: {e}"))?;
+        changed = true;
+    }
+    for rel in relation_writes {
+        let src_i64 = i64::try_from(rel.src_revision)
+            .map_err(|_| "corrupt import file: revision out of range".to_string())?;
+        let dst_i64 = i64::try_from(rel.dst_revision)
+            .map_err(|_| "corrupt import file: revision out of range".to_string())?;
+        tx.execute(
+            "INSERT INTO relations
+             (relation_id, src_id, src_revision, dst_id, dst_revision, kind, author, rationale, created_unix)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![
+                rel.relation_id,
+                rel.src_id,
+                src_i64,
+                rel.dst_id,
+                dst_i64,
+                rel.kind,
+                rel.author,
+                rel.rationale,
+                rel.created_unix
+            ],
+        )
+        .map_err(|e| format!("cannot store relation: {e}"))?;
+        for e in &rel.events {
+            match e.event.as_str() {
+                "confirm" => {
+                    tx.execute(
+                        "INSERT INTO relation_lifecycle (relation_id, event, author, created_unix)
+                         VALUES (?1, 'confirm', ?2, ?3)",
+                        rusqlite::params![rel.relation_id, e.author, e.created_unix],
+                    )
+                    .map_err(|e| format!("cannot store relation confirmation: {e}"))?;
+                }
+                "retract" => {
+                    tx.execute(
+                        "INSERT INTO retractions (relation_id, author, reason, created_unix)
+                         VALUES (?1, ?2, ?3, ?4)",
+                        rusqlite::params![rel.relation_id, e.author, e.reason, e.created_unix],
+                    )
+                    .map_err(|e| format!("cannot store relation retraction: {e}"))?;
+                }
+                _ => {
+                    return Err(invalid_msg("a relation event must be confirm or retract"));
+                }
+            }
+        }
+        relations_inserted += 1;
+        changed = true;
+    }
+
+    let generation = if changed {
+        bump_generation(&tx)?
+    } else {
+        read_generation(&tx)?
+    };
+    tx.commit()
+        .map_err(|e| format!("cannot commit import: {e}"))?;
+    Ok(ImportReport {
+        records_inserted,
+        revisions_appended,
+        relations_inserted,
+        records_unchanged,
+        relations_unchanged,
+        generation,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5712,5 +7561,840 @@ mod tests {
         .unwrap_err();
         assert!(err.contains("duplicate relation id"), "unexpected: {err}");
         conn.close().unwrap();
+    }
+}
+
+// --- G-PORT: canonical JSONL/Markdown port ---------------------------------
+
+#[cfg(test)]
+mod port_tests {
+    use super::*;
+    use crate::knowledge::{
+        BenchmarkData, MetricData, NewRecord, SupersededRef, UpdateRecord, ValidatedNew,
+        ValidatedUpdate,
+    };
+    use crate::testutil::tmpdir;
+
+    /// A fresh home with a registered repo entry named `krepo` (both stores in
+    /// a round-trip share the name so `meta.repo` compares byte-equal).
+    fn setup() -> (PathBuf, RepoEntry) {
+        let home = tmpdir("m7-port-home");
+        let root = tmpdir("m7-port-root");
+        let canonical = crate::paths::canonical_root(&root)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let repo = RepoEntry {
+            name: "krepo".to_string(),
+            root: canonical,
+            added_unix: 1,
+        };
+        (home, repo)
+    }
+
+    fn open(home: &Path, repo: &RepoEntry) -> Connection {
+        open_knowledge_at(home, repo, true).unwrap()
+    }
+
+    fn user_version_of(conn: &Connection) -> u32 {
+        conn.query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    fn new_record(id: &str, kind: &str, title: &str, body: &str) -> ValidatedNew {
+        ValidatedNew {
+            record: NewRecord {
+                id: id.to_string(),
+                kind: kind.to_string(),
+                title: title.to_string(),
+                body: body.to_string(),
+                status: "active".to_string(),
+                author: "a".to_string(),
+            },
+            evidence: vec![],
+            measurement: None,
+        }
+    }
+
+    fn update_input(title: &str, body: &str) -> UpdateRecord {
+        UpdateRecord {
+            title: title.to_string(),
+            body: body.to_string(),
+            status: "active".to_string(),
+            author: "a".to_string(),
+            superseded_by: None,
+            reason: None,
+            confirm: false,
+        }
+    }
+
+    /// The lifecycle-rich fixture: supersede/confirm/retract record events, a
+    /// benchmark measurement, a confirmed and a retracted relation, and the
+    /// implicit `supersedes` relation.
+    fn rich_store(conn: &mut Connection) {
+        create_validated(conn, &new_record("d1", "decision", "First", "body one")).unwrap();
+        create_validated(conn, &new_record("d2", "decision", "Second", "body two")).unwrap();
+        create_validated(conn, &new_record("d3", "decision", "Third", "body three")).unwrap();
+        create_validated(
+            conn,
+            &ValidatedNew {
+                record: NewRecord {
+                    id: "b1".to_string(),
+                    kind: "benchmark".to_string(),
+                    title: "Perf".to_string(),
+                    body: "body bench".to_string(),
+                    status: "active".to_string(),
+                    author: "a".to_string(),
+                },
+                evidence: vec![],
+                measurement: Some(BenchmarkData {
+                    method: "m".to_string(),
+                    environment: "e".to_string(),
+                    sample_count: 3,
+                    metrics: vec![
+                        MetricData {
+                            name: "latency".to_string(),
+                            value: 1.5,
+                            unit: "ms".to_string(),
+                        },
+                        MetricData {
+                            name: "p99".to_string(),
+                            value: 42.0,
+                            unit: "ms".to_string(),
+                        },
+                    ],
+                }),
+            },
+        )
+        .unwrap();
+        let sup = UpdateRecord {
+            title: "First v2".to_string(),
+            body: "body one v2".to_string(),
+            status: "superseded".to_string(),
+            author: "a".to_string(),
+            superseded_by: Some(SupersededRef {
+                id: "d2".to_string(),
+                revision: 1,
+            }),
+            reason: Some("replaced by d2".to_string()),
+            confirm: false,
+        };
+        update_validated(
+            conn,
+            "d1",
+            1,
+            &ValidatedUpdate {
+                record: sup,
+                evidence: vec![],
+                measurement: None,
+            },
+        )
+        .unwrap();
+        let mut conf = update_input("Second v2", "body two v2");
+        conf.confirm = true;
+        update_validated(
+            conn,
+            "d2",
+            1,
+            &ValidatedUpdate {
+                record: conf,
+                evidence: vec![],
+                measurement: None,
+            },
+        )
+        .unwrap();
+        let ret = UpdateRecord {
+            title: "Third v2".to_string(),
+            body: "body three v2".to_string(),
+            status: "retracted".to_string(),
+            author: "a".to_string(),
+            superseded_by: None,
+            reason: Some("was wrong".to_string()),
+            confirm: false,
+        };
+        update_validated(
+            conn,
+            "d3",
+            1,
+            &ValidatedUpdate {
+                record: ret,
+                evidence: vec![],
+                measurement: None,
+            },
+        )
+        .unwrap();
+        link(
+            conn,
+            "r1",
+            "d2",
+            2,
+            "d1",
+            2,
+            "supports",
+            "a",
+            "the reason",
+            true,
+        )
+        .unwrap();
+        link(
+            conn,
+            "r2",
+            "d3",
+            2,
+            "d1",
+            2,
+            "relates_to",
+            "a",
+            "maybe",
+            false,
+        )
+        .unwrap();
+        unlink(conn, "r2", "a", "mistake").unwrap();
+    }
+
+    fn dump(conn: &Connection, sql: &str) -> Vec<String> {
+        let mut stmt = conn.prepare(sql).unwrap();
+        let cols = stmt.column_count();
+        let rows = stmt
+            .query_map([], |row| {
+                let mut parts = Vec::new();
+                for i in 0..cols {
+                    let v: rusqlite::types::Value = row.get(i)?;
+                    parts.push(format!("{v:?}"));
+                }
+                Ok(parts.join("\u{1f}"))
+            })
+            .unwrap();
+        rows.map(|r| r.unwrap()).collect()
+    }
+
+    fn meta_line(records: usize, relations: usize) -> String {
+        format!(
+            "{{\"type\":\"meta\",\"format\":\"riltra-knowledge\",\"version\":1,\"repo\":\"krepo\",\"records\":{records},\"relations\":{relations}}}"
+        )
+    }
+
+    fn record_line(id: &str, title: &str, body: &str) -> String {
+        format!(
+            "{{\"type\":\"record\",\"id\":\"{id}\",\"kind\":\"decision\",\"head_revision\":1,\"status\":\"active\",\
+             \"revisions\":[{{\"revision\":1,\"title\":\"{title}\",\"body\":\"{body}\",\"status\":\"active\",\
+             \"author\":\"a\",\"created_unix\":10,\"evidence\":[],\"events\":[]}}]}}"
+        )
+    }
+
+    fn confirm_event_record() -> String {
+        "{\"type\":\"record\",\"id\":\"d9\",\"kind\":\"decision\",\"head_revision\":1,\"status\":\"active\",\
+         \"revisions\":[{\"revision\":1,\"title\":\"Nine\",\"body\":\"b9\",\"status\":\"active\",\
+         \"author\":\"a\",\"created_unix\":10,\"evidence\":[],\"events\":[{\"event\":\"confirm\",\"author\":\"a\",\"created_unix\":11}]}]}"
+            .to_string()
+    }
+
+    #[test]
+    fn port_export_is_canonical_and_deterministic() {
+        let (home, repo) = setup();
+        let mut conn = open(&home, &repo);
+        rich_store(&mut conn);
+        let a = export_document(&conn, ExportFormat::Jsonl).unwrap();
+        let b = export_document(&conn, ExportFormat::Jsonl).unwrap();
+        assert_eq!(
+            a.text, b.text,
+            "two exports of one store must be byte-identical"
+        );
+        assert_eq!(a.records, 4);
+        assert_eq!(a.relations, 3);
+        let mut lines = a.text.split_inclusive('\n');
+        assert_eq!(
+            lines.next().unwrap(),
+            "{\"type\":\"meta\",\"format\":\"riltra-knowledge\",\"version\":1,\"repo\":\"krepo\",\"records\":4,\"relations\":3}\n"
+        );
+        assert!(!a.text.contains('\r'), "LF newlines only");
+        assert!(a.text.ends_with('\n'));
+        // Records sort by id, binary: b1 < d1 < d2 < d3.
+        let second = a.text.lines().nth(1).unwrap();
+        assert!(
+            second.starts_with("{\"type\":\"record\",\"id\":\"b1\","),
+            "{second}"
+        );
+        // Lifecycle audit data rides as structured events with original
+        // authors, reasons, and target bindings; derived draft fields never do.
+        assert!(a
+            .text
+            .contains("\"target_id\":\"d2\",\"target_revision\":1,\"reason\":\"replaced by d2\""));
+        assert!(a.text.contains("\"relation_id\":\"supersedes:d2:1:d1:2\""));
+        assert!(a
+            .text
+            .contains("\"event\":\"retract\",\"reason\":\"was wrong\""));
+        assert!(a
+            .text
+            .contains("\"event\":\"retract\",\"reason\":\"mistake\""));
+        assert!(a
+            .text
+            .contains("\"name\":\"latency\",\"value\":1.5,\"unit\":\"ms\""));
+        assert!(
+            a.text.find("\"name\":\"latency\"").unwrap() < a.text.find("\"name\":\"p99\"").unwrap(),
+            "metrics keep authored order"
+        );
+        for withdrawn in [
+            "superseded_by",
+            "confirm_state",
+            "retracted_reason",
+            "retracted_author",
+            "retraction_author",
+            "retraction_reason",
+        ] {
+            assert!(!a.text.contains(withdrawn), "withdrawn field {withdrawn}");
+        }
+        // Record lines strictly precede relation lines.
+        let mut seen_relation = false;
+        for line in a.text.lines().skip(1) {
+            if line.contains("\"type\":\"relation\"") {
+                seen_relation = true;
+            } else {
+                assert!(!seen_relation, "record line after relation line: {line}");
+            }
+        }
+    }
+
+    #[test]
+    fn port_markdown_wrapper_extracts_to_the_same_payload() {
+        let (home, repo) = setup();
+        let mut conn = open(&home, &repo);
+        rich_store(&mut conn);
+        let jsonl = export_document(&conn, ExportFormat::Jsonl).unwrap();
+        let md = export_document(&conn, ExportFormat::Markdown).unwrap();
+        assert!(md.text.contains("# Riltra knowledge export"));
+        assert!(md.text.contains("```json"));
+        assert!(md
+            .text
+            .contains("## d1 — decision (current revision 2, superseded)"));
+        assert_eq!(
+            extract_import_payload(&md.text).unwrap(),
+            jsonl.text,
+            "markdown payload extracts back to the canonical JSONL"
+        );
+        assert_eq!(
+            extract_import_payload(&jsonl.text).unwrap(),
+            jsonl.text,
+            "a bare JSONL file passes through"
+        );
+        assert_eq!(
+            extract_import_payload(&format!("\u{feff}{}", jsonl.text)).unwrap(),
+            jsonl.text,
+            "a UTF-8 BOM must not derail format detection"
+        );
+
+        // A prose body that would open a fence is escaped and cannot leak into
+        // the payload region.
+        create_validated(
+            &mut conn,
+            &new_record("e1", "decision", "Esc", "line one\n```json\nline two"),
+        )
+        .unwrap();
+        let md2 = export_document(&conn, ExportFormat::Markdown).unwrap();
+        assert!(
+            md2.text.contains("\\```json"),
+            "prose fence must be escaped"
+        );
+        assert_eq!(
+            extract_import_payload(&md2.text).unwrap(),
+            export_document(&conn, ExportFormat::Jsonl).unwrap().text
+        );
+
+        assert!(extract_import_payload("plain prose only\n")
+            .unwrap_err()
+            .contains("fenced"));
+        assert!(extract_import_payload("```json\n{\"a\":1}\n")
+            .unwrap_err()
+            .contains("unterminated"));
+    }
+
+    /// A record line whose single revision carries the given `events` array.
+    fn record_line_events(events: &str) -> String {
+        format!(
+            "{{\"type\":\"record\",\"id\":\"d1\",\"kind\":\"decision\",\"head_revision\":1,\"status\":\"active\",\
+             \"revisions\":[{{\"revision\":1,\"title\":\"T\",\"body\":\"B\",\"status\":\"active\",\
+             \"author\":\"a\",\"created_unix\":10,\"evidence\":[],\"events\":{events}}}]}}"
+        )
+    }
+
+    /// A minimal relation line on the fixed d1:1 -> d1:1 tuple.
+    fn relation_line(rid: &str, kind: &str, events: &str) -> String {
+        format!(
+            "{{\"type\":\"relation\",\"relation_id\":\"{rid}\",\"src_id\":\"d1\",\"src_revision\":1,\
+             \"dst_id\":\"d1\",\"dst_revision\":1,\"kind\":\"{kind}\",\"author\":\"a\",\"rationale\":\"w\",\
+             \"created_unix\":20,\"events\":{events}}}"
+        )
+    }
+
+    #[test]
+    fn port_parse_classifies_malformed_and_corrupt() {
+        let meta = meta_line(1, 0);
+        let rec = record_line("d1", "T", "B");
+        let valid = format!("{meta}\n{rec}\n");
+        assert!(parse_import_payload(&valid).is_ok());
+        assert!(!parse_import_payload(&valid).unwrap().needs_lifecycle);
+        let empty = format!("{}\n", meta_line(0, 0));
+        let empty_payload = parse_import_payload(&empty).unwrap();
+        assert!(empty_payload.records.is_empty());
+        assert!(!empty_payload.needs_lifecycle);
+        let with_event = format!("{}\n{}\n{}\n", meta_line(2, 0), rec, confirm_event_record());
+        assert!(parse_import_payload(&with_event).unwrap().needs_lifecycle);
+
+        let two_records = format!(
+            "{}\n{}\n{}\n",
+            meta_line(2, 0),
+            record_line("d2", "T2", "B2"),
+            rec
+        );
+        let cases: Vec<(String, &str)> = vec![
+            (
+                format!("{meta}\n{{\"type\":\"record\",\"id\":\"d1\",\n"),
+                "invalid import payload",
+            ),
+            (
+                "{\"type\":\"meta\",\"format\":\"riltra-knowledge\",\"version\":2,\"repo\":\"krepo\",\"records\":0,\"relations\":0}\n".to_string(),
+                "invalid import payload",
+            ),
+            (
+                format!("{}\n{{\"type\":\"unknown\"}}\n", meta_line(0, 0)),
+                "invalid import payload",
+            ),
+            (
+                format!(
+                    "{}\n{}\n",
+                    meta_line(1, 0),
+                    rec.replace("\"kind\":\"decision\",", "\"kind\":\"decision\",\"extra\":1,")
+                ),
+                "invalid import payload",
+            ),
+            (
+                format!(
+                    "{}\n{}\n",
+                    meta_line(1, 0),
+                    rec.replace("\"title\":\"T\"", "\"title\":\"T\",\"title\":\"U\"")
+                ),
+                "invalid import payload",
+            ),
+            (
+                format!(
+                    "{}\n{}\n",
+                    meta_line(1, 0),
+                    rec.replace("\"status\":\"active\"", "\"status\":\"bogus\"")
+                ),
+                "invalid import payload",
+            ),
+            (
+                format!(
+                    "{}\n{}\n",
+                    meta_line(1, 0),
+                    rec.replace("\"evidence\":[],\"events\":[]", "\"evidence\":[]")
+                ),
+                "invalid import payload",
+            ),
+            (
+                format!(
+                    "{}\n{}\n",
+                    meta_line(1, 0),
+                    rec.replace("\"evidence\":[],\"events\":[]", "\"events\":[]")
+                ),
+                "invalid import payload",
+            ),
+            (
+                format!(
+                    "{}\n{}\n",
+                    meta_line(1, 0),
+                    rec.replace("\"kind\":\"decision\"", "\"kind\":\"bogus\"")
+                ),
+                "invalid import payload",
+            ),
+            (
+                format!("{meta}\n{rec}\n{rec}\n"),
+                "corrupt import file",
+            ),
+            (format!("{}\n{rec}\n", meta_line(2, 0)), "corrupt import file"),
+            (
+                two_records.replace("\"id\":\"d2\"", "\"id\":\"zz\""),
+                "corrupt import file",
+            ),
+            (
+                format!(
+                    "{}\n{}\n",
+                    meta_line(1, 0),
+                    rec.replace("\"revision\":1,\"title\"", "\"revision\":3,\"title\"")
+                ),
+                "corrupt import file",
+            ),
+            (
+                format!(
+                    "{}\n{}\n",
+                    meta_line(1, 0),
+                    rec.replace("\"head_revision\":1", "\"head_revision\":2")
+                ),
+                "corrupt import file",
+            ),
+            (
+                format!(
+                    "{}\n{}\n",
+                    meta_line(1, 0),
+                    rec.replace(
+                        "\"head_revision\":1,\"status\":\"active\",",
+                        "\"head_revision\":1,\"status\":\"archived\","
+                    )
+                ),
+                "corrupt import file",
+            ),
+            (
+                format!("{rec}\n{meta}\n"),
+                "corrupt import file",
+            ),
+            (
+                format!(
+                    "{}\n",
+                    meta.replace("\"format\":\"riltra-knowledge\"", "\"format\":\"other\"")
+                ),
+                "invalid import payload",
+            ),
+            (
+                format!(
+                    "{}\n{}\n",
+                    meta_line(1, 0),
+                    rec.replace(
+                        "\"evidence\":[]",
+                        "\"evidence\":[{\"path\":\"a.py\",\"byte_start\":5,\"byte_end\":5,\"digest\":\"d\"}]"
+                    )
+                ),
+                "invalid import payload",
+            ),
+            (
+                format!(
+                    "{}\n{}\n{}\n",
+                    meta_line(0, 2),
+                    relation_line("r1", "relates_to", "[]"),
+                    relation_line("r1", "relates_to", "[]")
+                ),
+                "corrupt import file",
+            ),
+            (
+                format!(
+                    "{}\n{}\n",
+                    meta_line(1, 1),
+                    relation_line("r1", "bogus", "[]")
+                ),
+                "invalid import payload",
+            ),
+            (
+                format!(
+                    "{}\n{}\n",
+                    meta_line(1, 0),
+                    "x".repeat(MAX_IMPORT_LINE_BYTES + 1)
+                ),
+                "invalid import payload",
+            ),
+            (
+                format!(
+                    "{}\n{{\"type\":\"relation\",\"relation_id\":\"r1\",\"src_id\":\"d1\",\"src_revision\":1,\"dst_id\":\"d1\",\"dst_revision\":1,\"kind\":\"relates_to\",\"author\":\"a\",\"rationale\":\"w\",\"created_unix\":20,\"events\":[{{\"event\":\"confirm\",\"author\":\"a\",\"created_unix\":30}},{{\"event\":\"retract\",\"reason\":\"r\",\"author\":\"a\",\"created_unix\":20}}]}}\n",
+                    meta_line(1, 1)
+                ),
+                "corrupt import file",
+            ),
+            (
+                format!(
+                    "{}\n{{\"type\":\"relation\",\"relation_id\":\"r1\",\"src_id\":\"d1\",\"src_revision\":1,\"dst_id\":\"d1\",\"dst_revision\":1,\"kind\":\"relates_to\",\"author\":\"a\",\"rationale\":\"w\",\"created_unix\":20,\"events\":[{{\"event\":\"confirm\",\"author\":\"a\",\"created_unix\":20}},{{\"event\":\"confirm\",\"author\":\"a\",\"created_unix\":30}}]}}\n",
+                    meta_line(1, 1)
+                ),
+                "invalid import payload",
+            ),
+            (
+                format!(
+                    "{}\n{{\"type\":\"relation\",\"relation_id\":\"wrong\",\"src_id\":\"d1\",\"src_revision\":1,\"dst_id\":\"d1\",\"dst_revision\":1,\"kind\":\"supersedes\",\"author\":\"a\",\"rationale\":\"w\",\"created_unix\":20,\"events\":[]}}\n",
+                    meta_line(1, 1)
+                ),
+                "invalid import payload",
+            ),
+            (
+                format!(
+                    "{}\n{}\n",
+                    meta_line(1, 0),
+                    record_line_events(
+                        "[{\"event\":\"retract\",\"reason\":\"r\",\"target_id\":\"d9\",\"target_revision\":1,\"author\":\"a\",\"created_unix\":11}]"
+                    )
+                ),
+                "invalid import payload",
+            ),
+            (
+                format!(
+                    "{}\n{}\n",
+                    meta_line(1, 0),
+                    record_line_events(
+                        "[{\"event\":\"confirm\",\"reason\":\"r\",\"author\":\"a\",\"created_unix\":11}]"
+                    )
+                ),
+                "invalid import payload",
+            ),
+            (
+                format!(
+                    "{}\n{}\n",
+                    meta_line(1, 0),
+                    record_line_events(
+                        "[{\"event\":\"supersede\",\"target_id\":\"d9\",\"target_revision\":1,\"author\":\"a\",\"created_unix\":11}]"
+                    )
+                ),
+                "invalid import payload",
+            ),
+            (
+                format!(
+                    "{}\n{}\n{}\n",
+                    meta_line(1, 1),
+                    relation_line("r1", "relates_to", "[]"),
+                    rec
+                ),
+                "corrupt import file",
+            ),
+        ];
+        for (text, prefix) in cases {
+            let err = parse_import_payload(&text).unwrap_err();
+            assert!(err.starts_with(prefix), "expected {prefix}: {err}\n{text}");
+        }
+    }
+
+    #[test]
+    fn port_import_round_trip_preserves_every_audit_row() {
+        let (home1, repo1) = setup();
+        let mut c1 = open(&home1, &repo1);
+        rich_store(&mut c1);
+        let doc = export_document(&c1, ExportFormat::Jsonl).unwrap();
+        let payload = parse_import_payload(&doc.text).unwrap();
+        assert!(payload.needs_lifecycle);
+
+        let (home2, repo2) = setup();
+        let mut c2 = open(&home2, &repo2);
+        let report = import_payload(&mut c2, &payload).unwrap();
+        assert_eq!(report.records_inserted, 4);
+        assert_eq!(report.revisions_appended, 0);
+        assert_eq!(report.relations_inserted, 3);
+        assert_eq!(report.records_unchanged, 0);
+        assert!(report.generation > 0);
+        assert_eq!(report.generation, read_generation(&c2).unwrap());
+        let doc2 = export_document(&c2, ExportFormat::Jsonl).unwrap();
+        assert_eq!(doc2.text, doc.text, "byte-identical re-export");
+        for sql in [
+            "SELECT id, revision, event, coalesce(target_id,''), coalesce(target_revision,-1), coalesce(reason,''), author, created_unix FROM record_lifecycle ORDER BY id, revision",
+            "SELECT relation_id, event, author, created_unix FROM relation_lifecycle ORDER BY relation_id",
+            "SELECT relation_id, author, reason, created_unix FROM retractions ORDER BY relation_id",
+            "SELECT id, revision, title, status, author, created_unix FROM records ORDER BY id, revision",
+            "SELECT relation_id, src_id, src_revision, dst_id, dst_revision, kind, author, rationale, created_unix FROM relations ORDER BY relation_id",
+            "SELECT id, revision, method, environment, sample_count FROM measurements ORDER BY id, revision",
+            "SELECT id, revision, name, value, unit FROM metric_values ORDER BY id, revision, rowid",
+        ] {
+            assert_eq!(dump(&c1, sql), dump(&c2, sql), "{sql}");
+        }
+
+        let gen = read_generation(&c2).unwrap();
+        let again = import_payload(&mut c2, &payload).unwrap();
+        assert_eq!(again.records_inserted, 0);
+        assert_eq!(again.revisions_appended, 0);
+        assert_eq!(again.relations_inserted, 0);
+        assert_eq!(again.records_unchanged, 4);
+        assert_eq!(again.relations_unchanged, 3);
+        assert_eq!(
+            again.generation, gen,
+            "a no-op import must not bump the generation"
+        );
+        assert_eq!(read_generation(&c2).unwrap(), gen);
+        assert_eq!(
+            export_document(&c2, ExportFormat::Jsonl).unwrap().text,
+            doc.text
+        );
+    }
+
+    #[test]
+    fn port_import_merge_and_conflicts_are_atomic() {
+        let (home, repo) = setup();
+        let mut conn = open(&home, &repo);
+        create_validated(
+            &mut conn,
+            &new_record("d1", "decision", "First", "body one"),
+        )
+        .unwrap();
+        let v1_text = export_document(&conn, ExportFormat::Jsonl).unwrap().text;
+        update_validated(
+            &mut conn,
+            "d1",
+            1,
+            &ValidatedUpdate {
+                record: update_input("First v2", "body two"),
+                evidence: vec![],
+                measurement: None,
+            },
+        )
+        .unwrap();
+        let v2_text = export_document(&conn, ExportFormat::Jsonl).unwrap().text;
+        let p1 = parse_import_payload(&v1_text).unwrap();
+        let p2 = parse_import_payload(&v2_text).unwrap();
+
+        let (home2, repo2) = setup();
+        let mut c2 = open(&home2, &repo2);
+        import_payload(&mut c2, &p1).unwrap();
+        let rep = import_payload(&mut c2, &p2).unwrap();
+        assert_eq!(rep.revisions_appended, 1);
+        assert_eq!(rep.records_inserted, 0);
+        assert_eq!(
+            export_document(&c2, ExportFormat::Jsonl).unwrap().text,
+            v2_text
+        );
+        let rep2 = import_payload(&mut c2, &p1).unwrap();
+        assert_eq!(rep2.records_inserted, 0);
+        assert_eq!(rep2.records_unchanged, 1);
+        assert_eq!(
+            export_document(&c2, ExportFormat::Jsonl).unwrap().text,
+            v2_text,
+            "a subset import must not shrink the store"
+        );
+
+        // A mixed payload (new d9 plus a divergent d1) writes neither.
+        let div = v1_text.replace("\"title\":\"First\"", "\"title\":\"Changed\"");
+        let mixed = format!(
+            "{}\n{}\n{}\n",
+            div.lines()
+                .next()
+                .unwrap()
+                .replace("\"records\":1", "\"records\":2"),
+            div.lines().nth(1).unwrap(),
+            record_line("d9", "Nine", "b9")
+        );
+        let pm = parse_import_payload(&mixed).unwrap();
+        let gen = read_generation(&c2).unwrap();
+        let err = import_payload(&mut c2, &pm).unwrap_err();
+        assert!(err.starts_with("import conflict:"), "{err}");
+        assert_eq!(read_generation(&c2).unwrap(), gen);
+        assert_eq!(
+            export_document(&c2, ExportFormat::Jsonl).unwrap().text,
+            v2_text
+        );
+        let n: i64 = c2
+            .query_row("SELECT count(*) FROM records WHERE id = 'd9'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(n, 0, "a conflicting payload must not partially write");
+
+        // Two live relations sharing one tuple inside a single payload: the
+        // second is refused before either is written.
+        let two_live = format!(
+            "{}\n{}\n{}\n",
+            meta_line(0, 2),
+            relation_line("r8", "relates_to", "[]"),
+            relation_line("r9", "relates_to", "[]")
+        );
+        let pt = parse_import_payload(&two_live).unwrap();
+        let gen = read_generation(&c2).unwrap();
+        let err = import_payload(&mut c2, &pt).unwrap_err();
+        assert!(err.starts_with("import conflict:"), "{err}");
+        assert_eq!(read_generation(&c2).unwrap(), gen);
+        assert_eq!(
+            export_document(&c2, ExportFormat::Jsonl).unwrap().text,
+            v2_text
+        );
+
+        // A payload that renames the record kind is divergence even when every
+        // revision byte-matches: kind is record-level content.
+        let rekind = v1_text.replace("\"kind\":\"decision\"", "\"kind\":\"constraint\"");
+        let pk = parse_import_payload(&rekind).unwrap();
+        let err = import_payload(&mut c2, &pk).unwrap_err();
+        assert!(err.starts_with("import conflict:"), "{err}");
+
+        // Audit-only divergence (a re-minted timestamp) is divergence too.
+        let ts: i64 = c2
+            .query_row(
+                "SELECT created_unix FROM records WHERE id = 'd1' AND revision = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let rescheduled = v1_text.replace(
+            &format!("\"created_unix\":{ts}"),
+            &format!("\"created_unix\":{}", ts + 1),
+        );
+        assert_ne!(rescheduled, v1_text, "audit timestamp must appear verbatim");
+        let pa = parse_import_payload(&rescheduled).unwrap();
+        let err = import_payload(&mut c2, &pa).unwrap_err();
+        assert!(err.starts_with("import conflict:"), "{err}");
+        assert_eq!(
+            export_document(&c2, ExportFormat::Jsonl).unwrap().text,
+            v2_text,
+            "conflicting imports must not write"
+        );
+    }
+
+    #[test]
+    fn port_import_v1_migration_rules() {
+        let (home, repo) = setup();
+        let mut conn = open(&home, &repo);
+        create_validated(
+            &mut conn,
+            &new_record("d1", "decision", "First", "body one"),
+        )
+        .unwrap();
+        assert_eq!(user_version_of(&conn), 1);
+        let base = export_document(&conn, ExportFormat::Jsonl).unwrap().text;
+        let p = parse_import_payload(&base).unwrap();
+        assert!(!p.needs_lifecycle);
+        let rep = import_payload(&mut conn, &p).unwrap();
+        assert_eq!(rep.records_inserted, 0);
+        assert_eq!(rep.records_unchanged, 1);
+        assert_eq!(
+            user_version_of(&conn),
+            1,
+            "a Foundation-only payload must not migrate a v1 store"
+        );
+
+        let g0 = read_generation(&conn).unwrap();
+        let ev = format!("{}\n{}\n", meta_line(1, 0), confirm_event_record());
+        let pev = parse_import_payload(&ev).unwrap();
+        assert!(pev.needs_lifecycle);
+        let rep2 = import_payload(&mut conn, &pev).unwrap();
+        assert_eq!(rep2.records_inserted, 1);
+        assert_eq!(
+            read_generation(&conn).unwrap(),
+            g0 + 1,
+            "a changed import bumps the generation exactly once"
+        );
+        assert_eq!(
+            user_version_of(&conn),
+            2,
+            "an event-carrying payload migrates"
+        );
+
+        // A conflicting payload against a v1 store rolls the migration back.
+        let (home3, repo3) = setup();
+        let mut c3 = open(&home3, &repo3);
+        create_validated(&mut c3, &new_record("d1", "decision", "First", "body one")).unwrap();
+        let bad = format!(
+            "{}\n{}\n{}\n",
+            base.lines()
+                .next()
+                .unwrap()
+                .replace("\"records\":1", "\"records\":2"),
+            base.lines()
+                .nth(1)
+                .unwrap()
+                .replace("\"title\":\"First\"", "\"title\":\"Changed\""),
+            confirm_event_record()
+        );
+        let pbad = parse_import_payload(&bad).unwrap();
+        assert!(pbad.needs_lifecycle);
+        let err = import_payload(&mut c3, &pbad).unwrap_err();
+        assert!(err.starts_with("import conflict:"), "{err}");
+        assert_eq!(
+            user_version_of(&c3),
+            1,
+            "a failed import must roll back the migration"
+        );
+        let n: i64 = c3
+            .query_row("SELECT count(*) FROM records WHERE id = 'd9'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(n, 0);
     }
 }

@@ -48,7 +48,7 @@ pub(crate) fn usage() -> String {
   {NAME} semantic query --repo <name> --path <rel> --line <n> --col <n> [--refs] [--lsp-server <abs-path>]
   {NAME} callers --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--limit <n>] [--offset <n>]
   {NAME} callees --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--limit <n>] [--offset <n>]
-  {NAME} trace --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--to <path:line:col>] [--depth <n>] [--limit <n>] [--offset <n>]\n  {NAME} impact --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--depth <n>] [--limit <n>] [--offset <n>]\n  {NAME} knowledge create --repo <name> --input -\n  {NAME} knowledge show --repo <name> --id <id> [--revision <n>]\n  {NAME} knowledge update --repo <name> --id <id> --expected-revision <n> --input -\n  {NAME} knowledge history --repo <name> --id <id> [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge search --repo <name> --query <text> [--kind <kind>] [--include-archived] [--include-superseded] [--include-retracted] [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge link --repo <name> --input -\n  {NAME} knowledge unlink --repo <name> --relation <id> --input -\n  {NAME} knowledge related --repo <name> --id <id> [--revision <n>] [--direction inbound|outbound] [--include-retracted] [--limit <n>] [--offset <n>] [--generation <n>]\n\nCommands:\n  status       Print deterministic bootstrap status as JSON\n  init         Register a local repository root\n  repo list    List registered repositories as JSON\n  repo status  Git/worktree fingerprint of a registered repository\n  doctor       Path-security and repository health checks as JSON\n  scan         Syntax facts (definitions/imports/calls) as JSON\n  index        Build the durable code index for a repository\n  index status Report index freshness (fresh/stale/unknown) as JSON\n  search       Search indexed symbols as JSON\n  semantic import Import a SCIP index against the live snapshot as JSON\n  semantic status Per-provider binding verification as JSON\n  semantic query Single-hop definition/reference lookup as JSON\n  callers Direct callers of the anchored identity as JSON\n  callees Direct callees of the anchored identity as JSON\n  trace Bounded plausible static paths with per-hop evidence\n  impact Conservative inbound impact with evidence and UNKNOWN default\n"
+  {NAME} trace --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--to <path:line:col>] [--depth <n>] [--limit <n>] [--offset <n>]\n  {NAME} impact --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--depth <n>] [--limit <n>] [--offset <n>]\n  {NAME} knowledge create --repo <name> --input -\n  {NAME} knowledge show --repo <name> --id <id> [--revision <n>]\n  {NAME} knowledge update --repo <name> --id <id> --expected-revision <n> --input -\n  {NAME} knowledge history --repo <name> --id <id> [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge search --repo <name> --query <text> [--kind <kind>] [--include-archived] [--include-superseded] [--include-retracted] [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge link --repo <name> --input -\n  {NAME} knowledge unlink --repo <name> --relation <id> --input -\n  {NAME} knowledge related --repo <name> --id <id> [--revision <n>] [--direction inbound|outbound] [--include-retracted] [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge export --repo <name> [--format jsonl|md] [--out <path>]\n  {NAME} knowledge import --repo <name> --file <path>\n\nCommands:\n  status       Print deterministic bootstrap status as JSON\n  init         Register a local repository root\n  repo list    List registered repositories as JSON\n  repo status  Git/worktree fingerprint of a registered repository\n  doctor       Path-security and repository health checks as JSON\n  scan         Syntax facts (definitions/imports/calls) as JSON\n  index        Build the durable code index for a repository\n  index status Report index freshness (fresh/stale/unknown) as JSON\n  search       Search indexed symbols as JSON\n  semantic import Import a SCIP index against the live snapshot as JSON\n  semantic status Per-provider binding verification as JSON\n  semantic query Single-hop definition/reference lookup as JSON\n  callers Direct callers of the anchored identity as JSON\n  callees Direct callees of the anchored identity as JSON\n  trace Bounded plausible static paths with per-hop evidence\n  impact Conservative inbound impact with evidence and UNKNOWN default\n"
     )
 }
 
@@ -1284,6 +1284,12 @@ fn cmd_knowledge(op: args::KnowledgeOp, out: &mut String, err: &mut String) -> i
             relation,
             input,
         } => knowledge_unlink(&repo, &relation, &input, out, err),
+        args::KnowledgeOp::Export {
+            repo,
+            format,
+            out: out_path,
+        } => knowledge_export(&repo, format.as_deref(), out_path.as_deref(), out, err),
+        args::KnowledgeOp::Import { repo, file } => knowledge_import(&repo, &file, out, err),
         args::KnowledgeOp::Related {
             repo,
             id,
@@ -1806,6 +1812,178 @@ fn pagination_json(
         truncated,
         opt_usize(next_offset)
     )
+}
+
+/// `knowledge export`: canonical JSONL straight to stdout, or a Markdown
+/// wrapper; with `--out` the file is written and the envelope reports it. A
+/// genuinely absent store exports an empty metadata-only payload and creates
+/// nothing, exactly like the other read commands.
+fn knowledge_export(
+    repo: &str,
+    format: Option<&str>,
+    out_path: Option<&str>,
+    out: &mut String,
+    err: &mut String,
+) -> i32 {
+    let format = match format {
+        None | Some("jsonl") => knowledge_store::ExportFormat::Jsonl,
+        Some("md") => knowledge_store::ExportFormat::Markdown,
+        Some(other) => {
+            err.push_str(&format!(
+                "error: unknown export format '{other}' (jsonl or md)\n"
+            ));
+            return 2;
+        }
+    };
+    let (_root, entry) = match knowledge_repo(repo, err) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    let db = knowledge_store::knowledge_db_path(&paths::config_dir(), &entry.name);
+    let (doc, generation): (knowledge_store::ExportDocument, u64) =
+        match knowledge_store_absent(&db) {
+            Ok(true) => (knowledge_store::empty_export(&entry.name, format), 0),
+            Ok(false) => {
+                let conn = match knowledge_store::open_knowledge(&entry, false) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        err.push_str(&format!("error: {e}\n"));
+                        return 3;
+                    }
+                };
+                let doc = match knowledge_store::export_document(&conn, format) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        err.push_str(&format!("error: {e}\n"));
+                        return 3;
+                    }
+                };
+                let generation = match knowledge_store::read_generation(&conn) {
+                    Ok(g) => g,
+                    Err(e) => {
+                        err.push_str(&format!("error: {e}\n"));
+                        return 3;
+                    }
+                };
+                (doc, generation)
+            }
+            Err(e) => {
+                err.push_str(&format!("error: {e}\n"));
+                return 3;
+            }
+        };
+    let Some(path) = out_path else {
+        *out = doc.text;
+        return 0;
+    };
+    if let Err(e) = std::fs::write(path, &doc.text) {
+        err.push_str(&format!("error: cannot write export file '{path}': {e}\n"));
+        return 3;
+    }
+    let format_name = match format {
+        knowledge_store::ExportFormat::Jsonl => "jsonl",
+        knowledge_store::ExportFormat::Markdown => "md",
+    };
+    let result = format!(
+        "{{\"format\":\"{format_name}\",\"path\":\"{}\",\"records\":{},\"relations\":{},\"bytes\":{}}}",
+        json::escape(path),
+        doc.records,
+        doc.relations,
+        doc.text.len()
+    );
+    *out = knowledge_envelope(&entry.name, generation, "export", &result, None);
+    0
+}
+
+/// `knowledge import`: extract and validate the payload before any store is
+/// touched, then merge under one transaction. Malformed input is a
+/// usage-class failure (2); corrupt coherence, conflicts, and storage
+/// failures fail closed with 3.
+fn knowledge_import(repo: &str, file: &str, out: &mut String, err: &mut String) -> i32 {
+    let text = match read_import_file(file) {
+        Ok(t) => t,
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            return 2;
+        }
+    };
+    let payload_text = match knowledge_store::extract_import_payload(&text) {
+        Ok(t) => t,
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            return 2;
+        }
+    };
+    let payload = match knowledge_store::parse_import_payload(&payload_text) {
+        Ok(p) => p,
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            return import_error_exit(&e);
+        }
+    };
+    let (_root, mut conn) = match knowledge_open(repo, true, err) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    let report = match knowledge_store::import_payload(&mut conn, &payload) {
+        Ok(r) => r,
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            return import_error_exit(&e);
+        }
+    };
+    let result = format!(
+        "{{\"records_inserted\":{},\"revisions_appended\":{},\"relations_inserted\":{},\"records_unchanged\":{},\"relations_unchanged\":{}}}",
+        report.records_inserted,
+        report.revisions_appended,
+        report.relations_inserted,
+        report.records_unchanged,
+        report.relations_unchanged
+    );
+    *out = knowledge_envelope(repo, report.generation, "import", &result, None);
+    0
+}
+
+fn import_error_exit(message: &str) -> i32 {
+    if message.starts_with("invalid import payload") {
+        2
+    } else {
+        3
+    }
+}
+
+/// Bounded read of an import file: regular file only, cap enforced on the
+/// metadata first and again while reading so a growing file cannot slip past.
+fn read_import_file(file: &str) -> Result<String, String> {
+    let path = Path::new(file);
+    let meta =
+        std::fs::metadata(path).map_err(|e| format!("cannot read import file '{file}': {e}"))?;
+    if !meta.is_file() {
+        return Err(format!("import file is not a regular file: '{file}'"));
+    }
+    if meta.len() > knowledge_store::MAX_IMPORT_FILE_BYTES {
+        return Err(format!(
+            "invalid import payload: import file is too large: {} bytes, at most {} allowed",
+            meta.len(),
+            knowledge_store::MAX_IMPORT_FILE_BYTES
+        ));
+    }
+    let handle =
+        std::fs::File::open(path).map_err(|e| format!("cannot read import file '{file}': {e}"))?;
+    let mut buf = Vec::new();
+    use std::io::Read;
+    handle
+        .take(knowledge_store::MAX_IMPORT_FILE_BYTES + 1)
+        .read_to_end(&mut buf)
+        .map_err(|e| format!("cannot read import file '{file}': {e}"))?;
+    if buf.len() as u64 > knowledge_store::MAX_IMPORT_FILE_BYTES {
+        return Err(format!(
+            "invalid import payload: import file is too large: over {} bytes allowed",
+            knowledge_store::MAX_IMPORT_FILE_BYTES
+        ));
+    }
+    String::from_utf8(buf)
+        .map_err(|_| format!("invalid import payload: import file is not valid UTF-8: '{file}'"))
 }
 
 fn knowledge_envelope(

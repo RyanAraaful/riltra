@@ -262,7 +262,7 @@ const MAX_JSON_DEPTH: usize = 64;
 /// rejected explicitly. Never parse mutations into `serde_json::Value`: its
 /// last-wins objects silently discard duplicate-key evidence.
 #[derive(Debug, Clone, PartialEq)]
-enum JVal {
+pub(crate) enum JVal {
     Null,
     Bool(bool),
     Int(i64),
@@ -374,7 +374,7 @@ impl<'de> Visitor<'de> for DupCheckVisitor {
     }
 }
 
-fn parse_dupless(text: &str) -> Result<JVal, String> {
+pub(crate) fn parse_dupless(text: &str) -> Result<JVal, String> {
     let mut deserializer = serde_json::Deserializer::from_str(text);
     let value = deserializer
         .deserialize_any(DupCheckVisitor {
@@ -386,18 +386,22 @@ fn parse_dupless(text: &str) -> Result<JVal, String> {
     Ok(value)
 }
 
-fn as_obj<'a>(value: &'a JVal, path: &str) -> Result<&'a [(String, JVal)], String> {
+pub(crate) fn as_obj<'a>(value: &'a JVal, path: &str) -> Result<&'a [(String, JVal)], String> {
     match value {
         JVal::Obj(fields) => Ok(fields),
         _ => Err(format!("type mismatch: field `{path}` must be an object")),
     }
 }
 
-fn find<'a>(obj: &'a [(String, JVal)], key: &str) -> Option<&'a JVal> {
+pub(crate) fn find<'a>(obj: &'a [(String, JVal)], key: &str) -> Option<&'a JVal> {
     obj.iter().find(|(k, _)| k == key).map(|(_, v)| v)
 }
 
-fn check_known(obj: &[(String, JVal)], allowed: &[&str], path: &str) -> Result<(), String> {
+pub(crate) fn check_known(
+    obj: &[(String, JVal)],
+    allowed: &[&str],
+    path: &str,
+) -> Result<(), String> {
     for (key, _) in obj {
         if !allowed.contains(&key.as_str()) {
             return Err(format!("unknown field `{path}.{key}`"));
@@ -406,7 +410,7 @@ fn check_known(obj: &[(String, JVal)], allowed: &[&str], path: &str) -> Result<(
     Ok(())
 }
 
-fn req_str(obj: &[(String, JVal)], key: &str, path: &str) -> Result<String, String> {
+pub(crate) fn req_str(obj: &[(String, JVal)], key: &str, path: &str) -> Result<String, String> {
     match find(obj, key) {
         None => Err(format!("missing required field `{path}.{key}`")),
         Some(JVal::Str(s)) => Ok(s.clone()),
@@ -416,7 +420,7 @@ fn req_str(obj: &[(String, JVal)], key: &str, path: &str) -> Result<String, Stri
     }
 }
 
-fn req_int_non_negative(value: &JVal, path: &str) -> Result<i64, String> {
+pub(crate) fn req_int_non_negative(value: &JVal, path: &str) -> Result<i64, String> {
     match value {
         JVal::Int(i) if *i >= 0 => Ok(*i),
         JVal::UInt(u) => i64::try_from(*u).map_err(|_| format!("field `{path}` is out of range")),
