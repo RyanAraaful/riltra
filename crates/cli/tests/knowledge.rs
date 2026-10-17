@@ -3495,3 +3495,511 @@ fn port_import_rejects_cross_store_supersedes_cycles() {
         "a refused import must not change the store"
     );
 }
+
+// --- G-BACK: backup, verify, restore -----------------------------------------
+
+fn with_suffix(base: &Path, suffix: &str) -> PathBuf {
+    let mut os = base.as_os_str().to_os_string();
+    os.push(suffix);
+    PathBuf::from(os)
+}
+
+fn backup(home: &Path, repo: &str, out: &Path) -> (i32, String, String) {
+    run(
+        home,
+        &[
+            "knowledge",
+            "backup",
+            "--repo",
+            repo,
+            "--out",
+            out.to_str().unwrap(),
+        ],
+    )
+}
+
+fn verify(home: &Path, repo: &str) -> (i32, String, String) {
+    run(home, &["knowledge", "verify", "--repo", repo])
+}
+
+fn restore(home: &Path, repo: &str, file: &Path, overwrite: bool) -> (i32, String, String) {
+    let mut args = vec![
+        "knowledge",
+        "restore",
+        "--repo",
+        repo,
+        "--file",
+        file.to_str().unwrap(),
+    ];
+    if overwrite {
+        args.push("--overwrite");
+    }
+    run(home, &args)
+}
+
+fn copy_backup(base: &Path, to: &Path) {
+    std::fs::copy(with_suffix(base, ".db"), with_suffix(to, ".db")).unwrap();
+    std::fs::copy(
+        with_suffix(base, ".manifest.json"),
+        with_suffix(to, ".manifest.json"),
+    )
+    .unwrap();
+}
+
+fn dir_names(path: &Path) -> Vec<String> {
+    std::fs::read_dir(path)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect()
+}
+
+#[test]
+fn backup_verify_restore_round_trips_and_reopens_cleanly() {
+    let h1 = home("back-roundtrip-1");
+    let dir1 = port_seed(&h1);
+    let orig = h1.join("orig.jsonl");
+    let (code, export_out, err) = export(&h1, "krepo", &["--out", orig.to_str().unwrap()]);
+    assert_eq!(code, 0, "export: {err}");
+    let orig_text = read_text(&orig);
+    let generation = field_num(&export_out, "generation");
+    let before = std::fs::read(db_path(&h1, "krepo")).unwrap();
+
+    let base = h1.join("bk");
+    let (code, out, err) = backup(&h1, "krepo", &base);
+    assert_eq!(code, 0, "backup: {err}");
+    assert!(out.contains("\"operation\":\"backup\""), "{out}");
+    assert!(out.contains("\"schema_version\":2"), "{out}");
+    assert!(out.contains("\"records\":4,\"relations\":3"), "{out}");
+    assert_eq!(field_num(&out, "generation"), generation, "{out}");
+    let snap = with_suffix(&base, ".db");
+    let man = with_suffix(&base, ".manifest.json");
+    assert!(snap.is_file(), "snapshot file");
+    assert!(man.is_file(), "manifest file");
+    // A standalone snapshot: no WAL/SHM companions travel with it.
+    assert!(!with_suffix(&snap, "-wal").exists());
+    assert!(!with_suffix(&snap, "-shm").exists());
+    let man_text = read_text(&man);
+    assert!(
+        man_text.contains("\"format\":\"riltra-knowledge-backup\""),
+        "{man_text}"
+    );
+    assert!(man_text.contains("\"version\":1"), "{man_text}");
+    assert!(man_text.contains("\"repo\":\"krepo\""), "{man_text}");
+    assert!(man_text.contains("\"schema_version\":2"), "{man_text}");
+    assert!(
+        man_text.contains("\"records\":4,\"relations\":3"),
+        "{man_text}"
+    );
+
+    // Backup is read-only against the live store.
+    assert_eq!(
+        std::fs::read(db_path(&h1, "krepo")).unwrap(),
+        before,
+        "backup must not mutate the store"
+    );
+    let again = h1.join("again.jsonl");
+    let (code, again_out, err) = export(&h1, "krepo", &["--out", again.to_str().unwrap()]);
+    assert_eq!(code, 0, "re-export: {err}");
+    assert_eq!(field_num(&again_out, "generation"), generation);
+
+    // Verify reports an explicit healthy verdict.
+    let (code, out, err) = verify(&h1, "krepo");
+    assert_eq!(code, 0, "verify: {err}");
+    assert!(out.contains("\"operation\":\"verify\""), "{out}");
+    assert!(out.contains("\"status\":\"ok\""), "{out}");
+    assert!(out.contains("\"records\":4,\"relations\":3"), "{out}");
+
+    // Restore into a fresh registry home bound to the same repository root.
+    let h2 = home("back-roundtrip-2");
+    init(&h2, &dir1, "krepo");
+    let (code, out, err) = restore(&h2, "krepo", &base, false);
+    assert_eq!(code, 0, "restore: {err}");
+    assert!(out.contains("\"operation\":\"restore\""), "{out}");
+    assert!(out.contains("\"overwrote\":false"), "{out}");
+    let restored = h2.join("restored.jsonl");
+    let (code, restored_out, err) = export(&h2, "krepo", &["--out", restored.to_str().unwrap()]);
+    assert_eq!(code, 0, "export restored: {err}");
+    assert_eq!(
+        read_text(&restored),
+        orig_text,
+        "a restored store must export byte-identically"
+    );
+    assert_eq!(field_num(&restored_out, "generation"), generation);
+    assert_eq!(user_version(&h2, "krepo"), 2);
+
+    // The restored store reopens and answers: supersede lineage, lifecycle,
+    // relation retraction, search.
+    let (code, out, err) = run(&h2, &["knowledge", "show", "--repo", "krepo", "--id", "d1"]);
+    assert_eq!(code, 0, "show d1: {err}");
+    assert!(
+        out.contains("\"superseded_by\":{\"id\":\"d2\",\"revision\":1}"),
+        "{out}"
+    );
+    let (code, out, err) = run(&h2, &["knowledge", "show", "--repo", "krepo", "--id", "d2"]);
+    assert_eq!(code, 0, "show d2: {err}");
+    assert!(out.contains("\"confirm_state\":\"confirmed\""), "{out}");
+    let (code, out, err) = run(
+        &h2,
+        &[
+            "knowledge",
+            "related",
+            "--repo",
+            "krepo",
+            "--id",
+            "d3",
+            "--direction",
+            "outbound",
+            "--include-retracted",
+        ],
+    );
+    assert_eq!(code, 0, "related: {err}");
+    assert!(out.contains("\"retracted\":true"), "{out}");
+    let (code, out, err) = run(
+        &h2,
+        &["knowledge", "search", "--repo", "krepo", "--query", "bench"],
+    );
+    assert_eq!(code, 0, "search: {err}");
+    assert!(out.contains("\"total\":1"), "{out}");
+    assert!(out.contains("\"id\":\"b1\""), "{out}");
+    assert_eq!(verify(&h2, "krepo").0, 0, "the restored store must verify");
+
+    // Same-home recovery: the store file disappears; the backup restores it.
+    std::fs::remove_file(db_path(&h1, "krepo")).unwrap();
+    let (code, _, err) = restore(&h1, "krepo", &base, false);
+    assert_eq!(code, 0, "same-home restore: {err}");
+    let recovered = h1.join("recovered.jsonl");
+    assert_eq!(
+        export(&h1, "krepo", &["--out", recovered.to_str().unwrap()]).0,
+        0
+    );
+    assert_eq!(read_text(&recovered), orig_text);
+}
+
+#[test]
+fn backup_refuses_existing_output_and_absent_store() {
+    let h = home("back-refuse");
+    let dir = mkrepo(&h, "krepo");
+    init(&h, &dir, "krepo");
+    // No store yet: neither command has anything to work on, and neither
+    // creates anything.
+    let base = h.join("bk");
+    let (code, _, err) = backup(&h, "krepo", &base);
+    assert_eq!(code, 3, "absent store: {err}");
+    assert!(err.contains("no knowledge store"), "{err}");
+    let (code, _, err) = verify(&h, "krepo");
+    assert_eq!(code, 3, "absent store verify: {err}");
+    assert!(err.contains("no knowledge store"), "{err}");
+    assert!(
+        !with_suffix(&base, ".db").exists(),
+        "a refusal must create nothing"
+    );
+
+    // A v1 (Foundation-only) store backs up, verifies, and restores as v1.
+    assert_eq!(create(&h, "krepo", "d1", "First", "body one").0, 0);
+    assert_eq!(user_version(&h, "krepo"), 1);
+    let (code, out, err) = backup(&h, "krepo", &base);
+    assert_eq!(code, 0, "v1 backup: {err}");
+    assert!(out.contains("\"schema_version\":1"), "{out}");
+    let man_text = read_text(&with_suffix(&base, ".manifest.json"));
+    assert!(man_text.contains("\"schema_version\":1"), "{man_text}");
+    assert!(man_text.contains("\"records\":1"), "{man_text}");
+    assert_eq!(verify(&h, "krepo").0, 0);
+
+    // A second backup to the same base refuses instead of overwriting.
+    let snap_bytes = std::fs::read(with_suffix(&base, ".db")).unwrap();
+    let (code, _, err) = backup(&h, "krepo", &base);
+    assert_eq!(code, 3, "existing output: {err}");
+    assert!(err.contains("already exists"), "{err}");
+    assert_eq!(
+        std::fs::read(with_suffix(&base, ".db")).unwrap(),
+        snap_bytes,
+        "the existing backup must be untouched"
+    );
+
+    // Restoring the v1 backup keeps the store at schema v1.
+    std::fs::remove_file(db_path(&h, "krepo")).unwrap();
+    let (code, _, err) = restore(&h, "krepo", &base, false);
+    assert_eq!(code, 0, "v1 restore: {err}");
+    assert_eq!(user_version(&h, "krepo"), 1, "a v1 backup restores as v1");
+    let (code, out, err) = run(&h, &["knowledge", "show", "--repo", "krepo", "--id", "d1"]);
+    assert_eq!(code, 0, "show: {err}");
+    assert!(out.contains("\"title\":\"First\""), "{out}");
+    assert_eq!(verify(&h, "krepo").0, 0);
+}
+
+#[test]
+fn backup_restore_rejects_missing_corrupt_and_mismatched_artifacts() {
+    let h = home("back-reject");
+    port_seed(&h);
+    let base = h.join("bk");
+    assert_eq!(backup(&h, "krepo", &base).0, 0, "seed backup");
+    let db = db_path(&h, "krepo");
+    let before = std::fs::read(&db).unwrap();
+    let other = mkrepo(&h, "other");
+    init(&h, &other, "other");
+
+    // Missing pieces: no manifest, no snapshot.
+    let miss_man = h.join("miss-man");
+    copy_backup(&base, &miss_man);
+    std::fs::remove_file(with_suffix(&miss_man, ".manifest.json")).unwrap();
+    let (code, _, err) = restore(&h, "krepo", &miss_man, true);
+    assert_eq!(code, 3, "missing manifest: {err}");
+    assert!(err.contains("manifest"), "{err}");
+
+    let miss_db = h.join("miss-db");
+    copy_backup(&base, &miss_db);
+    std::fs::remove_file(with_suffix(&miss_db, ".db")).unwrap();
+    let (code, _, err) = restore(&h, "krepo", &miss_db, true);
+    assert_eq!(code, 3, "missing snapshot: {err}");
+    assert!(err.contains("backup file missing"), "{err}");
+
+    // Binding mismatch: another repository, and a tampered canonical root.
+    let (code, _, err) = restore(&h, "other", &base, true);
+    assert_eq!(code, 3, "cross-repo restore: {err}");
+    assert!(err.contains("binding mismatch"), "{err}");
+    assert!(
+        !db_path(&h, "other").exists(),
+        "a refused restore must not create a store"
+    );
+
+    let tam_root = h.join("tam-root");
+    copy_backup(&base, &tam_root);
+    write_text(
+        &with_suffix(&tam_root, ".manifest.json"),
+        "{\"format\":\"riltra-knowledge-backup\",\"version\":1,\"repo\":\"krepo\",\
+         \"canonical_root\":\"Z:\\\\nowhere\",\"schema_version\":2,\"records\":4,\"relations\":3}\n",
+    );
+    let (code, _, err) = restore(&h, "krepo", &tam_root, true);
+    assert_eq!(code, 3, "tampered root: {err}");
+    assert!(err.contains("binding mismatch"), "{err}");
+
+    // Count mismatch: the manifest no longer describes its snapshot.
+    let tam_counts = h.join("tam-counts");
+    copy_backup(&base, &tam_counts);
+    let man = read_text(&with_suffix(&tam_counts, ".manifest.json"));
+    write_text(
+        &with_suffix(&tam_counts, ".manifest.json"),
+        &man.replace("\"records\":4", "\"records\":99"),
+    );
+    let (code, _, err) = restore(&h, "krepo", &tam_counts, true);
+    assert_eq!(code, 3, "count mismatch: {err}");
+    assert!(err.contains("corrupt backup"), "{err}");
+
+    // Forward versions: manifest format, manifest schema, snapshot stamp.
+    let fwd_man = h.join("fwd-man");
+    copy_backup(&base, &fwd_man);
+    let man = read_text(&with_suffix(&fwd_man, ".manifest.json"));
+    write_text(
+        &with_suffix(&fwd_man, ".manifest.json"),
+        &man.replace("\"version\":1", "\"version\":2"),
+    );
+    let (code, _, err) = restore(&h, "krepo", &fwd_man, true);
+    assert_eq!(code, 3, "forward manifest version: {err}");
+    assert!(err.contains("unsupported backup manifest version"), "{err}");
+
+    let fwd_schema = h.join("fwd-schema");
+    copy_backup(&base, &fwd_schema);
+    let man = read_text(&with_suffix(&fwd_schema, ".manifest.json"));
+    write_text(
+        &with_suffix(&fwd_schema, ".manifest.json"),
+        &man.replace("\"schema_version\":2", "\"schema_version\":3"),
+    );
+    let (code, _, err) = restore(&h, "krepo", &fwd_schema, true);
+    assert_eq!(code, 3, "forward manifest schema: {err}");
+    assert!(err.contains("unsupported backup schema version"), "{err}");
+
+    let fwd_db = h.join("fwd-db");
+    copy_backup(&base, &fwd_db);
+    {
+        let conn = rusqlite::Connection::open(with_suffix(&fwd_db, ".db")).unwrap();
+        conn.execute_batch("PRAGMA user_version = 3").unwrap();
+    }
+    let (code, _, err) = restore(&h, "krepo", &fwd_db, true);
+    assert_eq!(code, 3, "forward snapshot schema: {err}");
+    assert!(err.contains("forward knowledge schema version 3"), "{err}");
+
+    // Corrupt snapshots: a truncated file and a zeroed header.
+    let trunc = h.join("trunc");
+    copy_backup(&base, &trunc);
+    let snap = with_suffix(&trunc, ".db");
+    let len = std::fs::metadata(&snap).unwrap().len();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&snap)
+        .unwrap()
+        .set_len(len / 2)
+        .unwrap();
+    let (code, _, err) = restore(&h, "krepo", &trunc, true);
+    assert_eq!(code, 3, "truncated snapshot: {err}");
+    assert!(err.contains("corrupt backup"), "{err}");
+
+    let zero = h.join("zero");
+    copy_backup(&base, &zero);
+    let snap = with_suffix(&zero, ".db");
+    let mut bytes = std::fs::read(&snap).unwrap();
+    for b in bytes.iter_mut().take(16) {
+        *b = 0;
+    }
+    std::fs::write(&snap, &bytes).unwrap();
+    let (code, _, err) = restore(&h, "krepo", &zero, true);
+    assert_eq!(code, 3, "zeroed header: {err}");
+    assert!(err.contains("corrupt backup"), "{err}");
+
+    // Every refusal left the live store untouched and cleaned its staging.
+    assert_eq!(
+        std::fs::read(&db).unwrap(),
+        before,
+        "refusals must not touch the store"
+    );
+    let names = dir_names(db.parent().unwrap());
+    assert!(
+        !names.iter().any(|n| n.contains("restore-tmp")),
+        "staging must be cleaned: {names:?}"
+    );
+}
+
+#[test]
+fn backup_restore_overwrites_only_with_the_flag() {
+    let h = home("back-overwrite");
+    port_seed(&h);
+    let base = h.join("bk");
+    assert_eq!(backup(&h, "krepo", &base).0, 0);
+    let orig = h.join("orig.jsonl");
+    assert_eq!(export(&h, "krepo", &["--out", orig.to_str().unwrap()]).0, 0);
+    let orig_text = read_text(&orig);
+    let db = db_path(&h, "krepo");
+
+    // The store moves on after the backup.
+    assert_eq!(create(&h, "krepo", "d4", "Fourth", "body four").0, 0);
+    let moved = std::fs::read(&db).unwrap();
+
+    // Without --overwrite the existing store is refused and untouched.
+    let (code, _, err) = restore(&h, "krepo", &base, false);
+    assert_eq!(code, 3, "existing target: {err}");
+    assert!(err.contains("--overwrite"), "{err}");
+    assert_eq!(
+        std::fs::read(&db).unwrap(),
+        moved,
+        "a refused restore must not touch the store"
+    );
+
+    // With --overwrite the backup replaces it; the later record is gone.
+    let (code, out, err) = restore(&h, "krepo", &base, true);
+    assert_eq!(code, 0, "overwrite: {err}");
+    assert!(out.contains("\"overwrote\":true"), "{out}");
+    let after = h.join("after.jsonl");
+    assert_eq!(
+        export(&h, "krepo", &["--out", after.to_str().unwrap()]).0,
+        0
+    );
+    assert_eq!(
+        read_text(&after),
+        orig_text,
+        "overwrite must restore the backup content"
+    );
+    assert_eq!(user_version(&h, "krepo"), 2);
+    let names = dir_names(db.parent().unwrap());
+    assert!(
+        !names.iter().any(|n| n.contains("restore-tmp")),
+        "staging must be cleaned: {names:?}"
+    );
+}
+
+#[test]
+fn backup_restore_failed_replacement_preserves_original_and_cleans_staging() {
+    let h = home("back-replace");
+    port_seed(&h);
+    let base = h.join("bk");
+    assert_eq!(backup(&h, "krepo", &base).0, 0);
+    let snap = with_suffix(&base, ".db");
+    let man = with_suffix(&base, ".manifest.json");
+    let snap_before = std::fs::read(&snap).unwrap();
+    let man_before = std::fs::read(&man).unwrap();
+    let db = db_path(&h, "krepo");
+
+    // A directory squats on the store path, so promotion cannot succeed.
+    std::fs::remove_file(&db).unwrap();
+    std::fs::create_dir(&db).unwrap();
+    let (code, _, err) = restore(&h, "krepo", &base, true);
+    assert_eq!(code, 3, "failed replacement: {err}");
+    assert!(err.contains("cannot replace knowledge store"), "{err}");
+    assert!(db.is_dir(), "the squatter path must survive the failure");
+    let names = dir_names(db.parent().unwrap());
+    assert!(
+        !names.iter().any(|n| n.contains("restore-tmp")),
+        "staging must be cleaned: {names:?}"
+    );
+    assert_eq!(
+        std::fs::read(&snap).unwrap(),
+        snap_before,
+        "the snapshot must survive"
+    );
+    assert_eq!(
+        std::fs::read(&man).unwrap(),
+        man_before,
+        "the manifest must survive"
+    );
+}
+
+#[test]
+fn backup_reads_a_consistent_snapshot_while_the_store_is_writing() {
+    let h = home("back-snapshot");
+    port_seed(&h);
+    let db = db_path(&h, "krepo");
+    let base = h.join("bk");
+    // A concurrent writer holds an uncommitted change while the backup runs.
+    let writer = rusqlite::Connection::open(&db).unwrap();
+    writer
+        .execute_batch(
+            "BEGIN IMMEDIATE; UPDATE meta SET value = '9999' WHERE key = 'knowledge_generation';",
+        )
+        .unwrap();
+    let (code, out, err) = backup(&h, "krepo", &base);
+    assert_eq!(code, 0, "backup under a writer: {err}");
+    assert!(
+        !out.contains("9999"),
+        "the snapshot must not carry uncommitted state: {out}"
+    );
+    assert!(with_suffix(&base, ".db").is_file(), "snapshot file");
+    writer.execute_batch("ROLLBACK").unwrap();
+    drop(writer);
+    let after = h.join("after.jsonl");
+    let (code, after_out, err) = export(&h, "krepo", &["--out", after.to_str().unwrap()]);
+    assert_eq!(code, 0, "export after rollback: {err}");
+    assert_eq!(
+        field_num(&out, "generation"),
+        field_num(&after_out, "generation"),
+        "the snapshot is the committed state"
+    );
+    assert_eq!(verify(&h, "krepo").0, 0);
+}
+
+#[test]
+fn backup_restore_rejects_symlink_targets() {
+    let h = home("back-symlink");
+    port_seed(&h);
+    let base = h.join("bk");
+    assert_eq!(backup(&h, "krepo", &base).0, 0);
+    let db = db_path(&h, "krepo");
+    std::fs::remove_file(&db).unwrap();
+    let elsewhere = h.join("elsewhere.db");
+    std::fs::write(&elsewhere, b"not a store").unwrap();
+    #[cfg(unix)]
+    let made = std::os::unix::fs::symlink(&elsewhere, &db).is_ok();
+    #[cfg(windows)]
+    let made = std::os::windows::fs::symlink_file(&elsewhere, &db).is_ok();
+    if !made {
+        return; // OS refused symlinks here; nothing to prove.
+    }
+    let (code, _, err) = restore(&h, "krepo", &base, true);
+    assert_eq!(code, 3, "symlink target: {err}");
+    assert!(err.contains("escapes via link"), "{err}");
+    assert!(
+        std::fs::symlink_metadata(&db)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the link must survive the refusal"
+    );
+    assert_eq!(std::fs::read(&elsewhere).unwrap(), b"not a store");
+}

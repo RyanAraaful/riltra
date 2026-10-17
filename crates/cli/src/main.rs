@@ -8,6 +8,7 @@
 // errors so scripts stay machine-readable.
 
 mod args;
+mod backup;
 mod doctor;
 mod edges;
 mod git;
@@ -48,7 +49,7 @@ pub(crate) fn usage() -> String {
   {NAME} semantic query --repo <name> --path <rel> --line <n> --col <n> [--refs] [--lsp-server <abs-path>]
   {NAME} callers --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--limit <n>] [--offset <n>]
   {NAME} callees --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--limit <n>] [--offset <n>]
-  {NAME} trace --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--to <path:line:col>] [--depth <n>] [--limit <n>] [--offset <n>]\n  {NAME} impact --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--depth <n>] [--limit <n>] [--offset <n>]\n  {NAME} knowledge create --repo <name> --input -\n  {NAME} knowledge show --repo <name> --id <id> [--revision <n>]\n  {NAME} knowledge update --repo <name> --id <id> --expected-revision <n> --input -\n  {NAME} knowledge history --repo <name> --id <id> [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge search --repo <name> --query <text> [--kind <kind>] [--include-archived] [--include-superseded] [--include-retracted] [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge link --repo <name> --input -\n  {NAME} knowledge unlink --repo <name> --relation <id> --input -\n  {NAME} knowledge related --repo <name> --id <id> [--revision <n>] [--direction inbound|outbound] [--include-retracted] [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge export --repo <name> [--format jsonl|md] [--out <path>]\n  {NAME} knowledge import --repo <name> --file <path>\n\nCommands:\n  status       Print deterministic bootstrap status as JSON\n  init         Register a local repository root\n  repo list    List registered repositories as JSON\n  repo status  Git/worktree fingerprint of a registered repository\n  doctor       Path-security and repository health checks as JSON\n  scan         Syntax facts (definitions/imports/calls) as JSON\n  index        Build the durable code index for a repository\n  index status Report index freshness (fresh/stale/unknown) as JSON\n  search       Search indexed symbols as JSON\n  semantic import Import a SCIP index against the live snapshot as JSON\n  semantic status Per-provider binding verification as JSON\n  semantic query Single-hop definition/reference lookup as JSON\n  callers Direct callers of the anchored identity as JSON\n  callees Direct callees of the anchored identity as JSON\n  trace Bounded plausible static paths with per-hop evidence\n  impact Conservative inbound impact with evidence and UNKNOWN default\n"
+  {NAME} trace --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--to <path:line:col>] [--depth <n>] [--limit <n>] [--offset <n>]\n  {NAME} impact --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--depth <n>] [--limit <n>] [--offset <n>]\n  {NAME} knowledge create --repo <name> --input -\n  {NAME} knowledge show --repo <name> --id <id> [--revision <n>]\n  {NAME} knowledge update --repo <name> --id <id> --expected-revision <n> --input -\n  {NAME} knowledge history --repo <name> --id <id> [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge search --repo <name> --query <text> [--kind <kind>] [--include-archived] [--include-superseded] [--include-retracted] [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge link --repo <name> --input -\n  {NAME} knowledge unlink --repo <name> --relation <id> --input -\n  {NAME} knowledge related --repo <name> --id <id> [--revision <n>] [--direction inbound|outbound] [--include-retracted] [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge export --repo <name> [--format jsonl|md] [--out <path>]\n  {NAME} knowledge import --repo <name> --file <path>\n  {NAME} knowledge backup --repo <name> --out <path>\n  {NAME} knowledge restore --repo <name> --file <path> [--overwrite]\n  {NAME} knowledge verify --repo <name>\n\nCommands:\n  status       Print deterministic bootstrap status as JSON\n  init         Register a local repository root\n  repo list    List registered repositories as JSON\n  repo status  Git/worktree fingerprint of a registered repository\n  doctor       Path-security and repository health checks as JSON\n  scan         Syntax facts (definitions/imports/calls) as JSON\n  index        Build the durable code index for a repository\n  index status Report index freshness (fresh/stale/unknown) as JSON\n  search       Search indexed symbols as JSON\n  semantic import Import a SCIP index against the live snapshot as JSON\n  semantic status Per-provider binding verification as JSON\n  semantic query Single-hop definition/reference lookup as JSON\n  callers Direct callers of the anchored identity as JSON\n  callees Direct callees of the anchored identity as JSON\n  trace Bounded plausible static paths with per-hop evidence\n  impact Conservative inbound impact with evidence and UNKNOWN default\n"
     )
 }
 
@@ -1290,6 +1291,16 @@ fn cmd_knowledge(op: args::KnowledgeOp, out: &mut String, err: &mut String) -> i
             out: out_path,
         } => knowledge_export(&repo, format.as_deref(), out_path.as_deref(), out, err),
         args::KnowledgeOp::Import { repo, file } => knowledge_import(&repo, &file, out, err),
+        args::KnowledgeOp::Backup {
+            repo,
+            out: out_path,
+        } => knowledge_backup(&repo, &out_path, out, err),
+        args::KnowledgeOp::Restore {
+            repo,
+            file,
+            overwrite,
+        } => knowledge_restore(&repo, &file, overwrite, out, err),
+        args::KnowledgeOp::Verify { repo } => knowledge_verify(&repo, out, err),
         args::KnowledgeOp::Related {
             repo,
             id,
@@ -1497,7 +1508,10 @@ impl<'de> Deserialize<'de> for RawObject {
     }
 }
 
-fn strict_object(bytes: &[u8], known: &[&str]) -> Result<Vec<(String, serde_json::Value)>, String> {
+pub(crate) fn strict_object(
+    bytes: &[u8],
+    known: &[&str],
+) -> Result<Vec<(String, serde_json::Value)>, String> {
     if bytes.len() > knowledge::MAX_MUTATION_JSON_BYTES {
         return Err(format!(
             "mutation input too large: {} bytes, at most {} allowed",
@@ -1531,14 +1545,17 @@ fn field_value<'a>(
         .ok_or_else(|| format!("missing required field `{key}`"))
 }
 
-fn field_str(fields: &[(String, serde_json::Value)], key: &str) -> Result<String, String> {
+pub(crate) fn field_str(
+    fields: &[(String, serde_json::Value)],
+    key: &str,
+) -> Result<String, String> {
     match field_value(fields, key)? {
         serde_json::Value::String(s) => Ok(s.clone()),
         _ => Err(format!("field `{key}` must be a string")),
     }
 }
 
-fn field_u64(fields: &[(String, serde_json::Value)], key: &str) -> Result<u64, String> {
+pub(crate) fn field_u64(fields: &[(String, serde_json::Value)], key: &str) -> Result<u64, String> {
     match field_value(fields, key)? {
         serde_json::Value::Number(n) => n
             .as_u64()
@@ -1939,6 +1956,130 @@ fn knowledge_import(repo: &str, file: &str, out: &mut String, err: &mut String) 
     );
     *out = knowledge_envelope(repo, report.generation, "import", &result, None);
     0
+}
+
+/// Resolve `--repo`, refuse an absent store, and open the live read
+/// connection: the shared prologue of backup and verify, which operate on
+/// the store itself rather than treating an absent store as empty.
+fn knowledge_existing_store(
+    repo: &str,
+    err: &mut String,
+) -> Result<(String, registry::RepoEntry, rusqlite::Connection), i32> {
+    let (root, entry) = knowledge_repo(repo, err)?;
+    let db = knowledge_store::knowledge_db_path(&paths::config_dir(), &entry.name);
+    match knowledge_store_absent(&db) {
+        Ok(true) => {
+            err.push_str(&format!(
+                "error: no knowledge store for repository '{repo}'\n"
+            ));
+            return Err(3);
+        }
+        Ok(false) => {}
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            return Err(3);
+        }
+    }
+    let conn = knowledge_open(repo, false, err)?;
+    Ok((root, entry, conn.1))
+}
+
+/// `knowledge backup`: consistent snapshot of the live store plus a manifest
+/// bound to the registered repository and canonical root. Read-only against
+/// the store; the manifest describes the snapshot itself.
+fn knowledge_backup(repo: &str, out_path: &str, out: &mut String, err: &mut String) -> i32 {
+    let (root, entry, conn) = match knowledge_existing_store(repo, err) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    let base = Path::new(out_path);
+    let (manifest, generation) = match backup::backup_to(&conn, &entry, Path::new(&root), base) {
+        Ok(v) => v,
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            return 3;
+        }
+    };
+    let backup_paths = backup::backup_paths(base);
+    let result = format!(
+        "{{\"db\":\"{}\",\"manifest\":\"{}\",\"schema_version\":{},\"records\":{},\"relations\":{}}}",
+        json::escape(&backup_paths.db.to_string_lossy()),
+        json::escape(&backup_paths.manifest.to_string_lossy()),
+        manifest.schema_version,
+        manifest.records,
+        manifest.relations
+    );
+    *out = knowledge_envelope(&entry.name, generation, "backup", &result, None);
+    0
+}
+
+/// `knowledge verify`: structural verification of the live store. Every
+/// refusal carries the specific structural reason (exit 3).
+fn knowledge_verify(repo: &str, out: &mut String, err: &mut String) -> i32 {
+    let (root, entry, conn) = match knowledge_existing_store(repo, err) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    let check = match knowledge_store::verify_store(&conn, &entry, Path::new(&root)) {
+        Ok(c) => c,
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            return 3;
+        }
+    };
+    let generation = match knowledge_store::read_generation(&conn) {
+        Ok(g) => g,
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            return 3;
+        }
+    };
+    let result = format!(
+        "{{\"status\":\"ok\",\"schema_version\":{},\"records\":{},\"relations\":{}}}",
+        check.schema_version, check.records, check.relations
+    );
+    *out = knowledge_envelope(&entry.name, generation, "verify", &result, None);
+    0
+}
+
+/// `knowledge restore`: offline restore of a backup into this repository's
+/// store. Every refusal leaves the existing store untouched.
+fn knowledge_restore(
+    repo: &str,
+    file: &str,
+    overwrite: bool,
+    out: &mut String,
+    err: &mut String,
+) -> i32 {
+    let (root, entry) = match knowledge_repo(repo, err) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    match backup::restore_from(
+        &paths::config_dir(),
+        &entry,
+        Path::new(&root),
+        Path::new(file),
+        overwrite,
+    ) {
+        Ok(report) => {
+            let db = knowledge_store::knowledge_db_path(&paths::config_dir(), &entry.name);
+            let result = format!(
+                "{{\"path\":\"{}\",\"schema_version\":{},\"records\":{},\"relations\":{},\"overwrote\":{}}}",
+                json::escape(&db.to_string_lossy()),
+                report.schema_version,
+                report.records,
+                report.relations,
+                report.overwrote
+            );
+            *out = knowledge_envelope(&entry.name, report.generation, "restore", &result, None);
+            0
+        }
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            3
+        }
+    }
 }
 
 fn import_error_exit(message: &str) -> i32 {

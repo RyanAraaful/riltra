@@ -170,6 +170,18 @@ pub enum KnowledgeOp {
         repo: String,
         file: String,
     },
+    Backup {
+        repo: String,
+        out: String,
+    },
+    Restore {
+        repo: String,
+        file: String,
+        overwrite: bool,
+    },
+    Verify {
+        repo: String,
+    },
 }
 
 /// Parse full argv (including argv[0]-style first token). `Err` is the usage
@@ -677,6 +689,27 @@ fn parse_knowledge_op(sub: &str, args: &[String]) -> Result<KnowledgeOp, String>
             Ok(KnowledgeOp::Import {
                 repo: knowledge_value(&v, "--repo")?,
                 file: knowledge_value(&v, "--file")?,
+            })
+        }
+        "backup" => {
+            let (v, _) = knowledge_flags(args, 2, &["--repo", "--out"], &[])?;
+            Ok(KnowledgeOp::Backup {
+                repo: knowledge_value(&v, "--repo")?,
+                out: knowledge_value(&v, "--out")?,
+            })
+        }
+        "restore" => {
+            let (v, flags) = knowledge_flags(args, 2, &["--repo", "--file"], &["--overwrite"])?;
+            Ok(KnowledgeOp::Restore {
+                repo: knowledge_value(&v, "--repo")?,
+                file: knowledge_value(&v, "--file")?,
+                overwrite: flags.contains("--overwrite"),
+            })
+        }
+        "verify" => {
+            let (v, _) = knowledge_flags(args, 2, &["--repo"], &[])?;
+            Ok(KnowledgeOp::Verify {
+                repo: knowledge_value(&v, "--repo")?,
             })
         }
         _ => Err(crate::usage()),

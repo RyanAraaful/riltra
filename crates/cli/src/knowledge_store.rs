@@ -258,6 +258,25 @@ fn ensure_knowledge_dir(chome: &Path, create: bool) -> Result<PathBuf, String> {
     }
 }
 
+/// Resolve the restore target without opening or creating a store: canonical
+/// home, ensured knowledge directory, and the store path with its companion
+/// paths, rejecting links at every store-controlled path. Restore resolves
+/// paths this way so a refused restore never creates an empty store first.
+pub fn restore_target_paths(
+    home: &Path,
+    repo: &RepoEntry,
+) -> Result<(PathBuf, [PathBuf; 3]), String> {
+    let chome = canonical_home(home, true)?;
+    let cdir = ensure_knowledge_dir(&chome, true)?;
+    let db = cdir.join(format!("{}.db", repo.name));
+    let companions = companion_paths(&db);
+    reject_link(&db)?;
+    for p in companions.iter() {
+        reject_link(p)?;
+    }
+    Ok((db, companions))
+}
+
 const SCHEMA_SQL: &str = "
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE records (
@@ -544,6 +563,68 @@ fn check_meta(
         ));
     }
     Ok(())
+}
+
+/// Outcome of a structural verification of one knowledge database.
+#[derive(Debug, PartialEq)]
+pub struct StoreCheck {
+    pub schema_version: u32,
+    pub records: u64,
+    pub relations: u64,
+}
+
+/// Structural verification of an already-open knowledge database, used by
+/// `knowledge verify` on the live store and by restore on the staged
+/// snapshot before promotion: `PRAGMA integrity_check` must pass, both
+/// version stamps must agree on an accepted schema version, the required
+/// tables for that version must exist, the meta binding must name `repo` at
+/// `croot`, and counts are reported for manifest comparison. Structural
+/// only: no digest and no authenticity claim (spec D6).
+pub fn verify_store(
+    conn: &Connection,
+    repo: &RepoEntry,
+    croot: &Path,
+) -> Result<StoreCheck, String> {
+    let verdict: String = conn
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .map_err(|e| format!("corrupt knowledge store: integrity check failed: {e}"))?;
+    if verdict != "ok" {
+        return Err(format!(
+            "corrupt knowledge store: integrity check reported: {verdict}"
+        ));
+    }
+    let version: u32 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .map_err(|e| format!("corrupt knowledge store: cannot read schema version: {e}"))?;
+    if version > KNOWLEDGE_SCHEMA_VERSION {
+        return Err(format!(
+            "forward knowledge schema version {version} for '{}'",
+            repo.name
+        ));
+    }
+    if version != 1 && version != KNOWLEDGE_SCHEMA_VERSION {
+        return Err(format!(
+            "corrupt knowledge store for '{}': unexpected schema version {version}",
+            repo.name
+        ));
+    }
+    check_schema_complete(conn, repo, version)?;
+    check_meta(conn, repo, croot, version)?;
+    let records: i64 = conn
+        .query_row("SELECT count(DISTINCT id) FROM records", [], |row| {
+            row.get(0)
+        })
+        .map_err(|e| format!("corrupt knowledge store: cannot count records: {e}"))?;
+    let relations: i64 = conn
+        .query_row("SELECT count(*) FROM relations", [], |row| row.get(0))
+        .map_err(|e| format!("corrupt knowledge store: cannot count relations: {e}"))?;
+    Ok(StoreCheck {
+        schema_version: version,
+        records: u64::try_from(records)
+            .map_err(|_| "corrupt knowledge store: negative record count".to_string())?,
+        relations: u64::try_from(relations)
+            .map_err(|_| "corrupt knowledge store: negative relation count".to_string())?,
+    })
 }
 
 /// One page of immutable revision history with its generation guard.
