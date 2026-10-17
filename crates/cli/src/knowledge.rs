@@ -142,6 +142,52 @@ pub fn validate_relation_id(id: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// A relation-id reference for retraction. Caller-supplied ids keep the
+/// strict cap of [`validate_relation_id`]; a store-derived `supersedes`
+/// lineage id is additionally accepted at any length when it parses exactly
+/// as `supersedes:<record-id>:<revision>:<record-id>:<revision>` with valid
+/// record ids and canonical decimal revisions. Only that exact shape is exempt:
+/// malformed or unrelated over-limit ids are rejected like any other invalid
+/// caller id, and creation (`link`) stays capped by [`validate_relation_id`].
+pub fn validate_relation_reference(id: &str) -> Result<(), String> {
+    if validate_relation_id(id).is_ok() {
+        return Ok(());
+    }
+    fn invalid(id: &str) -> String {
+        format!("invalid relation id: {id:?}")
+    }
+    let mut parts = id.split(':');
+    let head = parts.next();
+    let target_id = parts.next();
+    let target_rev = parts.next();
+    let src_id = parts.next();
+    let src_rev = parts.next();
+    let (Some("supersedes"), Some(target_id), Some(target_rev), Some(src_id), Some(src_rev)) =
+        (head, target_id, target_rev, src_id, src_rev)
+    else {
+        return Err(invalid(id));
+    };
+    if parts.next().is_some() {
+        return Err(invalid(id));
+    }
+    if validate_id(target_id).is_err()
+        || validate_id(src_id).is_err()
+        || !decimal_revision(target_rev)
+        || !decimal_revision(src_rev)
+    {
+        return Err(invalid(id));
+    }
+    Ok(())
+}
+
+/// A revision as the derived format renders it: a plain decimal in i64 range.
+/// `+1`, leading zeros and values the store could never have rendered are
+/// non-canonical and rejected.
+fn decimal_revision(part: &str) -> bool {
+    part.parse::<u64>()
+        .is_ok_and(|n| n <= i64::MAX as u64 && n.to_string() == part)
+}
+
 pub fn validate_new(input: &NewRecord) -> Result<(), String> {
     validate_id(&input.id)?;
     validate_kind(&input.kind)?;
@@ -795,6 +841,51 @@ mod tests {
         }
         assert!(validate_id(&"a".repeat(129)).is_err());
         assert!(validate_id(&"a".repeat(128)).is_ok());
+    }
+
+    #[test]
+    fn knowledge_relation_reference_rules() {
+        // Caller-supplied references keep the strict 128-byte cap.
+        assert!(validate_relation_reference("relation-1").is_ok());
+        assert!(validate_relation_reference(&"x".repeat(128)).is_ok());
+        assert!(validate_relation_reference(&"x".repeat(129)).is_err());
+        // Full-length store-derived supersede ids are accepted when exactly
+        // well formed, however long.
+        let derived = format!("supersedes:{}:2:{}:1", "a".repeat(128), "b".repeat(128));
+        assert!(derived.len() > 128);
+        assert!(validate_relation_reference(&derived).is_ok());
+        // Over-limit ids without that exact shape stay rejected: malformed
+        // derived syntax, non-canonical revisions (`+1`, leading zeros,
+        // beyond-i64 values) and unrelated prefixes are input errors.
+        for bad in [
+            format!("supersedes:{}:2:{}", "a".repeat(128), "b".repeat(128)),
+            format!("supersedes:{}:x:{}:1", "a".repeat(128), "b".repeat(128)),
+            format!("supersedes:{}:+1:{}:2", "a".repeat(128), "b".repeat(128)),
+            format!("supersedes:{}:02:{}:1", "a".repeat(128), "b".repeat(128)),
+            format!(
+                "supersedes:{}:{}:{}:1",
+                "a".repeat(128),
+                u64::MAX,
+                "b".repeat(128)
+            ),
+            format!("supersedes:{}:2:{}:1:2", "a".repeat(128), "b".repeat(128)),
+            format!("superseded:{}:2:{}:1", "a".repeat(128), "b".repeat(128)),
+            format!("supersedes:{}:2:{}:1", "A".repeat(128), "b".repeat(128)),
+            format!(
+                "{}:{}:2:{}:1",
+                "supersedes".repeat(20),
+                "a".repeat(128),
+                "b".repeat(128)
+            ),
+        ] {
+            assert!(
+                validate_relation_reference(&bad).is_err(),
+                "must reject {:?}",
+                &bad[..40]
+            );
+        }
+        // NUL bytes reject any length.
+        assert!(validate_relation_reference(&"n\0".repeat(60)).is_err());
     }
 
     #[test]

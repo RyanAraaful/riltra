@@ -1807,6 +1807,408 @@ fn lifecycle_rejections_surface_documented_exit_codes() {
 }
 
 #[test]
+fn lifecycle_max_length_ids_retract_full_derived_relation_id_via_cli() {
+    let h = home("lifecycle-maxid");
+    let dir = mkrepo(&h, "krepo");
+    init(&h, &dir, "krepo");
+    let old = "o".repeat(128);
+    let new = "n".repeat(128);
+    assert_eq!(create(&h, "krepo", &old, "Old max", "old zqxmax body").0, 0);
+    assert_eq!(create(&h, "krepo", &new, "New max", "new zqxmax body").0, 0);
+    // The derived lineage identity exceeds the 128-byte caller cap by
+    // construction; it must stay complete, never truncated.
+    let derived = format!("supersedes:{new}:1:{old}:2");
+    assert!(derived.len() > 128, "derived id must exceed the caller cap");
+    let (code, out, err) = update(
+        &h,
+        "krepo",
+        &old,
+        1,
+        &supersede_input("Old max", &new, 1, "max ids"),
+    );
+    assert_eq!(code, 0, "supersede: {err}");
+    assert!(out.contains("\"status\":\"superseded\""), "{out}");
+    assert_eq!(user_version(&h, "krepo"), 2);
+    // The full identity is listed, never truncated.
+    let (code, out, err) = run(
+        &h,
+        &[
+            "knowledge",
+            "related",
+            "--repo",
+            "krepo",
+            "--id",
+            &old,
+            "--direction",
+            "inbound",
+        ],
+    );
+    assert_eq!(code, 0, "related: {err}");
+    assert!(out.contains(&derived), "full derived identity: {out}");
+    let (_, show_pre_unlink, _) = run(&h, &["knowledge", "show", "--repo", "krepo", "--id", &old]);
+    let gen_before_unlink = field_num(&show_pre_unlink, "generation");
+    // The full-length id is retractable through the CLI.
+    let (code, out, err) = run_stdin(
+        &h,
+        &[
+            "knowledge",
+            "unlink",
+            "--repo",
+            "krepo",
+            "--relation",
+            &derived,
+            "--input",
+            "-",
+        ],
+        br#"{"author":"a","reason":"lineage mistake"}"#,
+    );
+    assert_eq!(code, 0, "unlink derived id: {err}");
+    assert!(out.contains("\"operation\":\"unlink\""), "{out}");
+    assert!(out.contains("\"retracted\":true"), "{out}");
+    assert!(out.contains(&derived), "{out}");
+    let (_, show_post_unlink, _) = run(&h, &["knowledge", "show", "--repo", "krepo", "--id", &old]);
+    assert_eq!(
+        field_num(&show_post_unlink, "generation"),
+        gen_before_unlink + 1,
+        "a successful retraction must bump the generation once"
+    );
+    // Retraction hides the relation by default and keeps it for audit reads.
+    let (code, out, _) = run(
+        &h,
+        &[
+            "knowledge",
+            "related",
+            "--repo",
+            "krepo",
+            "--id",
+            &old,
+            "--direction",
+            "inbound",
+        ],
+    );
+    assert_eq!(code, 0);
+    assert!(out.contains("\"total\":0"), "{out}");
+    let (code, out, _) = run(
+        &h,
+        &[
+            "knowledge",
+            "related",
+            "--repo",
+            "krepo",
+            "--id",
+            &old,
+            "--direction",
+            "inbound",
+            "--include-retracted",
+        ],
+    );
+    assert_eq!(code, 0);
+    assert!(out.contains(&derived), "{out}");
+    assert!(out.contains("\"retracted\":true"), "{out}");
+    // Repeating the retraction fails (exit 3) and changes nothing.
+    let (_, show_before, _) = run(&h, &["knowledge", "show", "--repo", "krepo", "--id", &old]);
+    let generation = field_num(&show_before, "generation");
+    let (code, _, err) = run_stdin(
+        &h,
+        &[
+            "knowledge",
+            "unlink",
+            "--repo",
+            "krepo",
+            "--relation",
+            &derived,
+            "--input",
+            "-",
+        ],
+        br#"{"author":"a","reason":"again"}"#,
+    );
+    assert_eq!(code, 3, "repeat retraction: {err}");
+    assert!(err.contains("already retracted"), "{err}");
+    let (_, show_after, _) = run(&h, &["knowledge", "show", "--repo", "krepo", "--id", &old]);
+    assert_eq!(
+        field_num(&show_after, "generation"),
+        generation,
+        "a rejected retraction must not bump the generation"
+    );
+}
+
+#[test]
+fn lifecycle_over_limit_relation_ids_stay_strictly_validated() {
+    let h = home("lifecycle-relref");
+    let dir = mkrepo(&h, "krepo");
+    init(&h, &dir, "krepo");
+    assert_eq!(create(&h, "krepo", "d1", "First", "alpha zqxref body").0, 0);
+    let unlink_input = br#"{"author":"a","reason":"junk"}"#;
+    let (_, show_before, _) = run(&h, &["knowledge", "show", "--repo", "krepo", "--id", "d1"]);
+    let generation = field_num(&show_before, "generation");
+    // Arbitrary over-limit caller ids are rejected as input errors, whatever
+    // the derived-format exemption: nothing over the cap without the exact
+    // derived shape.
+    let junk = "x".repeat(200);
+    let (code, _, err) = run_stdin(
+        &h,
+        &[
+            "knowledge",
+            "unlink",
+            "--repo",
+            "krepo",
+            "--relation",
+            &junk,
+            "--input",
+            "-",
+        ],
+        unlink_input,
+    );
+    assert_eq!(code, 2, "arbitrary over-limit id: {err}");
+    assert!(err.contains("invalid relation id"), "{err}");
+    // Malformed or unrelated over-limit shapes are rejected too.
+    for malformed in [
+        format!("supersedes:{}:x:{}:1", "a".repeat(128), "b".repeat(128)),
+        format!("supersedes:{}:1:{}", "a".repeat(128), "b".repeat(128)),
+        format!("supersedes:{}:1:{}:1:9", "a".repeat(128), "b".repeat(128)),
+        format!("superseded:{}:1:{}:1", "a".repeat(128), "b".repeat(128)),
+    ] {
+        let (code, _, err) = run_stdin(
+            &h,
+            &[
+                "knowledge",
+                "unlink",
+                "--repo",
+                "krepo",
+                "--relation",
+                &malformed,
+                "--input",
+                "-",
+            ],
+            unlink_input,
+        );
+        assert_eq!(code, 2, "malformed over-limit id: {err}");
+        assert!(err.contains("invalid relation id"), "{err}");
+    }
+    // A shape-valid but non-existent derived id is a storage conflict: it
+    // reaches the store and resolves to "unknown", never to a mutation.
+    let unrelated = format!("supersedes:{}:1:{}:2", "a".repeat(128), "b".repeat(128));
+    let (code, _, err) = run_stdin(
+        &h,
+        &[
+            "knowledge",
+            "unlink",
+            "--repo",
+            "krepo",
+            "--relation",
+            &unrelated,
+            "--input",
+            "-",
+        ],
+        unlink_input,
+    );
+    assert_eq!(code, 3, "unrelated derived id: {err}");
+    assert!(err.contains("unknown relation id"), "{err}");
+    // No rejection mutated the store: generation, history, relations and the
+    // store version are untouched.
+    let (_, show_after, _) = run(&h, &["knowledge", "show", "--repo", "krepo", "--id", "d1"]);
+    assert_eq!(field_num(&show_after, "generation"), generation);
+    let (_, history, _) = run(
+        &h,
+        &["knowledge", "history", "--repo", "krepo", "--id", "d1"],
+    );
+    assert!(history.contains("\"total\":1"), "{history}");
+    let (_, related, _) = run(
+        &h,
+        &[
+            "knowledge",
+            "related",
+            "--repo",
+            "krepo",
+            "--id",
+            "d1",
+            "--direction",
+            "outbound",
+            "--include-retracted",
+        ],
+    );
+    assert!(related.contains("\"total\":0"), "{related}");
+    // A rejected retraction cannot even leave an orphan row: either the v2
+    // retractions table was never created, or it is empty.
+    let conn = rusqlite::Connection::open(db_path(&h, "krepo")).unwrap();
+    let retractions_table: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'retractions'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let orphan_rows: i64 = if retractions_table == 0 {
+        0
+    } else {
+        conn.query_row("SELECT count(*) FROM retractions", [], |r| r.get(0))
+            .unwrap()
+    };
+    conn.close().unwrap();
+    assert_eq!(orphan_rows, 0);
+    assert_eq!(user_version(&h, "krepo"), 1, "rejections must not migrate");
+}
+
+#[test]
+fn lifecycle_out_of_range_supersede_target_revision_rejected_atomically() {
+    let h = home("lifecycle-targetrange");
+    let dir = mkrepo(&h, "krepo");
+    init(&h, &dir, "krepo");
+    assert_eq!(
+        create(&h, "krepo", "d1", "First", "alpha zqxrange body").0,
+        0
+    );
+    assert_eq!(
+        create(&h, "krepo", "d2", "Second", "beta zqxrange body").0,
+        0
+    );
+    let (_, show_before, _) = run(&h, &["knowledge", "show", "--repo", "krepo", "--id", "d1"]);
+    let generation = field_num(&show_before, "generation");
+    // A target revision beyond the representable range is an input error: the
+    // CLI validator rejects it before any store write (exit 2). The store's
+    // own out-of-range guard stays as defense in depth (unit-tested).
+    let (code, _, err) = update(
+        &h,
+        "krepo",
+        "d1",
+        1,
+        &supersede_input("First", "d2", u64::MAX, "overflow"),
+    );
+    assert_eq!(code, 2, "out-of-range target revision: {err}");
+    assert!(err.contains("out of range"), "{err}");
+    // Nothing mutated: the CLI rejects before the store is even opened, so
+    // this pins the CLI layer (in-store rejection rollback is pinned by the
+    // store unit test); head, generation, history, lineage and store version
+    // stay untouched.
+    let (_, show_after, _) = run(&h, &["knowledge", "show", "--repo", "krepo", "--id", "d1"]);
+    assert!(show_after.contains("\"status\":\"active\""), "{show_after}");
+    assert!(show_after.contains("\"revision\":1"), "{show_after}");
+    assert_eq!(field_num(&show_after, "generation"), generation);
+    assert_eq!(
+        user_version(&h, "krepo"),
+        1,
+        "a CLI-rejected transition must not touch the store version"
+    );
+    let (_, history, _) = run(
+        &h,
+        &["knowledge", "history", "--repo", "krepo", "--id", "d1"],
+    );
+    assert!(history.contains("\"total\":1"), "{history}");
+    let (_, related, _) = run(
+        &h,
+        &[
+            "knowledge",
+            "related",
+            "--repo",
+            "krepo",
+            "--id",
+            "d1",
+            "--direction",
+            "outbound",
+            "--include-retracted",
+        ],
+    );
+    assert!(related.contains("\"total\":0"), "{related}");
+}
+
+#[test]
+fn lifecycle_search_visibility_flags_are_independent_via_cli() {
+    let h = home("lifecycle-visibility");
+    let dir = mkrepo(&h, "krepo");
+    init(&h, &dir, "krepo");
+    assert_eq!(create(&h, "krepo", "r1", "Active", "zqxvis active").0, 0);
+    assert_eq!(
+        create(&h, "krepo", "r2", "Archived", "zqxvis archived").0,
+        0
+    );
+    assert_eq!(
+        create(&h, "krepo", "r3", "Superseded", "zqxvis superseded").0,
+        0
+    );
+    assert_eq!(
+        create(&h, "krepo", "r4", "Retracted", "zqxvis retracted").0,
+        0
+    );
+    let archived = "{\"title\":\"Archived\",\"body\":\"zqxvis archived\",\"status\":\"archived\",\"author\":\"a\",\"evidence\":[]}";
+    assert_eq!(update(&h, "krepo", "r2", 1, archived).0, 0);
+    let superseded = "{\"title\":\"Superseded\",\"body\":\"zqxvis superseded\",\"status\":\"superseded\",\"author\":\"a\",\"evidence\":[],\"superseded_by\":{\"id\":\"r1\",\"revision\":1},\"reason\":\"replaced\"}";
+    assert_eq!(update(&h, "krepo", "r3", 1, superseded).0, 0);
+    let retracted = "{\"title\":\"Retracted\",\"body\":\"zqxvis retracted\",\"status\":\"retracted\",\"author\":\"a\",\"evidence\":[],\"reason\":\"wrong\"}";
+    assert_eq!(update(&h, "krepo", "r4", 1, retracted).0, 0);
+
+    fn visibility(h: &Path, flags: &[&str]) -> String {
+        let mut args = vec![
+            "knowledge",
+            "search",
+            "--repo",
+            "krepo",
+            "--query",
+            "zqxvis",
+        ];
+        args.extend_from_slice(flags);
+        let (code, out, err) = run(h, &args);
+        assert_eq!(code, 0, "search: {err}");
+        out
+    }
+    let hits = |out: &str, id: &str| out.contains(&format!("\"id\":\"{id}\""));
+    // Default view: active only.
+    let all = visibility(&h, &[]);
+    assert!(
+        hits(&all, "r1") && !hits(&all, "r2") && !hits(&all, "r3") && !hits(&all, "r4"),
+        "{all}"
+    );
+    // Each historical visibility is independently opt-in.
+    let archived = visibility(&h, &["--include-archived"]);
+    assert!(
+        hits(&archived, "r1")
+            && hits(&archived, "r2")
+            && !hits(&archived, "r3")
+            && !hits(&archived, "r4"),
+        "{archived}"
+    );
+    let superseded = visibility(&h, &["--include-superseded"]);
+    assert!(
+        hits(&superseded, "r1")
+            && !hits(&superseded, "r2")
+            && hits(&superseded, "r3")
+            && !hits(&superseded, "r4"),
+        "{superseded}"
+    );
+    let retracted = visibility(&h, &["--include-retracted"]);
+    assert!(
+        hits(&retracted, "r1")
+            && !hits(&retracted, "r2")
+            && !hits(&retracted, "r3")
+            && hits(&retracted, "r4"),
+        "{retracted}"
+    );
+    let everything = visibility(
+        &h,
+        &[
+            "--include-archived",
+            "--include-superseded",
+            "--include-retracted",
+        ],
+    );
+    assert!(
+        hits(&everything, "r1")
+            && hits(&everything, "r2")
+            && hits(&everything, "r3")
+            && hits(&everything, "r4"),
+        "{everything}"
+    );
+    // Historical hits carry their lifecycle payload.
+    assert!(
+        superseded.contains("\"superseded_by\":{\"id\":\"r1\",\"revision\":1}"),
+        "{superseded}"
+    );
+    assert!(
+        retracted.contains("\"retracted_reason\":\"wrong\""),
+        "{retracted}"
+    );
+}
+
+#[test]
 fn lifecycle_plain_foundation_flow_never_migrates() {
     let h = home("stillv1");
     let dir = mkrepo(&h, "krepo");

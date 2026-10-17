@@ -2211,7 +2211,7 @@ fn knowledge_unlink(
             return 2;
         }
     };
-    if let Err(e) = knowledge::validate_relation_id(relation) {
+    if let Err(e) = knowledge::validate_relation_reference(relation) {
         err.push_str(&format!("error: {e}\n"));
         return 2;
     }

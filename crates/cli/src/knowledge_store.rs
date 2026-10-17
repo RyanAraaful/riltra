@@ -1267,11 +1267,10 @@ fn update_inner(
                 ],
             )
             .map_err(|e| format!("cannot store lifecycle event: {e}"))?;
-            // Store-derived identity: deterministic, complete, and exempt
-            // from the caller-supplied relation id cap by construction.
-            // shortcut: a derived id over 128 bytes cannot be retracted via
-            // unlink (caller ids stay capped); revisit if lineage retraction
-            // at max-length record ids is ever needed.
+            // Store-derived identity: deterministic, complete, and referenceable
+            // for retraction through `validate_relation_reference` even when it
+            // exceeds the caller cap at maximum-length record ids. Creation
+            // (link) stays capped; only this exact derived shape is exempt.
             let relation_id = format!("supersedes:{target_id}:{target_rev}:{id}:{next_i64}");
             tx.execute(
                 "INSERT INTO relations
@@ -2037,14 +2036,17 @@ pub fn link(
 
 /// Retract a relationship: an append-only event with author and reason, never
 /// a deletion. Normal queries omit the relation afterwards; audit reads with
-/// `include_retracted` retain it. Repeating the retraction fails.
+/// `include_retracted` retain it. Repeating the retraction fails. The id may
+/// be a caller-supplied id or a full-length store-derived `supersedes`
+/// identity, accepted by `validate_relation_reference` only in its exact
+/// derived shape.
 pub fn unlink(
     conn: &mut Connection,
     relation_id: &str,
     author: &str,
     reason: &str,
 ) -> Result<u64, String> {
-    crate::knowledge::validate_relation_id(relation_id)?;
+    crate::knowledge::validate_relation_reference(relation_id)?;
     check_actor(author, "author")?;
     check_rationale(reason, "reason")?;
     revalidate_open_paths(conn)?;
@@ -5078,6 +5080,39 @@ mod tests {
     }
 
     #[test]
+    fn lifecycle_supersede_target_revision_overflow_rejected_atomically() {
+        let (home, repo) = setup("supersede-overflow");
+        let mut conn = open_rw(&home, &repo);
+        create_record(&mut conn, &new_record("d1", "claim d1")).unwrap();
+        create_record(&mut conn, &new_record("d2", "claim d2")).unwrap();
+        let gen = read_generation(&conn).unwrap();
+        // A target revision beyond the representable range is rejected by the
+        // store itself (defense in depth: the CLI validator rejects earlier),
+        // before any mutation, and the migration rolls back with it.
+        let err = update_record(
+            &mut conn,
+            "d1",
+            1,
+            &supersede_to("d2", u64::MAX, "overflow"),
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("supersede target revision out of range"),
+            "unexpected: {err}"
+        );
+        assert_eq!(read_generation(&conn).unwrap(), gen);
+        assert_eq!(history(&conn, "d1", 50, 0, None).unwrap().total, 1);
+        let version: u32 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            version, 1,
+            "a rejected transition must roll its migration back"
+        );
+        conn.close().unwrap();
+    }
+
+    #[test]
     fn lifecycle_supersede_cycle_rejected() {
         let (home, repo) = setup("supersede-cycle");
         let mut conn = open_rw(&home, &repo);
@@ -5304,11 +5339,51 @@ mod tests {
             )
             .unwrap();
         assert_eq!(stored, 1);
-        // Residual limit, asserted so it stays visible: caller-supplied
-        // relation ids (link/unlink) keep the 128-byte cap, so this derived
-        // relation cannot be retracted through the CLI today.
-        let err = unlink(&mut conn, &relation_id, "tester", "would retract").unwrap_err();
-        assert!(err.contains("invalid relation id"), "unexpected: {err}");
+        // Full-length derived ids are referenceable for retraction: the
+        // reference validator accepts exactly this shape, the retraction is
+        // an append-only event with a generation bump, and the relation row
+        // keeps its full identity.
+        let gen_before = read_generation(&conn).unwrap();
+        let generation = unlink(&mut conn, &relation_id, "tester", "would retract").unwrap();
+        assert_eq!(
+            generation,
+            gen_before + 1,
+            "a successful retraction bumps the generation once"
+        );
+        let retractions: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM retractions WHERE relation_id = ?1",
+                [&relation_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(retractions, 1);
+        let still_stored: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM relations WHERE relation_id = ?1",
+                [&relation_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(still_stored, 1, "retraction is an event, never a deletion");
+        let audited = related(
+            &conn,
+            &old,
+            None,
+            RelationDirection::Inbound,
+            true,
+            10,
+            0,
+            None,
+        )
+        .unwrap();
+        assert_eq!(audited.total, 1);
+        assert!(audited.relations[0].retracted);
+        assert_eq!(audited.relations[0].relation_id, relation_id);
+        // Repeating the retraction fails and changes nothing.
+        let err = unlink(&mut conn, &relation_id, "tester", "again").unwrap_err();
+        assert!(err.contains("already retracted"), "unexpected: {err}");
+        assert_eq!(read_generation(&conn).unwrap(), generation);
         conn.close().unwrap();
     }
 
