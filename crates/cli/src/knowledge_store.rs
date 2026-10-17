@@ -625,6 +625,9 @@ fn record_from_row(row: &rusqlite::Row) -> rusqlite::Result<RecordVersion> {
         status: row.get(5)?,
         author: row.get(6)?,
         created_unix: row.get(7)?,
+        superseded_by: None,
+        retracted_reason: None,
+        retracted_author: None,
         measurement: None,
         evidence: Vec::new(),
     })
@@ -1014,6 +1017,12 @@ fn update_inner(
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|e| format!("cannot begin knowledge write: {e}"))?;
+    // A Full-stage transition migrates the store as the very first step of
+    // its own write transaction; every later rejection rolls the migration
+    // back with it, so a failed transition leaves a v1 store a v1 store.
+    if input.status == "superseded" || input.status == "retracted" {
+        ensure_lifecycle_schema(&tx)?;
+    }
     let current: Option<i64> = tx
         .query_row(
             "SELECT current_revision FROM heads WHERE id = ?1",
@@ -1048,6 +1057,112 @@ fn update_inner(
     // measurement, whether supplied or carried forward.
     if kind != "benchmark" && measurement.is_some() {
         return Err("measurement is only valid for benchmark records".to_string());
+    }
+    // Lifecycle transitions are validated against current state inside the
+    // transaction, before any mutation. Rejection classes surface as
+    // "invalid lifecycle transition" (exit 2); unknown targets stay in the
+    // unknown-endpoint class (exit 3).
+    let mut supersede_target: Option<(String, i64)> = None;
+    if input.status == "superseded" || input.status == "retracted" {
+        let head_status: String = tx
+            .query_row(
+                "SELECT status FROM records WHERE id = ?1 AND revision = ?2",
+                rusqlite::params![id, current],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("cannot read record status: {e}"))?;
+        if input.status == "retracted" {
+            // Withdrawal is a one-way event: repeating it is rejected.
+            if head_status == "retracted" {
+                return Err(format!(
+                    "invalid lifecycle transition: record is already retracted: '{id}'"
+                ));
+            }
+        } else {
+            // A withdrawn claim must not be silently revived into a
+            // replacement pointer.
+            if head_status == "retracted" {
+                return Err(format!(
+                    "invalid lifecycle transition: record is retracted: '{id}'"
+                ));
+            }
+            let target = input
+                .superseded_by
+                .as_ref()
+                .ok_or_else(|| "status 'superseded' requires `superseded_by`".to_string())?;
+            if target.id == id {
+                return Err(
+                    "invalid lifecycle transition: a record cannot supersede itself".to_string(),
+                );
+            }
+            let target_rev = i64::try_from(target.revision)
+                .map_err(|_| "supersede target revision out of range".to_string())?;
+            if !endpoint_exists(&tx, &target.id, target_rev)? {
+                return Err(format!(
+                    "unknown supersede target: '{}' rev {}",
+                    target.id, target.revision
+                ));
+            }
+            // The target record must not be retracted either.
+            let target_head_status: String = tx
+                .query_row(
+                    "SELECT r.status FROM heads h JOIN records r
+                     ON r.id = h.id AND r.revision = h.current_revision
+                     WHERE h.id = ?1",
+                    [&target.id],
+                    |row| row.get(0),
+                )
+                .map_err(|e| format!("cannot read supersede target status: {e}"))?;
+            if target_head_status == "retracted" {
+                return Err(format!(
+                    "invalid lifecycle transition: supersede target is retracted: '{}'",
+                    target.id
+                ));
+            }
+            // Repeating the current head's target is rejected; a different
+            // valid target is a new transition.
+            let head_target: Option<(String, i64)> = tx
+                .query_row(
+                    "SELECT target_id, target_revision FROM record_lifecycle
+                     WHERE id = ?1 AND revision = ?2 AND event = 'supersede'",
+                    rusqlite::params![id, current],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(|e| format!("cannot read supersede history: {e}"))?;
+            if let Some((target_id, target_revision)) = head_target {
+                if target_id == target.id && target_revision == target_rev {
+                    return Err(format!(
+                        "invalid lifecycle transition: record already supersedes '{}' rev {}",
+                        target.id, target.revision
+                    ));
+                }
+            }
+            // The lineage stays acyclic: walking supersedes edges from the
+            // superseded record must never reach the superseding record.
+            // Retracted relations are walked too — the lineage is history,
+            // and unlinking a relation must not authorize a cycle.
+            let cycle: i64 = tx
+                .query_row(
+                    "WITH RECURSIVE reach(id) AS (
+                       SELECT dst_id FROM relations WHERE kind = 'supersedes' AND src_id = ?1
+                       UNION
+                       SELECT r.dst_id FROM relations r JOIN reach ON r.src_id = reach.id
+                       WHERE r.kind = 'supersedes'
+                     )
+                     SELECT count(*) FROM reach WHERE id = ?2",
+                    rusqlite::params![id, target.id],
+                    |row| row.get(0),
+                )
+                .map_err(|e| format!("cannot check supersedes lineage: {e}"))?;
+            if cycle != 0 {
+                return Err(format!(
+                    "invalid lifecycle transition: supersedes cycle involving '{}'",
+                    target.id
+                ));
+            }
+            supersede_target = Some((target.id.clone(), target_rev));
+        }
     }
     let next_i64 = current
         .checked_add(1)
@@ -1086,6 +1201,71 @@ fn update_inner(
         Some(data) => write_measurement(&tx, id, next_i64, data)?,
         None if kind == "benchmark" => carry_measurement(&tx, id, current, next_i64)?,
         None => {}
+    }
+    // Lifecycle bookkeeping joins the same transaction: the immutable event,
+    // and for a supersede the implicit lineage relation with its
+    // deterministic identity. Any failure rolls all of it back.
+    match input.status.as_str() {
+        "superseded" => {
+            let (target_id, target_rev) =
+                supersede_target.ok_or_else(|| "supersede target was not validated".to_string())?;
+            let reason = input
+                .reason
+                .as_deref()
+                .ok_or_else(|| "status 'superseded' requires a `reason`".to_string())?;
+            tx.execute(
+                "INSERT INTO record_lifecycle
+                 (id, revision, event, target_id, target_revision, reason, author, created_unix)
+                 VALUES (?1, ?2, 'supersede', ?3, ?4, ?5, ?6, ?7)",
+                rusqlite::params![
+                    id,
+                    next_i64,
+                    target_id,
+                    target_rev,
+                    reason,
+                    input.author,
+                    now_unix()
+                ],
+            )
+            .map_err(|e| format!("cannot store lifecycle event: {e}"))?;
+            // Store-derived identity: deterministic, complete, and exempt
+            // from the caller-supplied relation id cap by construction.
+            // shortcut: a derived id over 128 bytes cannot be retracted via
+            // unlink (caller ids stay capped); revisit if lineage retraction
+            // at max-length record ids is ever needed.
+            let relation_id = format!("supersedes:{target_id}:{target_rev}:{id}:{next_i64}");
+            tx.execute(
+                "INSERT INTO relations
+                 (relation_id, src_id, src_revision, dst_id, dst_revision,
+                  kind, author, rationale, created_unix)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 'supersedes', ?6, ?7, ?8)",
+                rusqlite::params![
+                    relation_id,
+                    target_id,
+                    target_rev,
+                    id,
+                    next_i64,
+                    input.author,
+                    reason,
+                    now_unix()
+                ],
+            )
+            .map_err(|e| format!("cannot store supersedes relation: {e}"))?;
+        }
+        "retracted" => {
+            let reason = input
+                .reason
+                .as_deref()
+                .ok_or_else(|| "status 'retracted' requires a `reason`".to_string())?;
+            tx.execute(
+                "INSERT INTO record_lifecycle
+                 (id, revision, event, reason, author, created_unix)
+                 VALUES (?1, ?2, 'retract', ?3, ?4, ?5)",
+                rusqlite::params![id, next_i64, reason, input.author, now_unix()],
+            )
+            .map_err(|e| format!("cannot store lifecycle event: {e}"))?;
+        }
+        _ => {}
     }
     let generation = bump_generation(&tx)?;
     tx.commit()
@@ -1173,7 +1353,72 @@ pub fn show_record(
         })?;
     record.measurement = read_measurement(conn, id, rev_i64)?;
     record.evidence = read_evidence(conn, id, rev_i64)?;
+    load_record_lifecycle(conn, lifecycle_present(conn)?, &mut record)?;
     Ok(record)
+}
+
+/// Whether this store carries the v2 lifecycle tables. Reads check the table
+/// itself, not a version stamp, so a v1 store (or a store whose tables are
+/// missing) yields Foundation defaults instead of a schema error.
+fn lifecycle_present(conn: &Connection) -> Result<bool, String> {
+    let n: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'record_lifecycle'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("cannot inspect knowledge schema: {e}"))?;
+    Ok(n != 0)
+}
+
+/// One `record_lifecycle` row: (event, target_id, target_revision, reason,
+/// author).
+type LifecycleRow = (String, Option<String>, Option<i64>, Option<String>, String);
+
+/// Overlay one revision's lifecycle state from the append-only event table.
+/// Revisions without an event keep Foundation defaults: no target, no
+/// retraction fields. The event is keyed by (id, revision) and is written
+/// exactly once per revision, so this never needs to merge events.
+fn load_record_lifecycle(
+    conn: &Connection,
+    has_lifecycle: bool,
+    record: &mut RecordVersion,
+) -> Result<(), String> {
+    if !has_lifecycle {
+        return Ok(());
+    }
+    let revision = i64::try_from(record.revision)
+        .map_err(|_| "corrupt knowledge store: stored revision out of range".to_string())?;
+    let event: Option<LifecycleRow> = conn
+        .query_row(
+            "SELECT event, target_id, target_revision, reason, author
+             FROM record_lifecycle WHERE id = ?1 AND revision = ?2",
+            rusqlite::params![record.id, revision],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .optional()
+        .map_err(|e| format!("cannot read record lifecycle: {e}"))?;
+    if let Some((event, target_id, target_revision, reason, author)) = event {
+        match event.as_str() {
+            "supersede" => {
+                if let (Some(target_id), Some(target_revision)) = (target_id, target_revision) {
+                    let revision = u64::try_from(target_revision).map_err(|_| {
+                        "corrupt knowledge store: supersede target out of range".to_string()
+                    })?;
+                    record.superseded_by = Some(crate::knowledge::SupersededRef {
+                        id: target_id,
+                        revision,
+                    });
+                }
+            }
+            "retract" => {
+                record.retracted_reason = reason;
+                record.retracted_author = Some(author);
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// Deterministic history by revision with a generation guard: a supplied
@@ -1262,11 +1507,13 @@ fn history_inner(
             .map_err(|e| map_row_error(e, "cannot read record history"))?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| map_row_error(e, "cannot read record history"))?;
+        let has_lifecycle = lifecycle_present(conn)?;
         for record in &mut revisions {
             let rev_i64 = i64::try_from(record.revision)
                 .map_err(|_| "corrupt knowledge store: stored revision out of range".to_string())?;
             record.measurement = read_measurement(conn, id, rev_i64)?;
             record.evidence = read_evidence(conn, id, rev_i64)?;
+            load_record_lifecycle(conn, has_lifecycle, record)?;
         }
         let end = offset.saturating_add(revisions.len());
         Ok(HistoryPage {
@@ -1362,6 +1609,8 @@ pub fn search(
     query: &str,
     kind: Option<&str>,
     include_archived: bool,
+    include_superseded: bool,
+    include_retracted: bool,
     limit: usize,
     offset: usize,
     generation: Option<u64>,
@@ -1413,9 +1662,20 @@ pub fn search(
             filters.push_str(&format!(" AND r.kind = ?{}", args.len() + 1));
             args.push(rusqlite::types::Value::Text(k.to_string()));
         }
-        if !include_archived {
-            filters.push_str(" AND r.status = 'active'");
+        // Visibility is explicit: active always, each historical status only
+        // on request. The status literals below are fixed constants, never
+        // interpolated input, and the clause applies before counting.
+        let mut visible = String::from("'active'");
+        if include_archived {
+            visible.push_str(", 'archived'");
         }
+        if include_superseded {
+            visible.push_str(", 'superseded'");
+        }
+        if include_retracted {
+            visible.push_str(", 'retracted'");
+        }
+        filters.push_str(&format!(" AND r.status IN ({visible})"));
         // FTS is a coarse pre-filter: stream candidates in ID order, keep
         // the literal-term check in Rust, count every verified row, and
         // retain only the requested page — memory stays bounded by the page
@@ -1452,11 +1712,13 @@ pub fn search(
             total_usize += 1;
         }
         drop(streamed);
+        let has_lifecycle = lifecycle_present(conn)?;
         for record in &mut hits {
             let rev_i64 = i64::try_from(record.revision)
                 .map_err(|_| "corrupt knowledge store: stored revision out of range".to_string())?;
             record.measurement = read_measurement(conn, &record.id, rev_i64)?;
             record.evidence = read_evidence(conn, &record.id, rev_i64)?;
+            load_record_lifecycle(conn, has_lifecycle, record)?;
         }
         let end = offset.saturating_add(hits.len());
         Ok(SearchPage {
@@ -2203,7 +2465,7 @@ mod tests {
         create_record(&mut conn, &new_record("d1", "zqxv1 stays v1")).unwrap();
         conn.close().unwrap();
         let conn = open_knowledge_at(&home, &repo, false).unwrap();
-        let _ = search(&conn, "zqxv1", None, false, 10, 0, None).unwrap();
+        let _ = search(&conn, "zqxv1", None, false, false, false, 10, 0, None).unwrap();
         let _ = history(&conn, "d1", 10, 0, None).unwrap();
         let _ = show_record(&conn, "d1", None).unwrap();
         conn.close().unwrap();
@@ -2710,7 +2972,9 @@ mod tests {
         );
     }
 
-    use crate::knowledge::{validate_create_json, validate_update_json, NewRecord, UpdateRecord};
+    use crate::knowledge::{
+        validate_create_json, validate_update_json, NewRecord, SupersededRef, UpdateRecord,
+    };
 
     fn new_record(id: &str, title: &str) -> NewRecord {
         NewRecord {
@@ -2729,6 +2993,33 @@ mod tests {
             body: format!("body of {title}"),
             status: status.to_string(),
             author: "tester".to_string(),
+            superseded_by: None,
+            reason: None,
+        }
+    }
+
+    fn supersede_to(target: &str, revision: u64, reason: &str) -> UpdateRecord {
+        UpdateRecord {
+            title: "superseded title".to_string(),
+            body: "superseded body".to_string(),
+            status: "superseded".to_string(),
+            author: "tester".to_string(),
+            superseded_by: Some(crate::knowledge::SupersededRef {
+                id: target.to_string(),
+                revision,
+            }),
+            reason: Some(reason.to_string()),
+        }
+    }
+
+    fn retract_to(reason: &str) -> UpdateRecord {
+        UpdateRecord {
+            title: "retracted title".to_string(),
+            body: "retracted body".to_string(),
+            status: "retracted".to_string(),
+            author: "tester".to_string(),
+            superseded_by: None,
+            reason: Some(reason.to_string()),
         }
     }
 
@@ -3605,7 +3896,7 @@ mod tests {
     }
 
     fn search_default(conn: &Connection, query: &str) -> Result<SearchPage, String> {
-        search(conn, query, None, false, 50, 0, None)
+        search(conn, query, None, false, false, false, 50, 0, None)
     }
 
     #[test]
@@ -3677,7 +3968,7 @@ mod tests {
             )
             .unwrap();
         }
-        let full = search(&conn, "common", None, false, 50, 0, None).unwrap();
+        let full = search(&conn, "common", None, false, false, false, 50, 0, None).unwrap();
         assert_eq!(full.total, 3);
         assert_eq!(
             full.hits.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(),
@@ -3686,7 +3977,7 @@ mod tests {
         assert!(!full.truncated);
         assert_eq!(full.next_offset, None);
         // Paginated reads return the same order in slices.
-        let p1 = search(&conn, "common", None, false, 2, 0, None).unwrap();
+        let p1 = search(&conn, "common", None, false, false, false, 2, 0, None).unwrap();
         assert_eq!(p1.total, 3);
         assert!(p1.truncated);
         assert_eq!(p1.next_offset, Some(2));
@@ -3694,7 +3985,18 @@ mod tests {
             p1.hits.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(),
             vec!["d1", "d2"]
         );
-        let p2 = search(&conn, "common", None, false, 2, 2, Some(p1.generation)).unwrap();
+        let p2 = search(
+            &conn,
+            "common",
+            None,
+            false,
+            false,
+            false,
+            2,
+            2,
+            Some(p1.generation),
+        )
+        .unwrap();
         assert!(!p2.truncated);
         assert_eq!(p2.next_offset, None);
         assert_eq!(
@@ -3737,16 +4039,49 @@ mod tests {
         let hidden = search_default(&conn, "filter").unwrap();
         assert_eq!(hidden.total, 1);
         assert_eq!(hidden.hits[0].id, "d1");
-        let shown = search(&conn, "filter", None, true, 50, 0, None).unwrap();
+        let shown = search(&conn, "filter", None, true, false, false, 50, 0, None).unwrap();
         assert_eq!(shown.total, 2);
         // Kind narrows before counting: archived constraint still filtered.
-        let kinds = search(&conn, "filter", Some("constraint"), false, 50, 0, None).unwrap();
+        let kinds = search(
+            &conn,
+            "filter",
+            Some("constraint"),
+            false,
+            false,
+            false,
+            50,
+            0,
+            None,
+        )
+        .unwrap();
         assert_eq!(kinds.total, 0);
-        let kinds = search(&conn, "filter", Some("constraint"), true, 50, 0, None).unwrap();
+        let kinds = search(
+            &conn,
+            "filter",
+            Some("constraint"),
+            true,
+            false,
+            false,
+            50,
+            0,
+            None,
+        )
+        .unwrap();
         assert_eq!(kinds.total, 1);
         assert_eq!(kinds.hits[0].id, "c1");
         // Invalid kind is a validation error, not an empty page.
-        assert!(search(&conn, "filter", Some("note"), false, 50, 0, None).is_err());
+        assert!(search(
+            &conn,
+            "filter",
+            Some("note"),
+            false,
+            false,
+            false,
+            50,
+            0,
+            None
+        )
+        .is_err());
         conn.close().unwrap();
     }
 
@@ -3758,10 +4093,21 @@ mod tests {
         let gen = search_default(&conn, "guarded").unwrap().generation;
         // A concurrent mutation bumps generation: old pages fail explicitly.
         create_record(&mut conn, &new_record("d2", "guarded zqxterm")).unwrap();
-        let err = search(&conn, "guarded", None, false, 50, 0, Some(gen)).unwrap_err();
+        let err = search(
+            &conn,
+            "guarded",
+            None,
+            false,
+            false,
+            false,
+            50,
+            0,
+            Some(gen),
+        )
+        .unwrap_err();
         assert!(err.contains("generation"), "unexpected: {err}");
         // Bounds: over-limit pages and over-long queries fail before reading.
-        assert!(search(&conn, "guarded", None, false, 1001, 0, None).is_err());
+        assert!(search(&conn, "guarded", None, false, false, false, 1001, 0, None).is_err());
         let long = "q".repeat(4096 + 1);
         assert!(search_default(&conn, &long).is_err());
         // Exactly 4096 bytes is accepted.
@@ -3775,6 +4121,8 @@ mod tests {
             &conn,
             "guarded",
             None,
+            false,
+            false,
             false,
             50,
             0,
@@ -4138,7 +4486,7 @@ mod tests {
         create_record(&mut conn, &new_record("d1", "zero zqxlimit")).unwrap();
         // A zero limit can never advance next_offset: reject it instead of
         // returning a page that points at itself.
-        let err = search(&conn, "zero", None, false, 0, 0, None).unwrap_err();
+        let err = search(&conn, "zero", None, false, false, false, 0, 0, None).unwrap_err();
         assert!(err.contains("limit"), "unexpected: {err}");
         let err = related(
             &conn,
@@ -4178,7 +4526,7 @@ mod tests {
         let mut offset = 0;
         let mut pages = 0;
         loop {
-            let page = search(&conn, "walk", None, false, 2, offset, None).unwrap();
+            let page = search(&conn, "walk", None, false, false, false, 2, offset, None).unwrap();
             assert!(page.truncated || page.next_offset.is_none());
             collected.extend(page.hits.iter().map(|h| h.id.clone()));
             pages += 1;
@@ -4194,10 +4542,10 @@ mod tests {
         assert_eq!(pages, 3);
         assert_eq!(collected, vec!["w01", "w02", "w03", "w04", "w05"]);
         // Final and empty pages carry no next offset.
-        let last = search(&conn, "walk", None, false, 2, 4, None).unwrap();
+        let last = search(&conn, "walk", None, false, false, false, 2, 4, None).unwrap();
         assert!(!last.truncated);
         assert_eq!(last.next_offset, None);
-        let past_end = search(&conn, "walk", None, false, 2, 99, None).unwrap();
+        let past_end = search(&conn, "walk", None, false, false, false, 2, 99, None).unwrap();
         assert_eq!(past_end.total, 5);
         assert!(past_end.hits.is_empty());
         assert!(!past_end.truncated);
@@ -4242,7 +4590,7 @@ mod tests {
                    \"evidence\":[{\"path\":\"ev.rs\"}]}";
         create_validated(&mut conn, &validate_create_json(raw.as_bytes()).unwrap()).unwrap();
         // Default view: 11 visible decisions + kev + 2 constraints = 14.
-        let p1 = search(&conn, "bounded", None, false, 5, 0, None).unwrap();
+        let p1 = search(&conn, "bounded", None, false, false, false, 5, 0, None).unwrap();
         assert_eq!(p1.total, 14);
         assert!(p1.truncated);
         assert_eq!(p1.next_offset, Some(5));
@@ -4251,7 +4599,18 @@ mod tests {
             vec!["c1", "c2", "k01", "k02", "k03"]
         );
         // Kind filter narrows before counting: 11 visible decisions + kev.
-        let kinds = search(&conn, "bounded", Some("decision"), false, 5, 10, None).unwrap();
+        let kinds = search(
+            &conn,
+            "bounded",
+            Some("decision"),
+            false,
+            false,
+            false,
+            5,
+            10,
+            None,
+        )
+        .unwrap();
         assert_eq!(kinds.total, 12);
         assert!(!kinds.truncated);
         assert_eq!(kinds.next_offset, None);
@@ -4259,12 +4618,555 @@ mod tests {
         assert_eq!(kinds.hits[1].id, "kev");
         // Returned rows carry their full payload; archived appears on demand.
         assert!(kinds.hits[1].evidence.iter().any(|e| e.path == "ev.rs"));
-        let all = search(&conn, "bounded", Some("decision"), true, 50, 0, None).unwrap();
+        let all = search(
+            &conn,
+            "bounded",
+            Some("decision"),
+            true,
+            false,
+            false,
+            50,
+            0,
+            None,
+        )
+        .unwrap();
         assert_eq!(all.total, 13);
         assert!(all
             .hits
             .iter()
             .any(|h| h.id == "k12" && h.status == "archived"));
+        conn.close().unwrap();
+    }
+
+    #[test]
+    fn lifecycle_supersede_writes_revision_event_and_relation() {
+        let (home, repo) = setup("supersede");
+        let mut conn = open_rw(&home, &repo);
+        create_record(&mut conn, &new_record("d1", "old claim")).unwrap();
+        create_record(&mut conn, &new_record("d2", "new claim")).unwrap();
+        let (rev, gen) =
+            update_record(&mut conn, "d1", 1, &supersede_to("d2", 1, "d2 replaces d1")).unwrap();
+        assert_eq!(rev, 2);
+        // The new revision carries the superseded status and target.
+        let record = show_record(&conn, "d1", None).unwrap();
+        assert_eq!(record.status, "superseded");
+        assert_eq!(
+            record.superseded_by,
+            Some(SupersededRef {
+                id: "d2".to_string(),
+                revision: 1
+            })
+        );
+        assert!(record.retracted_reason.is_none());
+        // The immutable lifecycle event pins the exact target and reason.
+        let (event, target_id, target_revision, reason, author, created): (
+            String,
+            String,
+            i64,
+            String,
+            String,
+            i64,
+        ) = conn
+            .query_row(
+                "SELECT event, target_id, target_revision, reason, author, created_unix
+                 FROM record_lifecycle WHERE id = 'd1' AND revision = 2",
+                [],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(event, "supersede");
+        assert_eq!(target_id, "d2");
+        assert_eq!(target_revision, 1);
+        assert_eq!(reason, "d2 replaces d1");
+        assert_eq!(author, "tester");
+        assert!(created > 0);
+        // The implicit relation runs replacement -> superseded revision.
+        let relation_id = "supersedes:d2:1:d1:2";
+        let (src_id, src_rev, dst_id, dst_rev, kind, created): (
+            String,
+            i64,
+            String,
+            i64,
+            String,
+            i64,
+        ) = conn
+            .query_row(
+                "SELECT src_id, src_revision, dst_id, dst_revision, kind, created_unix
+                 FROM relations WHERE relation_id = ?1",
+                [relation_id],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            (
+                src_id.as_str(),
+                src_rev,
+                dst_id.as_str(),
+                dst_rev,
+                kind.as_str()
+            ),
+            ("d2", 1, "d1", 2, "supersedes")
+        );
+        assert!(created > 0);
+        // Visible through related(): inbound on the old record names the
+        // replacement; outbound on the replacement names the old record.
+        let inbound = related(
+            &conn,
+            "d1",
+            None,
+            RelationDirection::Inbound,
+            false,
+            10,
+            0,
+            None,
+        )
+        .unwrap();
+        assert_eq!(inbound.total, 1);
+        assert_eq!(inbound.relations[0].relation_id, relation_id);
+        assert_eq!(inbound.relations[0].src_id, "d2");
+        let outbound = related(
+            &conn,
+            "d2",
+            None,
+            RelationDirection::Outbound,
+            false,
+            10,
+            0,
+            None,
+        )
+        .unwrap();
+        assert_eq!(outbound.total, 1);
+        assert_eq!(outbound.relations[0].dst_id, "d1");
+        // One generation bump for the whole transition, and the write
+        // migrated the v1 store as its first step.
+        assert_eq!(read_generation(&conn).unwrap(), gen);
+        let version: u32 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 2);
+        // History keeps the pre-transition revision untouched.
+        let page = history(&conn, "d1", 50, 0, None).unwrap();
+        assert_eq!(page.total, 2);
+        assert_eq!(page.revisions[0].status, "active");
+        assert!(page.revisions[0].superseded_by.is_none());
+        assert_eq!(page.revisions[1].status, "superseded");
+        conn.close().unwrap();
+    }
+
+    #[test]
+    fn lifecycle_resupersede_appends_immutable_history() {
+        let (home, repo) = setup("resupersede");
+        let mut conn = open_rw(&home, &repo);
+        create_record(&mut conn, &new_record("d1", "old claim")).unwrap();
+        create_record(&mut conn, &new_record("d2", "first replacement")).unwrap();
+        create_record(&mut conn, &new_record("d3", "better replacement")).unwrap();
+        let (_, gen1) =
+            update_record(&mut conn, "d1", 1, &supersede_to("d2", 1, "first try")).unwrap();
+        // Re-superseding to a different valid target is allowed: a new
+        // revision, event and relation; nothing is rewritten.
+        let (rev, gen2) =
+            update_record(&mut conn, "d1", 2, &supersede_to("d3", 1, "better fit")).unwrap();
+        assert_eq!(rev, 3);
+        assert!(gen2 > gen1);
+        let targets: Vec<(i64, String, i64)> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT revision, target_id, target_revision FROM record_lifecycle
+                     WHERE id = 'd1' ORDER BY revision",
+                )
+                .unwrap();
+            let rows = stmt
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            rows
+        };
+        assert_eq!(
+            targets,
+            vec![(2, "d2".to_string(), 1), (3, "d3".to_string(), 1)]
+        );
+        let relations: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM relations WHERE kind = 'supersedes'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(relations, 2, "the first lineage relation survives");
+        let head = show_record(&conn, "d1", None).unwrap();
+        assert_eq!(
+            head.superseded_by,
+            Some(SupersededRef {
+                id: "d3".to_string(),
+                revision: 1
+            })
+        );
+        conn.close().unwrap();
+    }
+
+    #[test]
+    fn lifecycle_supersede_rejections_leave_store_unchanged() {
+        let (home, repo) = setup("supersede-reject");
+        let mut conn = open_rw(&home, &repo);
+        create_record(&mut conn, &new_record("d1", "old claim")).unwrap();
+        create_record(&mut conn, &new_record("d2", "replacement")).unwrap();
+        create_record(&mut conn, &new_record("d3", "retracted one")).unwrap();
+        let gen = read_generation(&conn).unwrap();
+        // Self-supersession.
+        let err = update_record(&mut conn, "d1", 1, &supersede_to("d1", 1, "self")).unwrap_err();
+        assert!(
+            err.contains("invalid lifecycle transition"),
+            "unexpected: {err}"
+        );
+        assert!(err.contains("itself"), "unexpected: {err}");
+        // Unknown target revision and unknown target record.
+        let err = update_record(&mut conn, "d1", 1, &supersede_to("d2", 99, "ghost")).unwrap_err();
+        assert!(
+            err.contains("unknown supersede target"),
+            "unexpected: {err}"
+        );
+        let err = update_record(&mut conn, "d1", 1, &supersede_to("nope", 1, "ghost")).unwrap_err();
+        assert!(
+            err.contains("unknown supersede target"),
+            "unexpected: {err}"
+        );
+        // Nothing was written, and the rejected transitions rolled their
+        // migration back: the store is still v1.
+        assert_eq!(read_generation(&conn).unwrap(), gen);
+        assert_eq!(history(&conn, "d1", 50, 0, None).unwrap().total, 1);
+        let version: u32 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            version, 1,
+            "a rejected transition must roll its migration back"
+        );
+        // Retracting d3 is a real transition: it migrates and commits.
+        update_record(&mut conn, "d3", 1, &retract_to("withdrawn")).unwrap();
+        let version: u32 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 2, "the first accepted transition migrates");
+        let gen = read_generation(&conn).unwrap();
+        // Target record is retracted.
+        let err =
+            update_record(&mut conn, "d1", 1, &supersede_to("d3", 2, "withdrawn")).unwrap_err();
+        assert!(
+            err.contains("invalid lifecycle transition"),
+            "unexpected: {err}"
+        );
+        assert!(err.contains("retracted"), "unexpected: {err}");
+        assert_eq!(read_generation(&conn).unwrap(), gen);
+        // Same-target rejection: first supersede lands, repeating it fails.
+        update_record(&mut conn, "d1", 1, &supersede_to("d2", 1, "first")).unwrap();
+        let gen = read_generation(&conn).unwrap();
+        let err = update_record(&mut conn, "d1", 2, &supersede_to("d2", 1, "again")).unwrap_err();
+        assert!(
+            err.contains("invalid lifecycle transition"),
+            "unexpected: {err}"
+        );
+        assert!(err.contains("already supersedes"), "unexpected: {err}");
+        assert_eq!(read_generation(&conn).unwrap(), gen);
+        assert_eq!(history(&conn, "d1", 50, 0, None).unwrap().total, 2);
+        // Superseding an already-retracted record is rejected.
+        let err = update_record(&mut conn, "d3", 2, &supersede_to("d1", 2, "revive")).unwrap_err();
+        assert!(
+            err.contains("invalid lifecycle transition"),
+            "unexpected: {err}"
+        );
+        conn.close().unwrap();
+    }
+
+    #[test]
+    fn lifecycle_supersede_cycle_rejected() {
+        let (home, repo) = setup("supersede-cycle");
+        let mut conn = open_rw(&home, &repo);
+        create_record(&mut conn, &new_record("a", "claim a")).unwrap();
+        create_record(&mut conn, &new_record("b", "claim b")).unwrap();
+        // A supersedes B (edge a -> b), then B -> A would close a cycle.
+        update_record(&mut conn, "b", 1, &supersede_to("a", 1, "a replaces b")).unwrap();
+        let gen = read_generation(&conn).unwrap();
+        let err =
+            update_record(&mut conn, "a", 1, &supersede_to("b", 2, "b replaces a")).unwrap_err();
+        assert!(err.contains("cycle"), "unexpected: {err}");
+        assert_eq!(
+            read_generation(&conn).unwrap(),
+            gen,
+            "rejected cycle must not bump"
+        );
+        assert_eq!(history(&conn, "a", 50, 0, None).unwrap().total, 1);
+        // Indirect cycle: c supersedes a, then a's replacement chain back to c
+        // through existing edges must be detected as well.
+        create_record(&mut conn, &new_record("c", "claim c")).unwrap();
+        update_record(&mut conn, "c", 1, &supersede_to("b", 2, "b replaces c")).unwrap();
+        // Live edges: a -> b, b -> c. Now c superseded by a would need edge
+        // a -> c... that is already the direct case; instead close it via c:
+        // a's outbound walk a -> b -> c reaches target c.
+        let gen = read_generation(&conn).unwrap();
+        let err =
+            update_record(&mut conn, "a", 1, &supersede_to("c", 2, "c replaces a")).unwrap_err();
+        assert!(err.contains("cycle"), "unexpected: {err}");
+        assert_eq!(read_generation(&conn).unwrap(), gen);
+        // A retracted lineage relation does not open the door to a cycle: the
+        // supersedes history keeps the lineage acyclic.
+        unlink(&mut conn, "supersedes:a:1:b:2", "tester", "undo for test").unwrap();
+        let b = show_record(&conn, "b", None).unwrap();
+        assert_eq!(
+            b.status, "superseded",
+            "unlinking a lineage relation must not change record status"
+        );
+        assert_eq!(
+            b.superseded_by,
+            Some(SupersededRef {
+                id: "a".to_string(),
+                revision: 1
+            })
+        );
+        let err =
+            update_record(&mut conn, "a", 1, &supersede_to("b", 2, "b replaces a")).unwrap_err();
+        assert!(err.contains("cycle"), "unexpected: {err}");
+        conn.close().unwrap();
+    }
+
+    #[test]
+    fn lifecycle_retract_rules() {
+        let (home, repo) = setup("retract");
+        let mut conn = open_rw(&home, &repo);
+        create_record(&mut conn, &new_record("d1", "claim")).unwrap();
+        create_record(&mut conn, &new_record("d2", "replacement")).unwrap();
+        create_record(&mut conn, &new_record("d3", "also replacement")).unwrap();
+        let (rev, _) = update_record(&mut conn, "d1", 1, &retract_to("no longer true")).unwrap();
+        assert_eq!(rev, 2);
+        let record = show_record(&conn, "d1", None).unwrap();
+        assert_eq!(record.status, "retracted");
+        assert_eq!(record.retracted_reason.as_deref(), Some("no longer true"));
+        assert_eq!(record.retracted_author.as_deref(), Some("tester"));
+        assert!(record.superseded_by.is_none());
+        // Double retraction is rejected: withdrawal is a one-way event.
+        let gen = read_generation(&conn).unwrap();
+        let err = update_record(&mut conn, "d1", 2, &retract_to("again")).unwrap_err();
+        assert!(err.contains("already retracted"), "unexpected: {err}");
+        assert_eq!(read_generation(&conn).unwrap(), gen);
+        // Superseding a retracted record is rejected (no silent revival).
+        let err = update_record(&mut conn, "d1", 2, &supersede_to("d2", 1, "revive")).unwrap_err();
+        assert!(
+            err.contains("invalid lifecycle transition"),
+            "unexpected: {err}"
+        );
+        // Retracting a superseded record is allowed and does not touch the
+        // lineage: rev2 keeps its supersede event and relation.
+        update_record(&mut conn, "d2", 1, &supersede_to("d3", 1, "d3 is better")).unwrap();
+        let (rev3, _) = update_record(&mut conn, "d2", 2, &retract_to("bench invalid")).unwrap();
+        assert_eq!(rev3, 3);
+        let head = show_record(&conn, "d2", None).unwrap();
+        assert_eq!(head.status, "retracted");
+        assert_eq!(head.retracted_reason.as_deref(), Some("bench invalid"));
+        let rev2 = show_record(&conn, "d2", Some(2)).unwrap();
+        assert_eq!(
+            rev2.superseded_by,
+            Some(SupersededRef {
+                id: "d3".to_string(),
+                revision: 1
+            })
+        );
+        // History still carries the superseded state ...
+        let page = history(&conn, "d2", 50, 0, None).unwrap();
+        assert_eq!(page.revisions[1].status, "superseded");
+        // ... and the derived relation survives the retraction.
+        let inbound = related(
+            &conn,
+            "d2",
+            Some(2),
+            RelationDirection::Inbound,
+            false,
+            10,
+            0,
+            None,
+        )
+        .unwrap();
+        assert_eq!(inbound.total, 1);
+        assert_eq!(inbound.relations[0].kind, "supersedes");
+        conn.close().unwrap();
+    }
+
+    #[test]
+    fn lifecycle_search_visibility_matrix() {
+        let (home, repo) = setup("visibility");
+        let mut conn = open_rw(&home, &repo);
+        create_record(&mut conn, &new_record("a1", "zqxvis active")).unwrap();
+        let mut archived = new_record("a2", "zqxvis archived");
+        archived.status = "archived".to_string();
+        create_record(&mut conn, &archived).unwrap();
+        create_record(&mut conn, &new_record("a3", "zqxvis replaced")).unwrap();
+        create_record(&mut conn, &new_record("a4", "zqxvis withdrawn")).unwrap();
+        // The transitions keep the searchable text so visibility, not
+        // matching, is what the flags under test decide.
+        update_record(
+            &mut conn,
+            "a3",
+            1,
+            &UpdateRecord {
+                title: "zqxvis replaced".to_string(),
+                body: "zqxvis replaced body".to_string(),
+                status: "superseded".to_string(),
+                author: "tester".to_string(),
+                superseded_by: Some(SupersededRef {
+                    id: "a1".to_string(),
+                    revision: 1,
+                }),
+                reason: Some("a1 supersedes".to_string()),
+            },
+        )
+        .unwrap();
+        update_record(
+            &mut conn,
+            "a4",
+            1,
+            &UpdateRecord {
+                title: "zqxvis withdrawn".to_string(),
+                body: "zqxvis withdrawn body".to_string(),
+                status: "retracted".to_string(),
+                author: "tester".to_string(),
+                superseded_by: None,
+                reason: Some("bad evidence".to_string()),
+            },
+        )
+        .unwrap();
+        let ids = |page: &SearchPage| page.hits.iter().map(|h| h.id.clone()).collect::<Vec<_>>();
+        // Default view: active only.
+        let page = search(&conn, "zqxvis", None, false, false, false, 50, 0, None).unwrap();
+        assert_eq!(ids(&page), vec!["a1"]);
+        // Each historical visibility is opt-in and independent.
+        let page = search(&conn, "zqxvis", None, true, false, false, 50, 0, None).unwrap();
+        assert_eq!(ids(&page), vec!["a1", "a2"]);
+        let page = search(&conn, "zqxvis", None, false, true, false, 50, 0, None).unwrap();
+        assert_eq!(ids(&page), vec!["a1", "a3"]);
+        let page = search(&conn, "zqxvis", None, false, false, true, 50, 0, None).unwrap();
+        assert_eq!(ids(&page), vec!["a1", "a4"]);
+        // --include-retracted alone must not surface archived records.
+        let page = search(&conn, "zqxvis", None, false, false, true, 50, 0, None).unwrap();
+        assert!(!ids(&page).contains(&"a2".to_string()));
+        // Everything on request.
+        let page = search(&conn, "zqxvis", None, true, true, true, 50, 0, None).unwrap();
+        assert_eq!(ids(&page), vec!["a1", "a2", "a3", "a4"]);
+        // Historical hits carry their full lifecycle payload.
+        let page = search(&conn, "zqxvis", None, false, true, true, 50, 0, None).unwrap();
+        let superseded = page.hits.iter().find(|h| h.id == "a3").unwrap();
+        assert_eq!(
+            superseded.superseded_by,
+            Some(SupersededRef {
+                id: "a1".to_string(),
+                revision: 1
+            })
+        );
+        let retracted = page.hits.iter().find(|h| h.id == "a4").unwrap();
+        assert_eq!(retracted.retracted_reason.as_deref(), Some("bad evidence"));
+        conn.close().unwrap();
+    }
+
+    #[test]
+    fn lifecycle_supersede_max_length_ids_keeps_full_relation_identity() {
+        let (home, repo) = setup("supersede-maxid");
+        let mut conn = open_rw(&home, &repo);
+        let old = "o".repeat(128);
+        let new = "n".repeat(128);
+        create_record(&mut conn, &new_record(&old, "old max id")).unwrap();
+        create_record(&mut conn, &new_record(&new, "new max id")).unwrap();
+        update_record(&mut conn, &old, 1, &supersede_to(&new, 1, "max ids")).unwrap();
+        let relation_id = format!("supersedes:{new}:1:{old}:2");
+        assert!(
+            relation_id.len() > 128,
+            "the derived identity exceeds the caller-supplied relation id cap"
+        );
+        // The store-generated identity is preserved in full: nothing is
+        // truncated or rejected, and the relation lists normally.
+        let listed = related(
+            &conn,
+            &old,
+            None,
+            RelationDirection::Inbound,
+            false,
+            10,
+            0,
+            None,
+        )
+        .unwrap();
+        assert_eq!(listed.total, 1);
+        assert_eq!(listed.relations[0].relation_id, relation_id);
+        assert_eq!(listed.relations[0].kind, "supersedes");
+        let stored: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM relations WHERE relation_id = ?1",
+                [&relation_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, 1);
+        // Residual limit, asserted so it stays visible: caller-supplied
+        // relation ids (link/unlink) keep the 128-byte cap, so this derived
+        // relation cannot be retracted through the CLI today.
+        let err = unlink(&mut conn, &relation_id, "tester", "would retract").unwrap_err();
+        assert!(err.contains("invalid relation id"), "unexpected: {err}");
+        conn.close().unwrap();
+    }
+
+    #[test]
+    fn lifecycle_plain_writes_stay_v1_with_default_reads() {
+        let (home, repo) = setup("stillv1");
+        let mut conn = open_rw(&home, &repo);
+        create_record(&mut conn, &new_record("d1", "plain zqxtitle")).unwrap();
+        update_record(
+            &mut conn,
+            "d1",
+            1,
+            &update_to("plain zqxtitle v2", "archived"),
+        )
+        .unwrap();
+        let version: u32 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 1, "Foundation writes must not migrate");
+        // Reads against v1 return documented defaults and never migrate.
+        let shown = show_record(&conn, "d1", None).unwrap();
+        assert!(shown.superseded_by.is_none());
+        assert!(shown.retracted_reason.is_none());
+        assert!(shown.retracted_author.is_none());
+        let _ = history(&conn, "d1", 50, 0, None).unwrap();
+        let _ = search_default(&conn, "plain").unwrap();
+        let _ = related(
+            &conn,
+            "d1",
+            None,
+            RelationDirection::Outbound,
+            false,
+            10,
+            0,
+            None,
+        )
+        .unwrap();
+        let version: u32 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 1, "reads never migrate");
         conn.close().unwrap();
     }
 }

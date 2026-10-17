@@ -136,6 +136,8 @@ pub enum KnowledgeOp {
         query: String,
         kind: Option<String>,
         include_archived: bool,
+        include_superseded: bool,
+        include_retracted: bool,
         limit: Option<String>,
         offset: Option<String>,
         generation: Option<String>,
@@ -591,13 +593,19 @@ fn parse_knowledge_op(sub: &str, args: &[String]) -> Result<KnowledgeOp, String>
                     "--offset",
                     "--generation",
                 ],
-                &["--include-archived"],
+                &[
+                    "--include-archived",
+                    "--include-superseded",
+                    "--include-retracted",
+                ],
             )?;
             Ok(KnowledgeOp::Search {
                 repo: knowledge_value(&v, "--repo")?,
                 query: knowledge_value(&v, "--query")?,
                 kind: v.get("--kind").cloned(),
                 include_archived: flags.contains("--include-archived"),
+                include_superseded: flags.contains("--include-superseded"),
+                include_retracted: flags.contains("--include-retracted"),
                 limit: v.get("--limit").cloned(),
                 offset: v.get("--offset").cloned(),
                 generation: v.get("--generation").cloned(),
@@ -908,7 +916,9 @@ mod tests {
                 "r",
                 "--query",
                 "x",
-                "--include-archived"
+                "--include-archived",
+                "--include-superseded",
+                "--include-retracted"
             ]),
             Ok(Command::Knowledge { .. })
         ));

@@ -1,12 +1,21 @@
 // SPDX-License-Identifier: Apache-2.0
 //! M7 knowledge records: typed model and input validation. Storage lives in
 //! `knowledge_store.rs`; JSON emission and CLI wiring arrive in Task 7.
-//! Foundation statuses are `active`/`archived` only: `superseded` and
-//! `retracted` record statuses belong to a later stage and are rejected here.
+//! Statuses are `active`/`archived` plus the Full-stage lifecycle statuses
+//! `superseded`/`retracted`; a create may only use the Foundation statuses,
+//! because a new record has no history to supersede or retract.
 
 // Task 3 leaves the JSON entry points unwired (CLI dispatch is Task 7).
 // Revisit this allow when the CLI is wired.
 #![allow(dead_code)]
+
+/// An exact record revision that supersedes another: the id plus the
+/// revision pinned when the supersede transition was written.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SupersededRef {
+    pub id: String,
+    pub revision: u64,
+}
 
 /// A single immutable revision of a knowledge record.
 #[derive(Debug, Clone, PartialEq)]
@@ -19,6 +28,12 @@ pub struct RecordVersion {
     pub status: String,
     pub author: String,
     pub created_unix: i64,
+    /// Present exactly when the revision carries the `superseded` status.
+    pub superseded_by: Option<SupersededRef>,
+    /// Retraction event fields, present exactly when the revision was
+    /// written by a retract transition.
+    pub retracted_reason: Option<String>,
+    pub retracted_author: Option<String>,
     /// Present exactly when the revision carries benchmark measurement.
     pub measurement: Option<BenchmarkData>,
     /// Stored source bindings captured with this revision (immutable).
@@ -40,12 +55,17 @@ pub struct NewRecord {
 /// Input for updating a record. ID and kind are absent by construction: an
 /// update can never rename them. Every update carries the new status
 /// explicitly; status changes are ordinary revisions, not side channels.
+/// A `superseded` update must name the replacement revision and a reason; a
+/// `retracted` update must carry a reason and no target; both fields are
+/// rejected on any other status.
 #[derive(Debug, Clone, PartialEq)]
 pub struct UpdateRecord {
     pub title: String,
     pub body: String,
     pub status: String,
     pub author: String,
+    pub superseded_by: Option<SupersededRef>,
+    pub reason: Option<String>,
 }
 
 /// Caller-supplied repository-scoped IDs: 1–128 ASCII chars,
@@ -75,10 +95,20 @@ pub fn validate_kind(kind: &str) -> Result<(), String> {
     }
 }
 
-/// Foundation statuses: `active`, `archived`. `superseded`/`retracted` are
-/// rejected here; relation retraction (an event on links) is unrelated and
-/// unaffected.
+/// Update-time statuses: `active`, `archived`, and the Full-stage lifecycle
+/// statuses `superseded` and `retracted`. Create uses
+/// [`validate_new_status`]; status changes are always explicit updates.
 pub fn validate_status(status: &str) -> Result<(), String> {
+    match status {
+        "active" | "archived" | "superseded" | "retracted" => Ok(()),
+        _ => Err(format!("invalid record status: {status:?}")),
+    }
+}
+
+/// Create-time statuses: `active`, `archived` only. A new record has no
+/// history to supersede or retract, so the lifecycle statuses are rejected
+/// before any mutation is attempted.
+pub fn validate_new_status(status: &str) -> Result<(), String> {
     match status {
         "active" | "archived" => Ok(()),
         _ => Err(format!("invalid record status: {status:?}")),
@@ -107,7 +137,7 @@ pub fn validate_relation_id(id: &str) -> Result<(), String> {
 pub fn validate_new(input: &NewRecord) -> Result<(), String> {
     validate_id(&input.id)?;
     validate_kind(&input.kind)?;
-    validate_status(&input.status)?;
+    validate_new_status(&input.status)?;
     if input.title.is_empty() || input.body.is_empty() || input.author.is_empty() {
         return Err("title, body and author are required".to_string());
     }
@@ -118,6 +148,35 @@ pub fn validate_update(input: &UpdateRecord) -> Result<(), String> {
     validate_status(&input.status)?;
     if input.title.is_empty() || input.body.is_empty() || input.author.is_empty() {
         return Err("title, body and author are required".to_string());
+    }
+    // Lifecycle-field coherence: a supersede names its replacement revision
+    // and a reason; a retract carries only a reason; a plain update carries
+    // neither. The store re-checks targets against its own state.
+    match input.status.as_str() {
+        "superseded" => {
+            if input.superseded_by.is_none() {
+                return Err("status 'superseded' requires `superseded_by`".to_string());
+            }
+            if input.reason.as_deref().map(str::is_empty).unwrap_or(true) {
+                return Err("status 'superseded' requires a non-empty `reason`".to_string());
+            }
+        }
+        "retracted" => {
+            if input.superseded_by.is_some() {
+                return Err("`superseded_by` is only valid with status 'superseded'".to_string());
+            }
+            if input.reason.as_deref().map(str::is_empty).unwrap_or(true) {
+                return Err("status 'retracted' requires a non-empty `reason`".to_string());
+            }
+        }
+        _ => {
+            if input.superseded_by.is_some() {
+                return Err("`superseded_by` is only valid with status 'superseded'".to_string());
+            }
+            if input.reason.is_some() {
+                return Err("`reason` is only valid with a lifecycle status".to_string());
+            }
+        }
     }
     Ok(())
 }
@@ -614,6 +673,22 @@ pub fn validate_create_json(bytes: &[u8]) -> Result<ValidatedNew, String> {
     })
 }
 
+/// A `superseded_by` target: an exact existing record revision.
+fn parse_superseded_by(value: &JVal, path: &str) -> Result<SupersededRef, String> {
+    let obj = as_obj(value, path)?;
+    check_known(obj, &["id", "revision"], path)?;
+    let id = req_str(obj, "id", path)?;
+    validate_id(&id)?;
+    let revision = match find(obj, "revision") {
+        None => return Err(format!("missing required field `{path}.revision`")),
+        Some(v) => {
+            let n = req_int_non_negative(v, &format!("{path}.revision"))?;
+            u64::try_from(n).map_err(|_| format!("field `{path}.revision` is out of range"))?
+        }
+    };
+    Ok(SupersededRef { id, revision })
+}
+
 /// Strict update-input validation. `id`/`kind` are rejected explicitly: an
 /// update can never rename them.
 pub fn validate_update_json(bytes: &[u8]) -> Result<ValidatedUpdate, String> {
@@ -640,6 +715,8 @@ pub fn validate_update_json(bytes: &[u8]) -> Result<ValidatedUpdate, String> {
             "author",
             "evidence",
             "measurement",
+            "superseded_by",
+            "reason",
         ],
         "$",
     )?;
@@ -648,11 +725,23 @@ pub fn validate_update_json(bytes: &[u8]) -> Result<ValidatedUpdate, String> {
         body: req_str(obj, "body", "$")?,
         status: req_str(obj, "status", "$")?,
         author: req_str(obj, "author", "$")?,
+        superseded_by: match find(obj, "superseded_by") {
+            None => None,
+            Some(v) => Some(parse_superseded_by(v, "$.superseded_by")?),
+        },
+        reason: match find(obj, "reason") {
+            None => None,
+            Some(JVal::Str(s)) => Some(s.clone()),
+            Some(_) => return Err("type mismatch: field `$.reason` must be a string".to_string()),
+        },
     };
     validate_update(&record)?;
     check_byte_len(&record.title, MAX_TITLE_BYTES, "$.title")?;
     check_byte_len(&record.body, MAX_BODY_BYTES, "$.body")?;
     check_byte_len(&record.author, MAX_AUTHOR_BYTES, "$.author")?;
+    if let Some(reason) = &record.reason {
+        check_byte_len(reason, MAX_RATIONALE_BYTES, "$.reason")?;
+    }
     let evidence = match find(obj, "evidence") {
         None => Vec::new(),
         Some(v) => parse_evidence(v, "$.evidence")?,
@@ -696,12 +785,19 @@ mod tests {
 
     #[test]
     fn knowledge_status_rules() {
-        assert!(validate_status("active").is_ok());
-        assert!(validate_status("archived").is_ok());
-        // Full-stage record statuses are never valid in Foundation, even
-        // though relation retraction events are.
-        for bad in ["", "superseded", "retracted", "Active", "deleted"] {
+        for ok in ["active", "archived", "superseded", "retracted"] {
+            assert!(validate_status(ok).is_ok());
+        }
+        for bad in ["", "Active", "deleted", "SUPERSEDED"] {
             assert!(validate_status(bad).is_err());
+        }
+        // A new record has no history to supersede or retract: create keeps
+        // the Foundation statuses only.
+        for ok in ["active", "archived"] {
+            assert!(validate_new_status(ok).is_ok());
+        }
+        for bad in ["superseded", "retracted"] {
+            assert!(validate_new_status(bad).is_err());
         }
     }
 
@@ -910,6 +1006,71 @@ mod tests {
         assert!(validate_update_json(good.as_bytes()).is_ok());
     }
 
+    fn superseded_ref(id: &str, revision: u64) -> SupersededRef {
+        SupersededRef {
+            id: id.to_string(),
+            revision,
+        }
+    }
+
+    #[test]
+    fn knowledge_json_fullstage_update_rules() {
+        let update = |extra: &str| {
+            format!(
+                "{{\"title\":\"t\",\"body\":\"b\",\"status\":\"superseded\",\"author\":\"r\",\"evidence\":[]{extra}}}"
+            )
+        };
+        // superseded requires both superseded_by and reason.
+        let err = validate_update_json(update("").as_bytes()).unwrap_err();
+        assert!(err.contains("superseded_by"), "unexpected: {err}");
+        let err = validate_update_json(
+            update(",\"superseded_by\":{\"id\":\"d2\",\"revision\":1}").as_bytes(),
+        )
+        .unwrap_err();
+        assert!(err.contains("reason"), "unexpected: {err}");
+        let ok = update(
+            ",\"superseded_by\":{\"id\":\"d2\",\"revision\":1},\"reason\":\"replaced by d2\"",
+        );
+        let parsed = validate_update_json(ok.as_bytes()).unwrap();
+        assert_eq!(parsed.record.superseded_by, Some(superseded_ref("d2", 1)));
+        assert_eq!(parsed.record.reason.as_deref(), Some("replaced by d2"));
+        // Unknown nested fields, invalid ids, missing/non-integer revisions.
+        for bad in [
+            ",\"superseded_by\":{\"id\":\"d2\",\"revision\":1,\"x\":2},\"reason\":\"r\"",
+            ",\"superseded_by\":{\"id\":\"D2\",\"revision\":1},\"reason\":\"r\"",
+            ",\"superseded_by\":{\"id\":\"d2\"},\"reason\":\"r\"",
+            ",\"superseded_by\":{\"id\":\"d2\",\"revision\":\"1\"},\"reason\":\"r\"",
+            ",\"superseded_by\":{\"id\":\"d2\",\"revision\":-1},\"reason\":\"r\"",
+        ] {
+            let err = validate_update_json(update(bad).as_bytes()).unwrap_err();
+            assert!(!err.is_empty(), "case must be rejected: {bad}");
+        }
+        let retract = |extra: &str| {
+            format!(
+                "{{\"title\":\"t\",\"body\":\"b\",\"status\":\"retracted\",\"author\":\"r\",\"evidence\":[]{extra}}}"
+            )
+        };
+        // retracted requires reason and must not carry a target.
+        let err = validate_update_json(retract("").as_bytes()).unwrap_err();
+        assert!(err.contains("reason"), "unexpected: {err}");
+        assert!(validate_update_json(retract(",\"reason\":\"withdrawn\"").as_bytes()).is_ok());
+        assert!(validate_update_json(
+            retract(",\"reason\":\"w\",\"superseded_by\":{\"id\":\"d2\",\"revision\":1}")
+                .as_bytes()
+        )
+        .is_err());
+        // Lifecycle fields are invalid on a plain update.
+        let plain = r#"{"title":"t","body":"b","status":"active","author":"r","evidence":[],"reason":"why"}"#;
+        assert!(validate_update_json(plain.as_bytes()).is_err());
+        let plain = r#"{"title":"t","body":"b","status":"active","author":"r","evidence":[],"superseded_by":{"id":"d2","revision":1}}"#;
+        assert!(validate_update_json(plain.as_bytes()).is_err());
+        // Reason byte cap.
+        let big = "r".repeat(MAX_RATIONALE_BYTES + 1);
+        let err = validate_update_json(retract(&format!(",\"reason\":\"{big}\"")).as_bytes())
+            .unwrap_err();
+        assert!(err.contains("reason"), "unexpected: {err}");
+    }
+
     #[test]
     fn knowledge_new_and_update_rules() {
         let good = NewRecord {
@@ -935,10 +1096,25 @@ mod tests {
             body: "b2".to_string(),
             status: "archived".to_string(),
             author: "r".to_string(),
+            superseded_by: None,
+            reason: None,
         };
         assert!(validate_update(&update).is_ok());
         let mut bad_update = update.clone();
         bad_update.status = "superseded".to_string();
+        // Supersede without a target and reason is rejected, then completed.
         assert!(validate_update(&bad_update).is_err());
+        bad_update.superseded_by = Some(superseded_ref("d2", 1));
+        assert!(validate_update(&bad_update).is_err());
+        bad_update.reason = Some("replaced".to_string());
+        assert!(validate_update(&bad_update).is_ok());
+        // Retraction requires a reason and no target.
+        let mut retract = update.clone();
+        retract.status = "retracted".to_string();
+        assert!(validate_update(&retract).is_err());
+        retract.reason = Some("withdrawn".to_string());
+        assert!(validate_update(&retract).is_ok());
+        retract.superseded_by = Some(superseded_ref("d2", 1));
+        assert!(validate_update(&retract).is_err());
     }
 }

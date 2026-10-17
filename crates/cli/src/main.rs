@@ -48,7 +48,7 @@ pub(crate) fn usage() -> String {
   {NAME} semantic query --repo <name> --path <rel> --line <n> --col <n> [--refs] [--lsp-server <abs-path>]
   {NAME} callers --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--limit <n>] [--offset <n>]
   {NAME} callees --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--limit <n>] [--offset <n>]
-  {NAME} trace --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--to <path:line:col>] [--depth <n>] [--limit <n>] [--offset <n>]\n  {NAME} impact --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--depth <n>] [--limit <n>] [--offset <n>]\n  {NAME} knowledge create --repo <name> --input -\n  {NAME} knowledge show --repo <name> --id <id> [--revision <n>]\n  {NAME} knowledge update --repo <name> --id <id> --expected-revision <n> --input -\n  {NAME} knowledge history --repo <name> --id <id> [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge search --repo <name> --query <text> [--kind <kind>] [--include-archived] [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge link --repo <name> --input -\n  {NAME} knowledge unlink --repo <name> --relation <id> --input -\n  {NAME} knowledge related --repo <name> --id <id> [--revision <n>] [--direction inbound|outbound] [--include-retracted] [--limit <n>] [--offset <n>] [--generation <n>]\n\nCommands:\n  status       Print deterministic bootstrap status as JSON\n  init         Register a local repository root\n  repo list    List registered repositories as JSON\n  repo status  Git/worktree fingerprint of a registered repository\n  doctor       Path-security and repository health checks as JSON\n  scan         Syntax facts (definitions/imports/calls) as JSON\n  index        Build the durable code index for a repository\n  index status Report index freshness (fresh/stale/unknown) as JSON\n  search       Search indexed symbols as JSON\n  semantic import Import a SCIP index against the live snapshot as JSON\n  semantic status Per-provider binding verification as JSON\n  semantic query Single-hop definition/reference lookup as JSON\n  callers Direct callers of the anchored identity as JSON\n  callees Direct callees of the anchored identity as JSON\n  trace Bounded plausible static paths with per-hop evidence\n  impact Conservative inbound impact with evidence and UNKNOWN default\n"
+  {NAME} trace --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--to <path:line:col>] [--depth <n>] [--limit <n>] [--offset <n>]\n  {NAME} impact --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--depth <n>] [--limit <n>] [--offset <n>]\n  {NAME} knowledge create --repo <name> --input -\n  {NAME} knowledge show --repo <name> --id <id> [--revision <n>]\n  {NAME} knowledge update --repo <name> --id <id> --expected-revision <n> --input -\n  {NAME} knowledge history --repo <name> --id <id> [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge search --repo <name> --query <text> [--kind <kind>] [--include-archived] [--include-superseded] [--include-retracted] [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge link --repo <name> --input -\n  {NAME} knowledge unlink --repo <name> --relation <id> --input -\n  {NAME} knowledge related --repo <name> --id <id> [--revision <n>] [--direction inbound|outbound] [--include-retracted] [--limit <n>] [--offset <n>] [--generation <n>]\n\nCommands:\n  status       Print deterministic bootstrap status as JSON\n  init         Register a local repository root\n  repo list    List registered repositories as JSON\n  repo status  Git/worktree fingerprint of a registered repository\n  doctor       Path-security and repository health checks as JSON\n  scan         Syntax facts (definitions/imports/calls) as JSON\n  index        Build the durable code index for a repository\n  index status Report index freshness (fresh/stale/unknown) as JSON\n  search       Search indexed symbols as JSON\n  semantic import Import a SCIP index against the live snapshot as JSON\n  semantic status Per-provider binding verification as JSON\n  semantic query Single-hop definition/reference lookup as JSON\n  callers Direct callers of the anchored identity as JSON\n  callees Direct callees of the anchored identity as JSON\n  trace Bounded plausible static paths with per-hop evidence\n  impact Conservative inbound impact with evidence and UNKNOWN default\n"
     )
 }
 
@@ -1260,6 +1260,8 @@ fn cmd_knowledge(op: args::KnowledgeOp, out: &mut String, err: &mut String) -> i
             query,
             kind,
             include_archived,
+            include_superseded,
+            include_retracted,
             limit,
             offset,
             generation,
@@ -1268,6 +1270,8 @@ fn cmd_knowledge(op: args::KnowledgeOp, out: &mut String, err: &mut String) -> i
             &query,
             kind.as_deref(),
             include_archived,
+            include_superseded,
+            include_retracted,
             limit.as_deref(),
             offset.as_deref(),
             generation.as_deref(),
@@ -1442,9 +1446,11 @@ fn parse_optional_u64(
 }
 
 /// A write failure is a storage error (exit 3); an evidence-capture failure
-/// is an input error (exit 2) because the cited source does not bind.
+/// and an invalid lifecycle transition (self-supersession, cycle, retracted
+/// endpoint, double retraction) are input errors (exit 2). Unknown endpoints
+/// and targets stay in the storage/conflict class (exit 3).
 fn knowledge_write_error(e: &str) -> i32 {
-    if e.starts_with("cannot capture evidence") {
+    if e.starts_with("cannot capture evidence") || e.starts_with("invalid lifecycle transition") {
         2
     } else {
         3
@@ -1709,8 +1715,30 @@ fn record_json(record: &knowledge::RecordVersion, root: &Path) -> String {
         Some(m) => measurement_json(m),
         None => "null".to_string(),
     };
+    // Full-stage lifecycle fields appear only when the revision actually
+    // carries them, so Foundation output on v1 stores stays byte-identical.
+    let mut lifecycle = String::new();
+    if let Some(target) = &record.superseded_by {
+        lifecycle.push_str(&format!(
+            ",\"superseded_by\":{{\"id\":\"{}\",\"revision\":{}}}",
+            json::escape(&target.id),
+            target.revision
+        ));
+    }
+    if let Some(reason) = &record.retracted_reason {
+        lifecycle.push_str(&format!(
+            ",\"retracted_reason\":\"{}\"",
+            json::escape(reason)
+        ));
+    }
+    if let Some(author) = &record.retracted_author {
+        lifecycle.push_str(&format!(
+            ",\"retracted_author\":\"{}\"",
+            json::escape(author)
+        ));
+    }
     format!(
-        "{{\"id\":\"{}\",\"revision\":{},\"kind\":\"{}\",\"title\":\"{}\",\"body\":\"{}\",\"status\":\"{}\",\"author\":\"{}\",\"created_unix\":{},\"measurement\":{},\"evidence\":[{}],\"verification\":\"{}\",\"support\":\"{}\"}}",
+        "{{\"id\":\"{}\",\"revision\":{},\"kind\":\"{}\",\"title\":\"{}\",\"body\":\"{}\",\"status\":\"{}\",\"author\":\"{}\",\"created_unix\":{},\"measurement\":{},\"evidence\":[{}],\"verification\":\"{}\",\"support\":\"{}\"{lifecycle}}}",
         json::escape(&record.id),
         record.revision,
         json::escape(&record.kind),
@@ -2000,6 +2028,8 @@ fn knowledge_search(
     query: &str,
     kind: Option<&str>,
     include_archived: bool,
+    include_superseded: bool,
+    include_retracted: bool,
     limit: Option<&str>,
     offset: Option<&str>,
     generation: Option<&str>,
@@ -2066,6 +2096,8 @@ fn knowledge_search(
         query,
         kind,
         include_archived,
+        include_superseded,
+        include_retracted,
         limit,
         offset,
         generation,

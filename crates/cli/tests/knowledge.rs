@@ -1505,3 +1505,354 @@ fn mutation_stdin_is_bounded() {
         "the cap must be documented in the error: {err}"
     );
 }
+
+// --- Full-stage lifecycle (schema v2 / G-LIFE) -----------------------------
+
+fn db_path(home: &Path, repo: &str) -> PathBuf {
+    home.join("knowledge").join(format!("{repo}.db"))
+}
+
+/// Independent inspection of the store file: the migration is asserted from
+/// the file itself, not from CLI output.
+fn user_version(home: &Path, repo: &str) -> u32 {
+    let conn = rusqlite::Connection::open(db_path(home, repo)).unwrap();
+    conn.query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap()
+}
+
+fn update(home: &Path, repo: &str, id: &str, expected: u64, input: &str) -> (i32, String, String) {
+    run_stdin(
+        home,
+        &[
+            "knowledge",
+            "update",
+            "--repo",
+            repo,
+            "--id",
+            id,
+            "--expected-revision",
+            &expected.to_string(),
+            "--input",
+            "-",
+        ],
+        input.as_bytes(),
+    )
+}
+
+fn supersede_input(title: &str, target: &str, revision: u64, reason: &str) -> String {
+    format!(
+        "{{\"title\":\"{title}\",\"body\":\"{title} body zqxbody\",\"status\":\"superseded\",\
+         \"author\":\"a\",\"evidence\":[],\
+         \"superseded_by\":{{\"id\":\"{target}\",\"revision\":{revision}}},\"reason\":\"{reason}\"}}"
+    )
+}
+
+fn retract_input(title: &str, reason: &str) -> String {
+    format!(
+        "{{\"title\":\"{title}\",\"body\":\"{title} body zqxbody\",\"status\":\"retracted\",\
+         \"author\":\"a\",\"evidence\":[],\"reason\":\"{reason}\"}}"
+    )
+}
+
+#[test]
+fn lifecycle_supersede_and_retract_round_trip_via_cli() {
+    let h = home("lifecycle");
+    let dir = mkrepo(&h, "krepo");
+    init(&h, &dir, "krepo");
+    assert_eq!(create(&h, "krepo", "d1", "First", "alpha zqxbody").0, 0);
+    assert_eq!(create(&h, "krepo", "d2", "Second", "beta zqxbody").0, 0);
+    assert_eq!(user_version(&h, "krepo"), 1, "Foundation writes stay v1");
+
+    // Supersede d1 by the exact d2 revision, with a reason.
+    let (code, out, err) = update(
+        &h,
+        "krepo",
+        "d1",
+        1,
+        &supersede_input("First", "d2", 1, "d2 replaces d1"),
+    );
+    assert_eq!(code, 0, "supersede: {err}");
+    assert!(out.contains("\"status\":\"superseded\""), "{out}");
+    assert!(
+        out.contains("\"superseded_by\":{\"id\":\"d2\",\"revision\":1}"),
+        "{out}"
+    );
+    assert!(
+        !out.contains("retracted_reason"),
+        "a supersede must not report retraction fields: {out}"
+    );
+    // The write migrated the store and recorded the immutable event plus the
+    // deterministic lineage relation.
+    assert_eq!(user_version(&h, "krepo"), 2);
+    {
+        let conn = rusqlite::Connection::open(db_path(&h, "krepo")).unwrap();
+        let events: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM record_lifecycle WHERE id = 'd1' AND revision = 2
+                 AND event = 'supersede' AND target_id = 'd2' AND target_revision = 1
+                 AND reason = 'd2 replaces d1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(events, 1);
+        let relations: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM relations WHERE relation_id = 'supersedes:d2:1:d1:2'
+                 AND kind = 'supersedes'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(relations, 1);
+    }
+    // The lineage is visible from both ends.
+    let (code, out, err) = run(
+        &h,
+        &[
+            "knowledge",
+            "related",
+            "--repo",
+            "krepo",
+            "--id",
+            "d1",
+            "--direction",
+            "inbound",
+        ],
+    );
+    assert_eq!(code, 0, "related: {err}");
+    assert!(out.contains("supersedes:d2:1:d1:2"), "{out}");
+    assert!(out.contains("\"kind\":\"supersedes\""), "{out}");
+
+    // Default search hides the superseded record; the explicit flag shows it.
+    let (code, out, _) = run(
+        &h,
+        &[
+            "knowledge",
+            "search",
+            "--repo",
+            "krepo",
+            "--query",
+            "zqxbody",
+        ],
+    );
+    assert_eq!(code, 0);
+    assert!(
+        !out.contains("\"id\":\"d1\""),
+        "superseded must be hidden: {out}"
+    );
+    assert!(out.contains("\"id\":\"d2\""), "{out}");
+    let (code, out, _) = run(
+        &h,
+        &[
+            "knowledge",
+            "search",
+            "--repo",
+            "krepo",
+            "--query",
+            "zqxbody",
+            "--include-superseded",
+        ],
+    );
+    assert_eq!(code, 0);
+    assert!(out.contains("\"id\":\"d1\""), "{out}");
+
+    // Retract d2: the reason and author are reported, and default search is
+    // empty once both records are historical.
+    let (code, out, err) = update(
+        &h,
+        "krepo",
+        "d2",
+        1,
+        &retract_input("Second", "bench invalid"),
+    );
+    assert_eq!(code, 0, "retract: {err}");
+    assert!(out.contains("\"status\":\"retracted\""), "{out}");
+    assert!(
+        out.contains("\"retracted_reason\":\"bench invalid\""),
+        "{out}"
+    );
+    assert!(out.contains("\"retracted_author\":\"a\""), "{out}");
+    let (code, out, _) = run(
+        &h,
+        &[
+            "knowledge",
+            "search",
+            "--repo",
+            "krepo",
+            "--query",
+            "zqxbody",
+        ],
+    );
+    assert_eq!(code, 0);
+    assert!(out.contains("\"total\":0"), "{out}");
+    let (code, out, _) = run(
+        &h,
+        &[
+            "knowledge",
+            "search",
+            "--repo",
+            "krepo",
+            "--query",
+            "zqxbody",
+            "--include-retracted",
+        ],
+    );
+    assert_eq!(code, 0);
+    assert!(out.contains("\"id\":\"d2\""), "{out}");
+    assert!(
+        !out.contains("\"id\":\"d1\""),
+        "superseded stays hidden: {out}"
+    );
+    // History keeps every revision and its lifecycle state.
+    let (code, out, _) = run(
+        &h,
+        &["knowledge", "history", "--repo", "krepo", "--id", "d1"],
+    );
+    assert_eq!(code, 0);
+    assert!(out.contains("\"revision\":1"), "{out}");
+    assert!(out.contains("\"revision\":2"), "{out}");
+    assert!(
+        out.contains("\"superseded_by\":{\"id\":\"d2\",\"revision\":1}"),
+        "{out}"
+    );
+}
+
+#[test]
+fn lifecycle_rejections_surface_documented_exit_codes() {
+    let h = home("lifecycle-codes");
+    let dir = mkrepo(&h, "krepo");
+    init(&h, &dir, "krepo");
+    assert_eq!(create(&h, "krepo", "d1", "First", "alpha zqxbody").0, 0);
+    assert_eq!(create(&h, "krepo", "d2", "Second", "beta zqxbody").0, 0);
+    assert_eq!(create(&h, "krepo", "d3", "Third", "gamma zqxbody").0, 0);
+
+    // Self-supersession is an input error (exit 2).
+    let (code, _, err) = update(
+        &h,
+        "krepo",
+        "d1",
+        1,
+        &supersede_input("First", "d1", 1, "self"),
+    );
+    assert_eq!(code, 2, "self-supersession: {err}");
+    // Missing lifecycle payload fields are input errors (exit 2).
+    let missing = "{\"title\":\"First\",\"body\":\"b\",\"status\":\"superseded\",\"author\":\"a\",\"evidence\":[],\"reason\":\"r\"}";
+    assert_eq!(update(&h, "krepo", "d1", 1, missing).0, 2);
+    let missing = "{\"title\":\"First\",\"body\":\"b\",\"status\":\"superseded\",\"author\":\"a\",\"evidence\":[],\"superseded_by\":{\"id\":\"d2\",\"revision\":1}}";
+    assert_eq!(update(&h, "krepo", "d1", 1, missing).0, 2);
+    // Unknown target revisions are storage conflicts (exit 3).
+    let (code, _, err) = update(
+        &h,
+        "krepo",
+        "d1",
+        1,
+        &supersede_input("First", "d2", 99, "ghost"),
+    );
+    assert_eq!(code, 3, "unknown target: {err}");
+    assert!(err.contains("unknown supersede target"), "{err}");
+    // Create may never start in a lifecycle status (exit 2).
+    let created = run_stdin(
+        &h,
+        &["knowledge", "create", "--repo", "krepo", "--input", "-"],
+        br#"{"id":"x1","kind":"decision","title":"t","body":"b","status":"superseded","author":"a","evidence":[]}"#,
+    );
+    assert_eq!(created.0, 2);
+    // Double retraction (exit 2), and superseding a retracted record (exit 2).
+    assert_eq!(
+        update(&h, "krepo", "d3", 1, &retract_input("Third", "gone")).0,
+        0
+    );
+    let (code, _, err) = update(&h, "krepo", "d3", 2, &retract_input("Third", "again"));
+    assert_eq!(code, 2, "double retract: {err}");
+    assert!(err.contains("already retracted"), "{err}");
+    let (code, _, err) = update(
+        &h,
+        "krepo",
+        "d3",
+        2,
+        &supersede_input("Third", "d1", 1, "revive"),
+    );
+    assert_eq!(code, 2, "supersede retracted: {err}");
+    // Cycles are rejected (exit 2), and rejected transitions write nothing.
+    assert_eq!(
+        update(
+            &h,
+            "krepo",
+            "d2",
+            1,
+            &supersede_input("Second", "d1", 1, "swap")
+        )
+        .0,
+        0
+    );
+    let (code, _, err) = update(
+        &h,
+        "krepo",
+        "d1",
+        1,
+        &supersede_input("First", "d2", 2, "close the loop"),
+    );
+    assert_eq!(code, 2, "cycle: {err}");
+    assert!(err.contains("cycle"), "{err}");
+    let (code, out, _) = run(
+        &h,
+        &["knowledge", "history", "--repo", "krepo", "--id", "d1"],
+    );
+    assert_eq!(code, 0);
+    assert!(
+        out.contains("\"total\":1"),
+        "cycle attempt wrote nothing: {out}"
+    );
+}
+
+#[test]
+fn lifecycle_plain_foundation_flow_never_migrates() {
+    let h = home("stillv1");
+    let dir = mkrepo(&h, "krepo");
+    init(&h, &dir, "krepo");
+    assert_eq!(create(&h, "krepo", "d1", "First", "alpha zqxbody").0, 0);
+    // Archive and restore are Foundation transitions: no migration.
+    let archived = "{\"title\":\"First\",\"body\":\"alpha zqxbody\",\"status\":\"archived\",\"author\":\"a\",\"evidence\":[]}";
+    assert_eq!(update(&h, "krepo", "d1", 1, archived).0, 0);
+    let restored = "{\"title\":\"First\",\"body\":\"alpha zqxbody\",\"status\":\"active\",\"author\":\"a\",\"evidence\":[]}";
+    assert_eq!(update(&h, "krepo", "d1", 2, restored).0, 0);
+    let (code, out, err) = run(
+        &h,
+        &[
+            "knowledge",
+            "search",
+            "--repo",
+            "krepo",
+            "--query",
+            "zqxbody",
+            "--include-archived",
+        ],
+    );
+    assert_eq!(code, 0, "search: {err}");
+    assert!(out.contains("\"id\":\"d1\""), "{out}");
+    // History visibility flags are accepted against a v1 store too, and the
+    // absent lifecycle tables simply contribute no weights: no migration, no
+    // error, no fabricated lifecycle fields.
+    let (code, out, err) = run(
+        &h,
+        &[
+            "knowledge",
+            "search",
+            "--repo",
+            "krepo",
+            "--query",
+            "zqxbody",
+            "--include-superseded",
+            "--include-retracted",
+        ],
+    );
+    assert_eq!(code, 0, "search: {err}");
+    assert!(out.contains("\"id\":\"d1\""), "{out}");
+    assert!(!out.contains("superseded_by"), "{out}");
+    assert_eq!(
+        user_version(&h, "krepo"),
+        1,
+        "Foundation writes and reads must never migrate a v1 store"
+    );
+}
