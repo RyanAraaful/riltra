@@ -3045,12 +3045,14 @@ fn port_v1_store_export_import_keeps_foundation_compatibility() {
         "a Foundation-only payload must not migrate the store"
     );
 
-    // A payload that writes an event migrates exactly then.
+    // A payload that writes an event migrates exactly then: the confirmation
+    // sits on an appended revision, the only place a coherent store can hold
+    // one.
     let ev = h.join("ev.jsonl");
     write_text(
         &ev,
         &format!(
-            "{}\n{{\"type\":\"record\",\"id\":\"d9\",\"kind\":\"decision\",\"head_revision\":1,\"status\":\"active\",\"revisions\":[{{\"revision\":1,\"title\":\"Nine\",\"body\":\"b9\",\"status\":\"active\",\"author\":\"a\",\"created_unix\":10,\"evidence\":[],\"events\":[{{\"event\":\"confirm\",\"author\":\"a\",\"created_unix\":11}}]}}]}}\n",
+            "{}\n{{\"type\":\"record\",\"id\":\"d9\",\"kind\":\"decision\",\"head_revision\":2,\"status\":\"active\",\"revisions\":[{{\"revision\":1,\"title\":\"Nine\",\"body\":\"b9\",\"status\":\"active\",\"author\":\"a\",\"created_unix\":10,\"evidence\":[],\"events\":[]}},{{\"revision\":2,\"title\":\"Nine\",\"body\":\"b9\",\"status\":\"active\",\"author\":\"a\",\"created_unix\":11,\"evidence\":[],\"events\":[{{\"event\":\"confirm\",\"author\":\"a\",\"created_unix\":12}}]}}]}}\n",
             meta_line(1, 0)
         ),
     );
@@ -3367,5 +3369,129 @@ fn port_relation_merge_rules() {
     assert!(
         read_text(&y).contains("\"relation_id\":\"r8\""),
         "r8 must be stored"
+    );
+}
+
+#[test]
+fn port_import_rejects_cross_store_supersedes_cycles() {
+    let h = home("port-xcycle");
+    let dir = mkrepo(&h, "krepo");
+    init(&h, &dir, "krepo");
+    assert_eq!(create(&h, "krepo", "d1", "First", "body one").0, 0);
+    assert_eq!(create(&h, "krepo", "d2", "Second", "body two").0, 0);
+    // d1 is superseded by d2 revision 1: the store holds the historical
+    // record-level edge d2 -> d1 (d2 is the replacement).
+    assert_eq!(
+        update(
+            &h,
+            "krepo",
+            "d1",
+            1,
+            &supersede_input("First v2", "d2", 1, "replaced by d2")
+        )
+        .0,
+        0
+    );
+    let base = h.join("xbase.jsonl");
+    let (code, base_out, err) = export(&h, "krepo", &["--out", base.to_str().unwrap()]);
+    assert_eq!(code, 0, "export: {err}");
+    let base_text = read_text(&base);
+    let before = std::fs::read(db_path(&h, "krepo")).unwrap();
+
+    // The payload drops d1 and its relation and appends to d2 a revision 2
+    // that is superseded by the stored d1 revision 2. d2's stored revision 1
+    // stays byte-identical. The payload is acyclic on its own; combined with
+    // the stored d2 -> d1 edge it closes a record-level supersedes cycle, a
+    // state the store's own write path refuses.
+    let mut payload = meta_line(1, 1);
+    payload.push('\n');
+    for line in base_text.lines() {
+        if line.starts_with("{\"type\":\"meta\"") || line.contains("\"supersedes:d2:1:d1:2\"") {
+            continue;
+        }
+        if line.starts_with("{\"type\":\"record\",\"id\":\"d2\"") {
+            let extended = line
+                .replacen("\"head_revision\":1,", "\"head_revision\":2,", 1)
+                .replacen(
+                    "\"status\":\"active\",\"revisions\"",
+                    "\"status\":\"superseded\",\"revisions\"",
+                    1,
+                );
+            payload.push_str(extended.strip_suffix("]}").unwrap());
+            payload.push_str(
+                ",{\"revision\":2,\"title\":\"Second v2\",\"body\":\"body two v2\",\
+                 \"status\":\"superseded\",\"author\":\"a\",\"created_unix\":30,\"evidence\":[],\
+                 \"events\":[{\"event\":\"supersede\",\"target_id\":\"d1\",\"target_revision\":2,\
+                 \"reason\":\"replaced by d1\",\"author\":\"a\",\"created_unix\":30}]}]}",
+            );
+            payload.push('\n');
+            continue;
+        }
+        if line.starts_with("{\"type\":\"record\",\"id\":\"d1\"") {
+            continue;
+        }
+        payload.push_str(line);
+        payload.push('\n');
+    }
+    payload.push_str(
+        "{\"type\":\"relation\",\"relation_id\":\"supersedes:d1:2:d2:2\",\"src_id\":\"d1\",\
+         \"src_revision\":2,\"dst_id\":\"d2\",\"dst_revision\":2,\"kind\":\"supersedes\",\
+         \"author\":\"a\",\"rationale\":\"replaced by d1\",\"created_unix\":30,\"events\":[]}\n",
+    );
+    let f = h.join("xcycle.jsonl");
+    write_text(&f, &payload);
+    let (code, _, err) = import(&h, "krepo", &f);
+    assert_eq!(
+        code, 2,
+        "a payload that closes a stored supersedes cycle must be refused: {err}"
+    );
+    assert!(err.contains("invalid import payload"), "{err}");
+    assert!(err.contains("supersedes lineage"), "{err}");
+    assert_eq!(
+        std::fs::read(db_path(&h, "krepo")).unwrap(),
+        before,
+        "a refused import must not change revisions, relations, events or generation"
+    );
+    let after = h.join("xafter.jsonl");
+    let (_, after_out, err) = export(&h, "krepo", &["--out", after.to_str().unwrap()]);
+    assert!(err.is_empty(), "post-rejection export: {err}");
+    assert_eq!(
+        read_text(&after),
+        base_text,
+        "a refused import must leave the export byte-identical"
+    );
+    assert_eq!(
+        field_num(&after_out, "generation"),
+        field_num(&base_out, "generation"),
+        "a refused import must not advance the generation"
+    );
+    // Retracting the stored lineage relation does not lift the rule: the
+    // lineage is history, so the same payload is still refused.
+    let (code, _, err) = run_stdin(
+        &h,
+        &[
+            "knowledge",
+            "unlink",
+            "--repo",
+            "krepo",
+            "--relation",
+            "supersedes:d2:1:d1:2",
+            "--input",
+            "-",
+        ],
+        br#"{"author":"a","reason":"no longer relied on"}"#,
+    );
+    assert_eq!(code, 0, "retract stored lineage: {err}");
+    let retracted = std::fs::read(db_path(&h, "krepo")).unwrap();
+    let (code, _, err) = import(&h, "krepo", &f);
+    assert_eq!(
+        code, 2,
+        "a retracted stored lineage edge still closes the cycle: {err}"
+    );
+    assert!(err.contains("supersedes lineage"), "{err}");
+    assert_eq!(
+        std::fs::read(db_path(&h, "krepo")).unwrap(),
+        retracted,
+        "a refused import must not change the store"
     );
 }

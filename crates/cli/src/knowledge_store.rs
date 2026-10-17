@@ -3290,6 +3290,24 @@ fn check_semantic_coherence(
 ) -> Result<(), String> {
     for rec in records {
         for rev in &rec.revisions {
+            // Native creation is the only author of revision 1 and writes only
+            // active or archived with no event; a first revision carrying a
+            // transition or a confirmation is not a faithful export of any
+            // coherent store.
+            if rev.revision == 1 {
+                if !matches!(rev.status.as_str(), "active" | "archived") {
+                    return Err(invalid_msg(format!(
+                        "record '{}' revision 1 status '{}' cannot be produced by record creation",
+                        rec.id, rev.status
+                    )));
+                }
+                if !rev.events.is_empty() {
+                    return Err(invalid_msg(format!(
+                        "record '{}' revision 1 carries a lifecycle event that record creation cannot produce",
+                        rec.id
+                    )));
+                }
+            }
             // The lifecycle status must agree with the recorded event.
             match (
                 rev.status.as_str(),
@@ -3375,26 +3393,34 @@ fn check_semantic_coherence(
             }
         }
     }
-    supersedes_lineage_is_acyclic(records)
+    supersedes_lineage_is_acyclic(records, &[])
 }
 
-/// The payload-internal supersedes lineage must be acyclic at record level:
-/// the store refuses any supersede transition whose lineage walk (over every
-/// stored supersedes relation, regardless of revision) can reach the record
-/// about to be superseded, so a payload that closes such a cycle is not a
-/// faithful export of any coherent store and is refused before a store is
-/// opened. A record may supersede different targets over its revisions, so a
-/// node can carry several outgoing edges.
-fn supersedes_lineage_is_acyclic(records: &[PortRecord]) -> Result<(), String> {
+/// The supersedes lineage must be acyclic at record level. Edges use the
+/// store's own orientation: `a -> b` means `a` is the replacement revision's
+/// record and `b` the superseded record. The store refuses any supersede
+/// transition whose lineage walk — over every stored supersedes relation,
+/// retracted ones included, because the lineage is history — can reach the
+/// record about to be superseded, so a payload that closes such a cycle,
+/// alone or against stored history, is not a faithful export of any coherent
+/// store and is refused. A record may supersede different targets over its
+/// revisions, so a node can carry several outgoing edges.
+fn supersedes_lineage_is_acyclic(
+    records: &[PortRecord],
+    stored_edges: &[(String, String)],
+) -> Result<(), String> {
     let mut edges: std::collections::HashMap<&str, Vec<&str>> = std::collections::HashMap::new();
+    for (src, dst) in stored_edges {
+        edges.entry(src.as_str()).or_default().push(dst.as_str());
+    }
     for rec in records {
         for rev in &rec.revisions {
             if let Some(e) = rev.events.first() {
                 if e.event == "supersede" {
                     edges
-                        .entry(rec.id.as_str())
+                        .entry(e.target_id.as_deref().unwrap_or_default())
                         .or_default()
-                        .push(e.target_id.as_deref().unwrap_or_default());
+                        .push(rec.id.as_str());
                 }
             }
         }
@@ -3989,6 +4015,34 @@ pub fn import_payload(
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|e| format!("cannot begin knowledge write: {e}"))?;
+    // Stored supersedes history combines with the payload's edges: the store
+    // refuses any transition that would close a record-level supersede cycle
+    // over every stored relation, retracted ones included, so an import that
+    // would close one across the store/payload boundary is refused before the
+    // first write. The payload alone was checked at parse time; this walk
+    // adds the stored historical edges.
+    let mut stored_edges: Vec<(String, String)> = Vec::new();
+    {
+        let mut stmt = tx
+            .prepare("SELECT src_id, dst_id FROM relations WHERE kind = 'supersedes'")
+            .map_err(|e| format!("cannot read supersedes lineage: {e}"))?;
+        let mut rows = stmt
+            .query([])
+            .map_err(|e| format!("cannot read supersedes lineage: {e}"))?;
+        while let Some(row) = rows
+            .next()
+            .map_err(|e| format!("cannot read supersedes lineage: {e}"))?
+        {
+            let src: String = row
+                .get(0)
+                .map_err(|e| format!("cannot read supersedes lineage: {e}"))?;
+            let dst: String = row
+                .get(1)
+                .map_err(|e| format!("cannot read supersedes lineage: {e}"))?;
+            stored_edges.push((src, dst));
+        }
+    }
+    supersedes_lineage_is_acyclic(&payload.records, &stored_edges)?;
     if payload.needs_lifecycle {
         ensure_lifecycle_schema(&tx)?;
     }
@@ -7967,10 +8021,14 @@ mod port_tests {
         )
     }
 
+    /// A record whose confirmation rides on the appended revision 2, the only
+    /// place a coherent store can hold one.
     fn confirm_event_record() -> String {
-        "{\"type\":\"record\",\"id\":\"d9\",\"kind\":\"decision\",\"head_revision\":1,\"status\":\"active\",\
+        "{\"type\":\"record\",\"id\":\"d9\",\"kind\":\"decision\",\"head_revision\":2,\"status\":\"active\",\
          \"revisions\":[{\"revision\":1,\"title\":\"Nine\",\"body\":\"b9\",\"status\":\"active\",\
-         \"author\":\"a\",\"created_unix\":10,\"evidence\":[],\"events\":[{\"event\":\"confirm\",\"author\":\"a\",\"created_unix\":11}]}]}"
+         \"author\":\"a\",\"created_unix\":10,\"evidence\":[],\"events\":[]},{\"revision\":2,\"title\":\"Nine\",\
+         \"body\":\"b9\",\"status\":\"active\",\"author\":\"a\",\"created_unix\":11,\"evidence\":[],\
+         \"events\":[{\"event\":\"confirm\",\"author\":\"a\",\"created_unix\":12}]}]}"
             .to_string()
     }
 
@@ -8601,6 +8659,18 @@ mod port_tests {
         )
     }
 
+    /// A record whose revision 2 carries the lifecycle state; revision 1 is
+    /// the plain creation every store starts from.
+    fn two_rev_record(id: &str, status: &str, events: &str) -> String {
+        format!(
+            "{{\"type\":\"record\",\"id\":\"{id}\",\"kind\":\"decision\",\"head_revision\":2,\
+             \"status\":\"{status}\",\"revisions\":[{{\"revision\":1,\"title\":\"T\",\"body\":\"B\",\
+             \"status\":\"active\",\"author\":\"a\",\"created_unix\":10,\"evidence\":[],\"events\":[]}},\
+             {{\"revision\":2,\"title\":\"T\",\"body\":\"B\",\"status\":\"{status}\",\"author\":\"a\",\
+             \"created_unix\":11,\"evidence\":[],\"events\":{events}}}]}}"
+        )
+    }
+
     /// A relation line between two revision-1 records.
     fn rel_line(rid: &str, src_id: &str, dst_id: &str, kind: &str) -> String {
         rel_line_rev(rid, src_id, 1, dst_id, 1, kind)
@@ -8692,7 +8762,9 @@ mod port_tests {
         let supersede_event = r#"[{"event":"supersede","target_id":"d2","target_revision":1,"reason":"r","author":"a","created_unix":11}]"#;
         let retract_event = r#"[{"event":"retract","reason":"r","author":"a","created_unix":11}]"#;
         let confirm_event = r#"[{"event":"confirm","author":"a","created_unix":11}]"#;
-        // Every status/event pairing except the four the store can author.
+        // Every status/event pairing except the four the store can author;
+        // the disagreement sits on an appended revision 2 because revision 1
+        // is creation-only.
         let cases = [
             ("superseded", "[]"),
             ("retracted", "[]"),
@@ -8704,10 +8776,7 @@ mod port_tests {
             ("retracted", supersede_event),
         ];
         for (status, events) in cases {
-            let text = format!(
-                "{meta}\n{}\n",
-                record_line_full("d1", "decision", status, events)
-            );
+            let text = format!("{meta}\n{}\n", two_rev_record("d1", status, events));
             let err = parse_import_payload(&text).unwrap_err();
             assert!(
                 err.starts_with("invalid import payload"),
@@ -8719,18 +8788,8 @@ mod port_tests {
     #[test]
     fn port_import_accepts_coherent_status_event_pairs() {
         let meta = meta_line(1, 0);
-        let cases = [
-            (
-                "retracted",
-                r#"[{"event":"retract","reason":"r","author":"a","created_unix":11}]"#,
-            ),
-            (
-                "active",
-                r#"[{"event":"confirm","author":"a","created_unix":11}]"#,
-            ),
-            ("archived", "[]"),
-            ("active", "[]"),
-        ];
+        // Revision 1 is creation-only: active or archived with no event.
+        let cases = [("archived", "[]"), ("active", "[]")];
         for (status, events) in cases {
             let text = format!(
                 "{meta}\n{}\n",
@@ -8739,6 +8798,68 @@ mod port_tests {
             assert!(
                 parse_import_payload(&text).is_ok(),
                 "coherent status {status} with events {events} must parse"
+            );
+        }
+        // Lifecycle states live on appended revisions.
+        let lifecycle = [
+            (
+                "retracted",
+                r#"[{"event":"retract","reason":"r","author":"a","created_unix":11}]"#,
+            ),
+            (
+                "active",
+                r#"[{"event":"confirm","author":"a","created_unix":11}]"#,
+            ),
+        ];
+        for (status, events) in lifecycle {
+            let text = format!("{meta}\n{}\n", two_rev_record("d1", status, events));
+            assert!(
+                parse_import_payload(&text).is_ok(),
+                "coherent status {status} on revision 2 must parse"
+            );
+        }
+    }
+
+    #[test]
+    fn port_import_rejects_first_revision_lifecycle_states() {
+        let meta = meta_line(1, 0);
+        // Native creation is the only author of revision 1 and writes only
+        // active or archived with no event: every other first revision is
+        // not a faithful export of any coherent store.
+        let retract = r#"[{"event":"retract","reason":"r","author":"a","created_unix":11}]"#;
+        let confirm = r#"[{"event":"confirm","author":"a","created_unix":11}]"#;
+        let rejected = [
+            ("retracted", retract),
+            ("active", confirm),
+            ("superseded", "[]"),
+            ("retracted", "[]"),
+        ];
+        for (status, events) in rejected {
+            let text = format!(
+                "{meta}\n{}\n",
+                record_line_full("d1", "decision", status, events)
+            );
+            let err = parse_import_payload(&text).unwrap_err();
+            assert!(
+                err.starts_with("invalid import payload"),
+                "revision 1 {status} with events {events}: {err}"
+            );
+            assert!(err.contains("revision 1"), "{err}");
+        }
+        // The creation-producible first revisions and every appended
+        // lifecycle state still parse.
+        for status in ["active", "archived"] {
+            let text = format!(
+                "{meta}\n{}\n",
+                record_line_full("d1", "decision", status, "[]")
+            );
+            assert!(parse_import_payload(&text).is_ok(), "{status}");
+        }
+        for (status, events) in [("retracted", retract), ("active", confirm)] {
+            let text = format!("{meta}\n{}\n", two_rev_record("d1", status, events));
+            assert!(
+                parse_import_payload(&text).is_ok(),
+                "revision 2 {status} with events {events} must parse"
             );
         }
     }
@@ -8783,13 +8904,13 @@ mod port_tests {
     #[test]
     fn port_import_rejects_supersede_event_relation_disagreement() {
         let meta2 = meta_line(2, 1);
-        let d1_sup = record_line_full(
+        let d2 = record_line_full("d2", "decision", "active", "[]");
+        // The superseded state sits on an appended revision 2.
+        let d1_sup = two_rev_record(
             "d1",
-            "decision",
             "superseded",
             r#"[{"event":"supersede","target_id":"d2","target_revision":1,"reason":"r","author":"a","created_unix":11}]"#,
         );
-        let d2 = record_line_full("d2", "decision", "active", "[]");
         // The event without its revision-pinned implicit relation.
         let err =
             parse_import_payload(&format!("{}\n{d1_sup}\n{d2}\n", meta_line(2, 0))).unwrap_err();
@@ -8810,10 +8931,10 @@ mod port_tests {
         ))
         .unwrap_err();
         assert!(err.starts_with("invalid import payload"), "{err}");
-        // The coherent pair parses.
+        // The coherent pair parses: d1 revision 2 superseded by d2 revision 1.
         let ok = parse_import_payload(&format!(
             "{meta2}\n{d1_sup}\n{d2}\n{}\n",
-            rel_line("supersedes:d2:1:d1:1", "d2", "d1", "supersedes")
+            rel_line_rev("supersedes:d2:1:d1:2", "d2", 1, "d1", 2, "supersedes")
         ));
         assert!(ok.is_ok(), "{ok:?}");
     }
@@ -8825,31 +8946,15 @@ mod port_tests {
                 r#"[{{"event":"supersede","target_id":"{target}","target_revision":{target_revision},"reason":"r","author":"a","created_unix":11}}]"#
             )
         };
-        // Mutual replacement: d1 superseded by d2 and d2 superseded by d1.
-        let meta2 = meta_line(2, 2);
-        let d1 = record_line_full("d1", "decision", "superseded", &supersede_event("d2", 1));
-        let d2 = record_line_full("d2", "decision", "superseded", &supersede_event("d1", 1));
-        let text = format!(
-            "{meta2}\n{d1}\n{d2}\n{}\n{}\n",
-            rel_line("supersedes:d1:1:d2:1", "d1", "d2", "supersedes"),
-            rel_line("supersedes:d2:1:d1:1", "d2", "d1", "supersedes")
-        );
-        let err = parse_import_payload(&text).unwrap_err();
-        assert!(err.starts_with("invalid import payload"), "{err}");
         // Mutual replacement across revisions: d1 rev2 is replaced by d2 rev1
         // and d2 rev2 by d1 rev2. The store refuses that record-level cycle,
-        // so the payload must be refused too.
-        let two_rev_record = |id: &str, target: &str, target_rev: u64| {
-            format!(
-                "{{\"type\":\"record\",\"id\":\"{id}\",\"kind\":\"decision\",\"head_revision\":2,\"status\":\"superseded\",\"revisions\":[{{\"revision\":1,\"title\":\"T\",\"body\":\"B\",\"status\":\"active\",\"author\":\"a\",\"created_unix\":10,\"evidence\":[],\"events\":[]}},{{\"revision\":2,\"title\":\"T\",\"body\":\"B\",\"status\":\"superseded\",\"author\":\"a\",\"created_unix\":11,\"evidence\":[],\"events\":{}}}]}}",
-                supersede_event(target, target_rev)
-            )
-        };
+        // so the payload must be refused too (revision 1 stays creation-only,
+        // so the transitions ride on the appended revision 2).
         let text = format!(
             "{}\n{}\n{}\n{}\n{}\n",
             meta_line(2, 2),
-            two_rev_record("d1", "d2", 1),
-            two_rev_record("d2", "d1", 2),
+            two_rev_record("d1", "superseded", &supersede_event("d2", 1)),
+            two_rev_record("d2", "superseded", &supersede_event("d1", 2)),
             rel_line_rev("supersedes:d1:2:d2:2", "d1", 2, "d2", 2, "supersedes"),
             rel_line_rev("supersedes:d2:1:d1:2", "d2", 1, "d1", 2, "supersedes")
         );
@@ -8857,10 +8962,10 @@ mod port_tests {
         assert!(err.starts_with("invalid import payload"), "{err}");
         // Self replacement.
         let meta1 = meta_line(1, 1);
-        let d1_self = record_line_full("d1", "decision", "superseded", &supersede_event("d1", 1));
+        let d1_self = two_rev_record("d1", "superseded", &supersede_event("d1", 2));
         let text = format!(
             "{meta1}\n{d1_self}\n{}\n",
-            rel_line("supersedes:d1:1:d1:1", "d1", "d1", "supersedes")
+            rel_line_rev("supersedes:d1:2:d1:2", "d1", 2, "d1", 2, "supersedes")
         );
         let err = parse_import_payload(&text).unwrap_err();
         assert!(err.starts_with("invalid import payload"), "{err}");
