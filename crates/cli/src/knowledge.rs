@@ -34,6 +34,12 @@ pub struct RecordVersion {
     /// written by a retract transition.
     pub retracted_reason: Option<String>,
     pub retracted_author: Option<String>,
+    /// Provenance-confirmation state of this exact revision: `Some` on v2
+    /// stores (`"candidate"` by default, `"confirmed"` after an explicit
+    /// confirmation), `None` on v1 stores. The JSON output omits the field
+    /// when it is `None`, so Foundation stores stay byte-identical and the
+    /// field appears only once Full-stage data exists.
+    pub confirm_state: Option<String>,
     /// Present exactly when the revision carries benchmark measurement.
     pub measurement: Option<BenchmarkData>,
     /// Stored source bindings captured with this revision (immutable).
@@ -57,7 +63,8 @@ pub struct NewRecord {
 /// explicitly; status changes are ordinary revisions, not side channels.
 /// A `superseded` update must name the replacement revision and a reason; a
 /// `retracted` update must carry a reason and no target; both fields are
-/// rejected on any other status.
+/// rejected on any other status. `confirm` is an explicit, opt-in request:
+/// no other field and no prior confirmation state ever implies it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct UpdateRecord {
     pub title: String,
@@ -66,6 +73,7 @@ pub struct UpdateRecord {
     pub author: String,
     pub superseded_by: Option<SupersededRef>,
     pub reason: Option<String>,
+    pub confirm: bool,
 }
 
 /// Caller-supplied repository-scoped IDs: 1–128 ASCII chars,
@@ -148,6 +156,11 @@ pub fn validate_update(input: &UpdateRecord) -> Result<(), String> {
     validate_status(&input.status)?;
     if input.title.is_empty() || input.body.is_empty() || input.author.is_empty() {
         return Err("title, body and author are required".to_string());
+    }
+    // Confirmation is about provenance, not lifecycle: a transition event is
+    // never a confirmation and both cannot be expressed in one request.
+    if input.confirm && matches!(input.status.as_str(), "superseded" | "retracted") {
+        return Err("`confirm_state` is not valid with a lifecycle status transition".to_string());
     }
     // Lifecycle-field coherence: a supersede names its replacement revision
     // and a reason; a retract carries only a reason; a plain update carries
@@ -717,6 +730,7 @@ pub fn validate_update_json(bytes: &[u8]) -> Result<ValidatedUpdate, String> {
             "measurement",
             "superseded_by",
             "reason",
+            "confirm_state",
         ],
         "$",
     )?;
@@ -733,6 +747,16 @@ pub fn validate_update_json(bytes: &[u8]) -> Result<ValidatedUpdate, String> {
             None => None,
             Some(JVal::Str(s)) => Some(s.clone()),
             Some(_) => return Err("type mismatch: field `$.reason` must be a string".to_string()),
+        },
+        // The only expressible request is `"confirmed"`: `"candidate"` is the
+        // default state, not something a caller asks for, so it is rejected
+        // exactly like any other unknown value.
+        confirm: match find(obj, "confirm_state") {
+            None => false,
+            Some(JVal::Str(s)) if s == "confirmed" => true,
+            Some(_) => {
+                return Err("field `$.confirm_state` must be the string \"confirmed\"".to_string())
+            }
         },
     };
     validate_update(&record)?;
@@ -1072,6 +1096,41 @@ mod tests {
     }
 
     #[test]
+    fn knowledge_json_confirm_rules() {
+        let update = |extra: &str| {
+            format!(
+                "{{\"title\":\"t\",\"body\":\"b\",\"status\":\"active\",\"author\":\"r\",\"evidence\":[]{extra}}}"
+            )
+        };
+        // Withheld by default; the request parses only as "confirmed".
+        let parsed = validate_update_json(update("").as_bytes()).unwrap();
+        assert!(!parsed.record.confirm);
+        let parsed =
+            validate_update_json(update(",\"confirm_state\":\"confirmed\"").as_bytes()).unwrap();
+        assert!(parsed.record.confirm);
+        for bad in [
+            ",\"confirm_state\":\"candidate\"",
+            ",\"confirm_state\":\"Confirmed\"",
+            ",\"confirm_state\":true",
+            ",\"confirm_state\":1",
+            ",\"confirm_state\":null",
+        ] {
+            let err = validate_update_json(update(bad).as_bytes()).unwrap_err();
+            assert!(
+                err.contains("confirm_state"),
+                "case must be rejected: {bad}"
+            );
+        }
+        // Confirmation never combines with a lifecycle transition.
+        let combined = update(
+            ",\"confirm_state\":\"confirmed\",\"superseded_by\":{\"id\":\"d2\",\"revision\":1},\"reason\":\"r\"",
+        )
+        .replace("\"status\":\"active\"", "\"status\":\"superseded\"");
+        let err = validate_update_json(combined.as_bytes()).unwrap_err();
+        assert!(err.contains("confirm_state"), "unexpected: {err}");
+    }
+
+    #[test]
     fn knowledge_new_and_update_rules() {
         let good = NewRecord {
             id: "decision-001".to_string(),
@@ -1098,8 +1157,24 @@ mod tests {
             author: "r".to_string(),
             superseded_by: None,
             reason: None,
+            confirm: false,
         };
         assert!(validate_update(&update).is_ok());
+        // Confirmation is opt-in and valid on a content revision...
+        let mut confirmed = update.clone();
+        confirmed.confirm = true;
+        assert!(validate_update(&confirmed).is_ok());
+        // ... but never jointly with a lifecycle transition event.
+        let mut confirmed_supersede = confirmed.clone();
+        confirmed_supersede.status = "superseded".to_string();
+        confirmed_supersede.superseded_by = Some(superseded_ref("d2", 1));
+        confirmed_supersede.reason = Some("replaced".to_string());
+        let err = validate_update(&confirmed_supersede).unwrap_err();
+        assert!(err.contains("confirm_state"), "unexpected: {err}");
+        let mut confirmed_retract = confirmed.clone();
+        confirmed_retract.status = "retracted".to_string();
+        confirmed_retract.reason = Some("withdrawn".to_string());
+        assert!(validate_update(&confirmed_retract).is_err());
         let mut bad_update = update.clone();
         bad_update.status = "superseded".to_string();
         // Supersede without a target and reason is rejected, then completed.

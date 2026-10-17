@@ -628,6 +628,7 @@ fn record_from_row(row: &rusqlite::Row) -> rusqlite::Result<RecordVersion> {
         superseded_by: None,
         retracted_reason: None,
         retracted_author: None,
+        confirm_state: None,
         measurement: None,
         evidence: Vec::new(),
     })
@@ -1017,10 +1018,11 @@ fn update_inner(
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|e| format!("cannot begin knowledge write: {e}"))?;
-    // A Full-stage transition migrates the store as the very first step of
-    // its own write transaction; every later rejection rolls the migration
-    // back with it, so a failed transition leaves a v1 store a v1 store.
-    if input.status == "superseded" || input.status == "retracted" {
+    // A Full-stage transition or an explicit confirmation migrates the store
+    // as the very first step of its own write transaction; every later
+    // rejection rolls the migration back with it, so a failed write leaves a
+    // v1 store a v1 store.
+    if input.status == "superseded" || input.status == "retracted" || input.confirm {
         ensure_lifecycle_schema(&tx)?;
     }
     let current: Option<i64> = tx
@@ -1164,6 +1166,43 @@ fn update_inner(
             supersede_target = Some((target.id.clone(), target_rev));
         }
     }
+    // Explicit confirmation is idempotent for the head revision: an identical
+    // payload — same title, body, status and author, no new evidence or
+    // measurement — re-confirming an already-confirmed head succeeds without
+    // writing. Everything else writes a new confirming revision; there is no
+    // in-place mutation and no implicit confirmation.
+    if input.confirm {
+        let head: (String, String, String, String) = tx
+            .query_row(
+                "SELECT title, body, status, author FROM records WHERE id = ?1 AND revision = ?2",
+                rusqlite::params![id, current],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .map_err(|e| format!("cannot read record: {e}"))?;
+        let already: i64 = tx
+            .query_row(
+                "SELECT count(*) FROM record_lifecycle
+                 WHERE id = ?1 AND revision = ?2 AND event = 'confirm'",
+                rusqlite::params![id, current],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("cannot read confirmation state: {e}"))?;
+        let unchanged = head
+            == (
+                input.title.clone(),
+                input.body.clone(),
+                input.status.clone(),
+                input.author.clone(),
+            );
+        if already != 0 && unchanged && evidence.is_empty() && measurement.is_none() {
+            let head_revision = u64::try_from(current)
+                .map_err(|_| "corrupt knowledge store: stored revision out of range".to_string())?;
+            let generation = read_generation(&tx)?;
+            tx.commit()
+                .map_err(|e| format!("cannot commit knowledge write: {e}"))?;
+            return Ok((head_revision, generation));
+        }
+    }
     let next_i64 = current
         .checked_add(1)
         .ok_or_else(|| "knowledge revision counter overflow".to_string())?;
@@ -1266,6 +1305,17 @@ fn update_inner(
             .map_err(|e| format!("cannot store lifecycle event: {e}"))?;
         }
         _ => {}
+    }
+    // A confirmation event is written alongside the revision it confirms:
+    // the revision carries the state, the event makes it auditable and
+    // immutable. Confirmation never implies evidence or verification.
+    if input.confirm {
+        tx.execute(
+            "INSERT INTO record_lifecycle (id, revision, event, author, created_unix)
+             VALUES (?1, ?2, 'confirm', ?3, ?4)",
+            rusqlite::params![id, next_i64, input.author, now_unix()],
+        )
+        .map_err(|e| format!("cannot store confirmation event: {e}"))?;
     }
     let generation = bump_generation(&tx)?;
     tx.commit()
@@ -1377,8 +1427,9 @@ type LifecycleRow = (String, Option<String>, Option<i64>, Option<String>, String
 
 /// Overlay one revision's lifecycle state from the append-only event table.
 /// Revisions without an event keep Foundation defaults: no target, no
-/// retraction fields. The event is keyed by (id, revision) and is written
-/// exactly once per revision, so this never needs to merge events.
+/// retraction fields, and the candidate confirmation state (on a v2 store).
+/// The event is keyed by (id, revision) and is written exactly once per
+/// revision, so this never needs to merge events.
 fn load_record_lifecycle(
     conn: &Connection,
     has_lifecycle: bool,
@@ -1398,6 +1449,9 @@ fn load_record_lifecycle(
         )
         .optional()
         .map_err(|e| format!("cannot read record lifecycle: {e}"))?;
+    // On a v2 store every revision carries a state: candidate by default,
+    // confirmed only when this exact revision has its own confirm event.
+    record.confirm_state = Some("candidate".to_string());
     if let Some((event, target_id, target_revision, reason, author)) = event {
         match event.as_str() {
             "supersede" => {
@@ -1414,6 +1468,9 @@ fn load_record_lifecycle(
             "retract" => {
                 record.retracted_reason = reason;
                 record.retracted_author = Some(author);
+            }
+            "confirm" => {
+                record.confirm_state = Some("confirmed".to_string());
             }
             _ => {}
         }
@@ -1768,6 +1825,10 @@ pub struct RelationView {
     pub retracted: bool,
     pub retraction_author: Option<String>,
     pub retraction_reason: Option<String>,
+    /// Confirmation state of this exact relation: `Some("candidate")`/
+    /// `Some("confirmed")` on v2 stores, `None` on v1 stores (the JSON output
+    /// then omits the field).
+    pub confirm_state: Option<String>,
 }
 
 /// One page of one-hop relations with its generation guard.
@@ -1813,8 +1874,12 @@ fn endpoint_exists(tx: &Transaction, id: &str, revision: i64) -> Result<bool, St
 /// Author one directed relationship between two exact record revisions in
 /// this database. Null, foreign, guessed or name-matched endpoints cannot be
 /// expressed: both revisions must exist before commit, and an identical
-/// active endpoint/kind tuple is rejected. One write transaction covers the
-/// insert and the generation bump.
+/// active endpoint/kind tuple is rejected. `confirm` explicitly confirms the
+/// authored row: on a fresh link it records the confirmation event with the
+/// write, and re-linking the byte-identical live row with `confirm` promotes
+/// it (idempotently — a repeat is a no-op, not an error). The authored shape
+/// is never rewritten, and a retracted relation is never revived. One write
+/// transaction covers the insert/promotion and the generation bump.
 #[allow(clippy::too_many_arguments)]
 pub fn link(
     conn: &mut Connection,
@@ -1826,6 +1891,7 @@ pub fn link(
     kind: &str,
     author: &str,
     rationale: &str,
+    confirm: bool,
 ) -> Result<u64, String> {
     crate::knowledge::validate_relation_id(relation_id)?;
     crate::knowledge::validate_relation_kind(kind)?;
@@ -1839,15 +1905,76 @@ pub fn link(
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|e| format!("cannot begin knowledge write: {e}"))?;
-    let id_taken: i64 = tx
+    // A confirmation is Full-stage data: the store migrates as the first
+    // step of the same transaction.
+    if confirm {
+        ensure_lifecycle_schema(&tx)?;
+    }
+    // A taken id is either the byte-identical live row being confirmed, or a
+    // conflict. Reading the authored shape here is what makes promotion safe:
+    // only an exact match of every stored field may ever be confirmed.
+    let existing: Option<(String, i64, String, i64, String, String, String)> = tx
         .query_row(
-            "SELECT count(*) FROM relations WHERE relation_id = ?1",
+            "SELECT src_id, src_revision, dst_id, dst_revision, kind, author, rationale
+             FROM relations WHERE relation_id = ?1",
             [relation_id],
-            |row| row.get(0),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                ))
+            },
         )
+        .optional()
         .map_err(|e| format!("cannot check relation id: {e}"))?;
-    if id_taken != 0 {
-        return Err(format!("duplicate relation id: '{relation_id}'"));
+    if let Some((x_src, x_src_rev, x_dst, x_dst_rev, x_kind, x_author, x_rationale)) = existing {
+        let identical = x_src == src_id
+            && x_src_rev == src_i64
+            && x_dst == dst_id
+            && x_dst_rev == dst_i64
+            && x_kind == kind
+            && x_author == author
+            && x_rationale == rationale;
+        let retracted: i64 = tx
+            .query_row(
+                "SELECT count(*) FROM retractions WHERE relation_id = ?1",
+                [relation_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("cannot read relation retraction: {e}"))?;
+        if !confirm || !identical || retracted != 0 {
+            return Err(format!("duplicate relation id: '{relation_id}'"));
+        }
+        let already: i64 = tx
+            .query_row(
+                "SELECT count(*) FROM relation_lifecycle
+                 WHERE relation_id = ?1 AND event = 'confirm'",
+                [relation_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("cannot read relation confirmation: {e}"))?;
+        if already != 0 {
+            // Repeating the confirmation succeeds without writing.
+            let generation = read_generation(&tx)?;
+            tx.commit()
+                .map_err(|e| format!("cannot commit relation link: {e}"))?;
+            return Ok(generation);
+        }
+        tx.execute(
+            "INSERT INTO relation_lifecycle (relation_id, event, author, created_unix)
+             VALUES (?1, 'confirm', ?2, ?3)",
+            rusqlite::params![relation_id, author, now_unix()],
+        )
+        .map_err(|e| format!("cannot store relation confirmation: {e}"))?;
+        let generation = bump_generation(&tx)?;
+        tx.commit()
+            .map_err(|e| format!("cannot commit relation link: {e}"))?;
+        return Ok(generation);
     }
     if !endpoint_exists(&tx, src_id, src_i64)? {
         return Err(format!(
@@ -1894,6 +2021,14 @@ pub fn link(
         ],
     )
     .map_err(|e| format!("cannot store relation: {e}"))?;
+    if confirm {
+        tx.execute(
+            "INSERT INTO relation_lifecycle (relation_id, event, author, created_unix)
+             VALUES (?1, 'confirm', ?2, ?3)",
+            rusqlite::params![relation_id, author, now_unix()],
+        )
+        .map_err(|e| format!("cannot store relation confirmation: {e}"))?;
+    }
     let generation = bump_generation(&tx)?;
     tx.commit()
         .map_err(|e| format!("cannot commit relation link: {e}"))?;
@@ -1948,7 +2083,21 @@ pub fn unlink(
     Ok(generation)
 }
 
-fn relation_from_row(row: &rusqlite::Row) -> rusqlite::Result<RelationView> {
+/// Confirmation state lives in `relation_lifecycle`, which exists only on v2
+/// stores: reads join it when present and report `None` (field omitted from
+/// JSON) when the store has no lifecycle tables at all.
+fn relation_confirm_join(has_lifecycle: bool) -> (&'static str, &'static str) {
+    if has_lifecycle {
+        (
+            "LEFT JOIN relation_lifecycle l ON l.relation_id = r.relation_id",
+            "l.event",
+        )
+    } else {
+        ("", "NULL")
+    }
+}
+
+fn relation_from_row(row: &rusqlite::Row, has_lifecycle: bool) -> rusqlite::Result<RelationView> {
     let bad = |rev: i64| {
         rusqlite::Error::FromSqlConversionFailure(
             1,
@@ -1974,6 +2123,17 @@ fn relation_from_row(row: &rusqlite::Row) -> rusqlite::Result<RelationView> {
         retracted: row.get::<_, Option<String>>(9)?.is_some(),
         retraction_author: row.get(10)?,
         retraction_reason: row.get(11)?,
+        // Column 12 is the optional lifecycle join: on v2 stores a present
+        // event means confirmed, its absence candidate; on v1 the join is
+        // an explicit NULL and there is no state to report.
+        confirm_state: if has_lifecycle {
+            Some(match row.get::<_, Option<String>>(12)? {
+                Some(_) => "confirmed".to_string(),
+                None => "candidate".to_string(),
+            })
+        } else {
+            None
+        },
     })
 }
 
@@ -2049,6 +2209,8 @@ pub fn related(
             RelationDirection::Outbound => "r.src_id = ?1 AND r.src_revision = ?2",
             RelationDirection::Inbound => "r.dst_id = ?1 AND r.dst_revision = ?2",
         };
+        let has_lifecycle = lifecycle_present(conn)?;
+        let (confirm_join, confirm_col) = relation_confirm_join(has_lifecycle);
         let retracted_filter = if include_retracted {
             ""
         } else {
@@ -2057,6 +2219,7 @@ pub fn related(
         let from_where = format!(
             "FROM relations r
              LEFT JOIN retractions t ON t.relation_id = r.relation_id
+             {confirm_join}
              WHERE {endpoint}{retracted_filter}"
         );
         let total: i64 = conn
@@ -2072,7 +2235,7 @@ pub fn related(
             .prepare(&format!(
                 "SELECT r.relation_id, r.src_id, r.src_revision, r.dst_id, r.dst_revision,
                    r.kind, r.author, r.rationale, r.created_unix,
-                   t.relation_id, t.author, t.reason
+                   t.relation_id, t.author, t.reason, {confirm_col}
                  {from_where}
                  ORDER BY r.src_id COLLATE BINARY ASC, r.src_revision ASC,
                    r.dst_id COLLATE BINARY ASC, r.dst_revision ASC,
@@ -2083,7 +2246,7 @@ pub fn related(
         let items = stmt
             .query_map(
                 rusqlite::params![id, rev_i64, limit_i64, offset_i64],
-                relation_from_row,
+                |row| relation_from_row(row, has_lifecycle),
             )
             .map_err(|e| map_row_error(e, "cannot read relations"))?
             .collect::<Result<Vec<_>, _>>()
@@ -2114,15 +2277,20 @@ pub fn related(
 /// link response uses this instead of scanning a bounded `related` page, so a
 /// relation that sorts past the page limit is still reported correctly.
 pub fn relation_by_id(conn: &Connection, relation_id: &str) -> Result<RelationView, String> {
+    let has_lifecycle = lifecycle_present(conn)?;
+    let (confirm_join, confirm_col) = relation_confirm_join(has_lifecycle);
     conn.query_row(
-        "SELECT r.relation_id, r.src_id, r.src_revision, r.dst_id, r.dst_revision,
-           r.kind, r.author, r.rationale, r.created_unix,
-           t.relation_id, t.author, t.reason
-         FROM relations r
-         LEFT JOIN retractions t ON t.relation_id = r.relation_id
-         WHERE r.relation_id = ?1",
+        &format!(
+            "SELECT r.relation_id, r.src_id, r.src_revision, r.dst_id, r.dst_revision,
+               r.kind, r.author, r.rationale, r.created_unix,
+               t.relation_id, t.author, t.reason, {confirm_col}
+             FROM relations r
+             LEFT JOIN retractions t ON t.relation_id = r.relation_id
+             {confirm_join}
+             WHERE r.relation_id = ?1"
+        ),
         [relation_id],
-        relation_from_row,
+        |row| relation_from_row(row, has_lifecycle),
     )
     .optional()
     .map_err(|e| map_row_error(e, "cannot read relation"))?
@@ -2995,6 +3163,16 @@ mod tests {
             author: "tester".to_string(),
             superseded_by: None,
             reason: None,
+            confirm: false,
+        }
+    }
+
+    /// Reconfirm the exact revision written for `title` (same title/body/
+    /// status/author as `new_record`/`update_to`) with an explicit confirm.
+    fn confirm_to(title: &str) -> UpdateRecord {
+        UpdateRecord {
+            confirm: true,
+            ..update_to(title, "active")
         }
     }
 
@@ -3009,6 +3187,7 @@ mod tests {
                 revision,
             }),
             reason: Some(reason.to_string()),
+            confirm: false,
         }
     }
 
@@ -3020,6 +3199,7 @@ mod tests {
             author: "tester".to_string(),
             superseded_by: None,
             reason: Some(reason.to_string()),
+            confirm: false,
         }
     }
 
@@ -4152,6 +4332,7 @@ mod tests {
             kind,
             "tester",
             "related work",
+            false,
         )
     }
 
@@ -5034,6 +5215,7 @@ mod tests {
                     revision: 1,
                 }),
                 reason: Some("a1 supersedes".to_string()),
+                confirm: false,
             },
         )
         .unwrap();
@@ -5048,6 +5230,7 @@ mod tests {
                 author: "tester".to_string(),
                 superseded_by: None,
                 reason: Some("bad evidence".to_string()),
+                confirm: false,
             },
         )
         .unwrap();
@@ -5150,6 +5333,7 @@ mod tests {
         assert!(shown.superseded_by.is_none());
         assert!(shown.retracted_reason.is_none());
         assert!(shown.retracted_author.is_none());
+        assert!(shown.confirm_state.is_none());
         let _ = history(&conn, "d1", 50, 0, None).unwrap();
         let _ = search_default(&conn, "plain").unwrap();
         let _ = related(
@@ -5167,6 +5351,291 @@ mod tests {
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(version, 1, "reads never migrate");
+        conn.close().unwrap();
+    }
+
+    #[test]
+    fn provenance_confirm_writes_event_and_new_revision() {
+        let (home, repo) = setup("confirm");
+        let mut conn = open_rw(&home, &repo);
+        create_record(&mut conn, &new_record("d1", "t1")).unwrap();
+        // A v1 store has no confirmation state to report: the field is absent.
+        let before = show_record(&conn, "d1", None).unwrap();
+        assert!(
+            before.confirm_state.is_none(),
+            "v1 reads carry no confirm state"
+        );
+        let gen_before = read_generation(&conn).unwrap();
+        let (rev, gen) = update_record(&mut conn, "d1", 1, &confirm_to("t1")).unwrap();
+        assert_eq!(rev, 2);
+        assert!(gen > gen_before, "writing a confirmation bumps once");
+        // The confirming revision reads as confirmed; the revision it
+        // confirms reads as the candidate it was.
+        let head = show_record(&conn, "d1", None).unwrap();
+        assert_eq!(head.confirm_state.as_deref(), Some("confirmed"));
+        let first = show_record(&conn, "d1", Some(1)).unwrap();
+        assert_eq!(first.confirm_state.as_deref(), Some("candidate"));
+        // The immutable event row is authored by the confirming revision.
+        let (event, author): (String, String) = conn
+            .query_row(
+                "SELECT event, author FROM record_lifecycle
+                 WHERE id = 'd1' AND revision = 2",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((event.as_str(), author.as_str()), ("confirm", "tester"));
+        // The first confirmation migrated the store; search reports the
+        // confirmed state on the hit.
+        let version: u32 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 2);
+        let page = search_default(&conn, "t1").unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.hits[0].confirm_state.as_deref(), Some("confirmed"));
+        conn.close().unwrap();
+    }
+
+    #[test]
+    fn provenance_reconfirm_is_a_noop() {
+        let (home, repo) = setup("reconfirm");
+        let mut conn = open_rw(&home, &repo);
+        create_record(&mut conn, &new_record("d1", "t1")).unwrap();
+        update_record(&mut conn, "d1", 1, &confirm_to("t1")).unwrap();
+        // Re-confirming the head revision with identical content and no new
+        // evidence succeeds without writing: same revision, same generation.
+        let gen = read_generation(&conn).unwrap();
+        let (rev, gen_after) = update_record(&mut conn, "d1", 2, &confirm_to("t1")).unwrap();
+        assert_eq!((rev, gen_after), (2, gen));
+        assert_eq!(history(&conn, "d1", 50, 0, None).unwrap().total, 2);
+        let events: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM record_lifecycle WHERE id = 'd1' AND event = 'confirm'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(events, 1, "a no-op confirmation writes no second event");
+        conn.close().unwrap();
+    }
+
+    #[test]
+    fn provenance_confirm_content_change_and_unconfirmed_revisions() {
+        let (home, repo) = setup("confirm-change");
+        let mut conn = open_rw(&home, &repo);
+        create_record(&mut conn, &new_record("d1", "t1")).unwrap();
+        update_record(&mut conn, "d1", 1, &confirm_to("t1")).unwrap();
+        // Changed content is a new revision: confirmation rides with it.
+        let (rev, _) = update_record(&mut conn, "d1", 2, &confirm_to("t1 v2")).unwrap();
+        assert_eq!(rev, 3);
+        assert_eq!(
+            show_record(&conn, "d1", None)
+                .unwrap()
+                .confirm_state
+                .as_deref(),
+            Some("confirmed")
+        );
+        // An ordinary update writes an unconfirmed revision: confirmation is
+        // per revision and never inherited.
+        let (rev, _) = update_record(&mut conn, "d1", 3, &update_to("t1 v3", "active")).unwrap();
+        assert_eq!(rev, 4);
+        assert_eq!(
+            show_record(&conn, "d1", None)
+                .unwrap()
+                .confirm_state
+                .as_deref(),
+            Some("candidate")
+        );
+        // History keeps each revision's own state.
+        let page = history(&conn, "d1", 50, 0, None).unwrap();
+        assert_eq!(
+            page.revisions[0].confirm_state.as_deref(),
+            Some("candidate")
+        );
+        assert_eq!(
+            page.revisions[1].confirm_state.as_deref(),
+            Some("confirmed")
+        );
+        assert_eq!(
+            page.revisions[2].confirm_state.as_deref(),
+            Some("confirmed")
+        );
+        assert_eq!(
+            page.revisions[3].confirm_state.as_deref(),
+            Some("candidate")
+        );
+        conn.close().unwrap();
+    }
+
+    #[test]
+    fn provenance_confirm_rejects_lifecycle_combinations() {
+        let (home, repo) = setup("confirm-combo");
+        let mut conn = open_rw(&home, &repo);
+        create_record(&mut conn, &new_record("d1", "t1")).unwrap();
+        create_record(&mut conn, &new_record("d2", "t2")).unwrap();
+        let gen = read_generation(&conn).unwrap();
+        let mut combined = supersede_to("d2", 1, "replaced");
+        combined.confirm = true;
+        let err = update_record(&mut conn, "d1", 1, &combined).unwrap_err();
+        assert!(err.contains("confirm_state"), "unexpected: {err}");
+        let mut combined = retract_to("withdrawn");
+        combined.confirm = true;
+        assert!(update_record(&mut conn, "d1", 1, &combined).is_err());
+        // Rejected requests write nothing and never migrate.
+        assert_eq!(read_generation(&conn).unwrap(), gen);
+        let version: u32 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 1);
+        conn.close().unwrap();
+    }
+
+    #[test]
+    fn provenance_relation_confirm_is_idempotent() {
+        let (home, repo) = setup("relconfirm");
+        let mut conn = open_rw(&home, &repo);
+        create_record(&mut conn, &new_record("d1", "t1")).unwrap();
+        create_record(&mut conn, &new_record("d2", "t2")).unwrap();
+        let gen0 = link_simple(&mut conn, "r1", "d1", 1, "d2", 1, "supports").unwrap();
+        // Unconfirmed authored relations on a v1 store carry no state field.
+        assert!(relation_by_id(&conn, "r1").unwrap().confirm_state.is_none());
+        // Confirmation migrates the store and pins the event to the id.
+        let gen1 = link(
+            &mut conn,
+            "r1",
+            "d1",
+            1,
+            "d2",
+            1,
+            "supports",
+            "tester",
+            "related work",
+            true,
+        )
+        .unwrap();
+        assert!(gen1 > gen0);
+        assert_eq!(
+            relation_by_id(&conn, "r1")
+                .unwrap()
+                .confirm_state
+                .as_deref(),
+            Some("confirmed")
+        );
+        let page = related_outbound(&conn, "d1").unwrap();
+        assert_eq!(
+            page.relations[0].confirm_state.as_deref(),
+            Some("confirmed")
+        );
+        // Repeat confirmation of the identical row: a successful no-op.
+        let gen2 = link(
+            &mut conn,
+            "r1",
+            "d1",
+            1,
+            "d2",
+            1,
+            "supports",
+            "tester",
+            "related work",
+            true,
+        )
+        .unwrap();
+        assert_eq!(gen2, gen1, "a no-op confirmation must not bump");
+        let events: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM relation_lifecycle WHERE relation_id = 'r1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(events, 1);
+        // Identical re-link without the request stays the duplicate error,
+        // and a different authored shape is never promoted.
+        let err = link(
+            &mut conn,
+            "r1",
+            "d1",
+            1,
+            "d2",
+            1,
+            "supports",
+            "tester",
+            "related work",
+            false,
+        )
+        .unwrap_err();
+        assert!(err.contains("duplicate relation id"), "unexpected: {err}");
+        let err = link(
+            &mut conn,
+            "r1",
+            "d1",
+            1,
+            "d2",
+            1,
+            "supports",
+            "tester",
+            "a different rationale",
+            true,
+        )
+        .unwrap_err();
+        assert!(err.contains("duplicate relation id"), "unexpected: {err}");
+        // A new relation confirmed on the first write carries the event too.
+        link(
+            &mut conn,
+            "r2",
+            "d2",
+            1,
+            "d1",
+            1,
+            "relates_to",
+            "tester",
+            "work",
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            relation_by_id(&conn, "r2")
+                .unwrap()
+                .confirm_state
+                .as_deref(),
+            Some("confirmed")
+        );
+        // Retraction does not erase confirmation, and a retracted relation
+        // is never revived through re-link confirmation.
+        unlink(&mut conn, "r1", "tester", "mistake").unwrap();
+        let page = related(
+            &conn,
+            "d1",
+            None,
+            RelationDirection::Outbound,
+            true,
+            10,
+            0,
+            None,
+        )
+        .unwrap();
+        let r1 = page
+            .relations
+            .iter()
+            .find(|r| r.relation_id == "r1")
+            .unwrap();
+        assert!(r1.retracted);
+        assert_eq!(r1.confirm_state.as_deref(), Some("confirmed"));
+        let err = link(
+            &mut conn,
+            "r1",
+            "d1",
+            1,
+            "d2",
+            1,
+            "supports",
+            "tester",
+            "related work",
+            true,
+        )
+        .unwrap_err();
+        assert!(err.contains("duplicate relation id"), "unexpected: {err}");
         conn.close().unwrap();
     }
 }

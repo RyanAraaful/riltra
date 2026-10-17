@@ -1550,6 +1550,7 @@ struct LinkInput {
     kind: String,
     author: String,
     rationale: String,
+    confirm: bool,
 }
 
 fn parse_link_input(bytes: &[u8]) -> Result<LinkInput, String> {
@@ -1564,8 +1565,16 @@ fn parse_link_input(bytes: &[u8]) -> Result<LinkInput, String> {
             "kind",
             "author",
             "rationale",
+            "confirm_state",
         ],
     )?;
+    // The only expressible confirmation request is `"confirmed"`; anything
+    // else is rejected exactly like an unknown value.
+    let confirm = match fields.iter().find(|(k, _)| k == "confirm_state") {
+        None => false,
+        Some((_, serde_json::Value::String(s))) if s == "confirmed" => true,
+        Some(_) => return Err("field `confirm_state` must be the string \"confirmed\"".to_string()),
+    };
     let input = LinkInput {
         relation_id: field_str(&fields, "relation_id")?,
         src_id: field_str(&fields, "src_id")?,
@@ -1575,6 +1584,7 @@ fn parse_link_input(bytes: &[u8]) -> Result<LinkInput, String> {
         kind: field_str(&fields, "kind")?,
         author: field_str(&fields, "author")?,
         rationale: field_str(&fields, "rationale")?,
+        confirm,
     };
     knowledge::validate_relation_id(&input.relation_id)?;
     knowledge::validate_relation_kind(&input.kind)?;
@@ -1737,6 +1747,9 @@ fn record_json(record: &knowledge::RecordVersion, root: &Path) -> String {
             json::escape(author)
         ));
     }
+    if let Some(state) = &record.confirm_state {
+        lifecycle.push_str(&format!(",\"confirm_state\":\"{}\"", json::escape(state)));
+    }
     format!(
         "{{\"id\":\"{}\",\"revision\":{},\"kind\":\"{}\",\"title\":\"{}\",\"body\":\"{}\",\"status\":\"{}\",\"author\":\"{}\",\"created_unix\":{},\"measurement\":{},\"evidence\":[{}],\"verification\":\"{}\",\"support\":\"{}\"{lifecycle}}}",
         json::escape(&record.id),
@@ -1755,8 +1768,14 @@ fn record_json(record: &knowledge::RecordVersion, root: &Path) -> String {
 }
 
 fn relation_json(r: &knowledge_store::RelationView) -> String {
+    // The confirmation state appears only once Full-stage data exists (v2
+    // stores); v1 output stays byte-identical.
+    let mut confirm = String::new();
+    if let Some(state) = &r.confirm_state {
+        confirm.push_str(&format!(",\"confirm_state\":\"{}\"", json::escape(state)));
+    }
     format!(
-        "{{\"relation_id\":\"{}\",\"src_id\":\"{}\",\"src_revision\":{},\"dst_id\":\"{}\",\"dst_revision\":{},\"kind\":\"{}\",\"author\":\"{}\",\"rationale\":\"{}\",\"created_unix\":{},\"retracted\":{},\"retraction_author\":{},\"retraction_reason\":{}}}",
+        "{{\"relation_id\":\"{}\",\"src_id\":\"{}\",\"src_revision\":{},\"dst_id\":\"{}\",\"dst_revision\":{},\"kind\":\"{}\",\"author\":\"{}\",\"rationale\":\"{}\",\"created_unix\":{},\"retracted\":{},\"retraction_author\":{},\"retraction_reason\":{}{confirm}}}",
         json::escape(&r.relation_id),
         json::escape(&r.src_id),
         r.src_revision,
@@ -2152,6 +2171,7 @@ fn knowledge_link(repo: &str, input: &str, out: &mut String, err: &mut String) -
         &link.kind,
         &link.author,
         &link.rationale,
+        link.confirm,
     ) {
         Ok(g) => g,
         Err(e) => {

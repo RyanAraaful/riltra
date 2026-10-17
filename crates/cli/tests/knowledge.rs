@@ -1856,3 +1856,320 @@ fn lifecycle_plain_foundation_flow_never_migrates() {
         "Foundation writes and reads must never migrate a v1 store"
     );
 }
+
+// --- Full-stage provenance (G-PROV) ----------------------------------------
+
+fn confirm_input(title: &str, body: &str) -> String {
+    format!(
+        "{{\"title\":\"{title}\",\"body\":\"{body}\",\"status\":\"active\",\"author\":\"a\",\
+         \"evidence\":[],\"confirm_state\":\"confirmed\"}}"
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn link_input(
+    relation_id: &str,
+    src: &str,
+    src_rev: u64,
+    dst: &str,
+    dst_rev: u64,
+    kind: &str,
+    rationale: &str,
+    confirm: bool,
+) -> String {
+    let confirm_field = if confirm {
+        ",\"confirm_state\":\"confirmed\""
+    } else {
+        ""
+    };
+    format!(
+        "{{\"relation_id\":\"{relation_id}\",\"src_id\":\"{src}\",\"src_revision\":{src_rev},\
+         \"dst_id\":\"{dst}\",\"dst_revision\":{dst_rev},\"kind\":\"{kind}\",\"author\":\"a\",\
+         \"rationale\":\"{rationale}\"{confirm_field}}}"
+    )
+}
+
+fn link(home: &Path, repo: &str, input: &str) -> (i32, String, String) {
+    run_stdin(
+        home,
+        &["knowledge", "link", "--repo", repo, "--input", "-"],
+        input.as_bytes(),
+    )
+}
+
+#[test]
+fn provenance_confirm_round_trip_via_cli() {
+    let h = home("provenance");
+    let dir = mkrepo(&h, "krepo");
+    init(&h, &dir, "krepo");
+    assert_eq!(create(&h, "krepo", "d1", "First", "alpha zqxbody").0, 0);
+    assert_eq!(user_version(&h, "krepo"), 1);
+    // A v1 store has no confirmation state to report.
+    let (code, out, _) = run(&h, &["knowledge", "show", "--repo", "krepo", "--id", "d1"]);
+    assert_eq!(code, 0);
+    assert!(
+        !out.contains("confirm_state"),
+        "v1 output must omit it: {out}"
+    );
+
+    // An explicit confirmation writes a confirming revision and migrates.
+    let (code, out, err) = update(
+        &h,
+        "krepo",
+        "d1",
+        1,
+        &confirm_input("First", "alpha zqxbody"),
+    );
+    assert_eq!(code, 0, "confirm: {err}");
+    assert!(out.contains("\"confirm_state\":\"confirmed\""), "{out}");
+    assert!(out.contains("\"revision\":2"), "{out}");
+    assert_eq!(user_version(&h, "krepo"), 2);
+    // Confirmation never implies verification or evidence.
+    assert!(out.contains("\"verification\":\"Unverified\""), "{out}");
+    // On the migrated store the confirmed revision reports confirmed and the
+    // revision it confirms reads as the candidate it was.
+    let (code, out, _) = run(&h, &["knowledge", "show", "--repo", "krepo", "--id", "d1"]);
+    assert_eq!(code, 0);
+    assert!(out.contains("\"confirm_state\":\"confirmed\""), "{out}");
+    let (code, out, _) = run(
+        &h,
+        &[
+            "knowledge",
+            "show",
+            "--repo",
+            "krepo",
+            "--id",
+            "d1",
+            "--revision",
+            "1",
+        ],
+    );
+    assert_eq!(code, 0);
+    assert!(out.contains("\"confirm_state\":\"candidate\""), "{out}");
+
+    // Re-confirming the identical head is a successful no-op: no new
+    // revision, no generation bump.
+    let gen_before = field_num(&out, "generation");
+    let (code, out, err) = update(
+        &h,
+        "krepo",
+        "d1",
+        2,
+        &confirm_input("First", "alpha zqxbody"),
+    );
+    assert_eq!(code, 0, "reconfirm: {err}");
+    assert!(out.contains("\"confirm_state\":\"confirmed\""), "{out}");
+    assert!(
+        out.contains("\"revision\":2"),
+        "the confirming revision is unchanged: {out}"
+    );
+    let (code, history_out, _) = run(
+        &h,
+        &["knowledge", "history", "--repo", "krepo", "--id", "d1"],
+    );
+    assert_eq!(code, 0);
+    assert!(history_out.contains("\"total\":2"), "{history_out}");
+    let (code, show_out, _) = run(&h, &["knowledge", "show", "--repo", "krepo", "--id", "d1"]);
+    assert_eq!(code, 0);
+    assert_eq!(
+        field_num(&show_out, "generation"),
+        gen_before,
+        "a no-op confirmation must not bump the generation"
+    );
+
+    // Search reports the confirmed state on the hit.
+    let (code, out, err) = run(
+        &h,
+        &[
+            "knowledge",
+            "search",
+            "--repo",
+            "krepo",
+            "--query",
+            "zqxbody",
+        ],
+    );
+    assert_eq!(code, 0, "search: {err}");
+    assert!(out.contains("\"id\":\"d1\""), "{out}");
+    assert!(out.contains("\"confirm_state\":\"confirmed\""), "{out}");
+}
+
+#[test]
+fn provenance_confirm_requests_are_strict() {
+    let h = home("provenance-strict");
+    let dir = mkrepo(&h, "krepo");
+    init(&h, &dir, "krepo");
+    assert_eq!(create(&h, "krepo", "d1", "First", "alpha zqxbody").0, 0);
+    assert_eq!(create(&h, "krepo", "d2", "Second", "beta zqxbody").0, 0);
+    // Only the literal request parses; "candidate" is a state, not a request.
+    for bad in ["\"candidate\"", "true", "1", "null"] {
+        let input = format!(
+            "{{\"title\":\"First\",\"body\":\"alpha zqxbody\",\"status\":\"active\",\
+             \"author\":\"a\",\"evidence\":[],\"confirm_state\":{bad}}}"
+        );
+        let (code, _, err) = update(&h, "krepo", "d1", 1, &input);
+        assert_eq!(code, 2, "confirm_state {bad}: {err}");
+    }
+    // Confirmation never combines with a lifecycle transition.
+    let combined = "{\"title\":\"First\",\"body\":\"alpha zqxbody\",\"status\":\"superseded\",\
+         \"author\":\"a\",\"evidence\":[],\"superseded_by\":{\"id\":\"d2\",\"revision\":1},\
+         \"reason\":\"r\",\"confirm_state\":\"confirmed\"}";
+    let (code, _, err) = update(&h, "krepo", "d1", 1, combined);
+    assert_eq!(code, 2, "combined: {err}");
+    // A stale expectation is a conflict (exit 3) and rolls back with nothing
+    // written; the store is still v1 afterwards.
+    let (code, _, err) = update(
+        &h,
+        "krepo",
+        "d1",
+        7,
+        &confirm_input("First", "alpha zqxbody"),
+    );
+    assert_eq!(code, 3, "stale confirm: {err}");
+    assert!(err.contains("conflict"), "{err}");
+    let (code, out, _) = run(
+        &h,
+        &["knowledge", "history", "--repo", "krepo", "--id", "d1"],
+    );
+    assert_eq!(code, 0);
+    assert!(out.contains("\"total\":1"), "{out}");
+    assert_eq!(
+        user_version(&h, "krepo"),
+        1,
+        "rejected confirmations must roll their migration back"
+    );
+}
+
+#[test]
+fn provenance_relation_confirm_via_cli() {
+    let h = home("provenance-rel");
+    let dir = mkrepo(&h, "krepo");
+    init(&h, &dir, "krepo");
+    assert_eq!(create(&h, "krepo", "d1", "First", "alpha zqxbody").0, 0);
+    assert_eq!(create(&h, "krepo", "d2", "Second", "beta zqxbody").0, 0);
+    // An ordinary link on a v1 store carries no confirmation state.
+    let (code, out, err) = link(
+        &h,
+        "krepo",
+        &link_input("r1", "d1", 1, "d2", 1, "supports", "related work", false),
+    );
+    assert_eq!(code, 0, "link: {err}");
+    assert!(
+        !out.contains("confirm_state"),
+        "v1 output must omit it: {out}"
+    );
+    assert_eq!(user_version(&h, "krepo"), 1);
+    // A confirmation request whose link is rejected (unknown endpoint) rolls
+    // its migration back: the v1 store is untouched.
+    let (code, _, err) = link(
+        &h,
+        "krepo",
+        &link_input("r9", "d1", 99, "d2", 1, "supports", "related work", true),
+    );
+    assert_eq!(code, 3, "unknown endpoint: {err}");
+    assert_eq!(
+        user_version(&h, "krepo"),
+        1,
+        "a rejected link confirmation must roll its migration back"
+    );
+    // A brand-new relation confirmed in its first write migrates the store.
+    let (code, out, err) = link(
+        &h,
+        "krepo",
+        &link_input("r2", "d2", 1, "d1", 1, "contradicts", "tension", true),
+    );
+    assert_eq!(code, 0, "link r2: {err}");
+    assert!(out.contains("\"confirm_state\":\"confirmed\""), "{out}");
+    assert_eq!(user_version(&h, "krepo"), 2);
+    // Confirming the byte-identical row is a promotion, not a duplicate.
+    let (code, out, err) = link(
+        &h,
+        "krepo",
+        &link_input("r1", "d1", 1, "d2", 1, "supports", "related work", true),
+    );
+    assert_eq!(code, 0, "promote: {err}");
+    assert!(out.contains("\"confirm_state\":\"confirmed\""), "{out}");
+    let gen = field_num(&out, "generation");
+    assert_eq!(user_version(&h, "krepo"), 2);
+    // Repeating the confirmation succeeds without writing: same generation,
+    // still one relation.
+    let (code, out, err) = link(
+        &h,
+        "krepo",
+        &link_input("r1", "d1", 1, "d2", 1, "supports", "related work", true),
+    );
+    assert_eq!(code, 0, "reconfirm: {err}");
+    assert_eq!(field_num(&out, "generation"), gen, "{out}");
+    let (code, out, _) = run(
+        &h,
+        &[
+            "knowledge",
+            "related",
+            "--repo",
+            "krepo",
+            "--id",
+            "d1",
+            "--direction",
+            "outbound",
+        ],
+    );
+    assert_eq!(code, 0);
+    assert!(out.contains("\"total\":1"), "{out}");
+    assert!(out.contains("\"confirm_state\":\"confirmed\""), "{out}");
+    // Identical re-link without the request, and a changed shape with it, are
+    // both conflicts.
+    let (code, _, err) = link(
+        &h,
+        "krepo",
+        &link_input("r1", "d1", 1, "d2", 1, "supports", "related work", false),
+    );
+    assert_eq!(code, 3, "plain relink: {err}");
+    assert!(err.contains("duplicate relation id"), "{err}");
+    let (code, _, err) = link(
+        &h,
+        "krepo",
+        &link_input("r1", "d1", 1, "d2", 1, "supports", "different", true),
+    );
+    assert_eq!(code, 3, "changed shape: {err}");
+    // Retraction does not erase the confirmation, and a retracted relation is
+    // never revived by re-link confirmation.
+    let unlink_input = "{\"author\":\"a\",\"reason\":\"mistake\"}";
+    let (code, _, err) = run_stdin(
+        &h,
+        &[
+            "knowledge",
+            "unlink",
+            "--repo",
+            "krepo",
+            "--relation",
+            "r1",
+            "--input",
+            "-",
+        ],
+        unlink_input.as_bytes(),
+    );
+    assert_eq!(code, 0, "unlink: {err}");
+    let (code, out, _) = run(
+        &h,
+        &[
+            "knowledge",
+            "related",
+            "--repo",
+            "krepo",
+            "--id",
+            "d1",
+            "--direction",
+            "outbound",
+            "--include-retracted",
+        ],
+    );
+    assert_eq!(code, 0);
+    assert!(out.contains("\"retracted\":true"), "{out}");
+    assert!(out.contains("\"confirm_state\":\"confirmed\""), "{out}");
+    let (code, _, err) = link(
+        &h,
+        "krepo",
+        &link_input("r1", "d1", 1, "d2", 1, "supports", "related work", true),
+    );
+    assert_eq!(code, 3, "revive retracted: {err}");
+}
