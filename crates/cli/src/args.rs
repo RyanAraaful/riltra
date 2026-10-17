@@ -44,6 +44,9 @@ pub enum Command {
     },
     Trace(TraceArgs),
     Impact(TraceArgs),
+    Knowledge {
+        op: KnowledgeOp,
+    },
 }
 
 #[derive(Debug, PartialEq)]
@@ -98,6 +101,63 @@ pub enum SemanticOp {
         col: String,
         refs: bool,
         lsp_server: Option<String>,
+    },
+}
+
+/// M7 knowledge subcommands. Value flags are kept as raw strings and parsed in
+/// `main.rs` so argument errors are distinguishable from storage errors by
+/// exit code.
+#[derive(Debug, PartialEq)]
+pub enum KnowledgeOp {
+    Create {
+        repo: String,
+        input: String,
+    },
+    Show {
+        repo: String,
+        id: String,
+        revision: Option<String>,
+    },
+    Update {
+        repo: String,
+        id: String,
+        expected_revision: String,
+        input: String,
+    },
+    History {
+        repo: String,
+        id: String,
+        limit: Option<String>,
+        offset: Option<String>,
+        generation: Option<String>,
+    },
+    Search {
+        repo: String,
+        query: String,
+        kind: Option<String>,
+        include_archived: bool,
+        limit: Option<String>,
+        offset: Option<String>,
+        generation: Option<String>,
+    },
+    Link {
+        repo: String,
+        input: String,
+    },
+    Unlink {
+        repo: String,
+        relation: String,
+        input: String,
+    },
+    Related {
+        repo: String,
+        id: String,
+        revision: Option<String>,
+        direction: String,
+        include_retracted: bool,
+        limit: Option<String>,
+        offset: Option<String>,
+        generation: Option<String>,
     },
 }
 
@@ -330,6 +390,10 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             }
             Ok(Command::Impact(parsed))
         }
+        "knowledge" => match args.get(1).map(String::as_str) {
+            Some(sub) => parse_knowledge_op(sub, args).map(|op| Command::Knowledge { op }),
+            None => Err(crate::usage()),
+        },
         _ => Err(crate::usage()),
     }
 }
@@ -419,6 +483,169 @@ fn parse_edge_args(args: &[String], callers: bool) -> Result<EdgeOp, String> {
                     offset,
                 })
             }
+        }
+        _ => Err(crate::usage()),
+    }
+}
+
+/// Consume `--flag value` / `--flag=value` for `flags` plus bare boolean
+/// tokens for `booleans`, returning value flags in a map and set booleans.
+fn knowledge_flags(
+    args: &[String],
+    start: usize,
+    flags: &[&str],
+    booleans: &[&str],
+) -> Result<
+    (
+        std::collections::BTreeMap<String, String>,
+        std::collections::BTreeSet<String>,
+    ),
+    String,
+> {
+    let mut values = std::collections::BTreeMap::new();
+    let mut set = std::collections::BTreeSet::new();
+    let mut i = start;
+    while i < args.len() {
+        if booleans.contains(&args[i].as_str()) {
+            set.insert(args[i].clone());
+            i += 1;
+            continue;
+        }
+        let mut matched = false;
+        for flag in flags {
+            if let Some(value) = take_value(args, &mut i, flag) {
+                values.insert((*flag).to_string(), value);
+                matched = true;
+                break;
+            }
+        }
+        if !matched {
+            return Err(crate::usage());
+        }
+    }
+    Ok((values, set))
+}
+
+fn knowledge_value(
+    values: &std::collections::BTreeMap<String, String>,
+    flag: &str,
+) -> Result<String, String> {
+    values.get(flag).cloned().ok_or_else(crate::usage)
+}
+
+fn parse_knowledge_op(sub: &str, args: &[String]) -> Result<KnowledgeOp, String> {
+    match sub {
+        "create" => {
+            let (v, _) = knowledge_flags(args, 2, &["--repo", "--input"], &[])?;
+            Ok(KnowledgeOp::Create {
+                repo: knowledge_value(&v, "--repo")?,
+                input: knowledge_value(&v, "--input")?,
+            })
+        }
+        "show" => {
+            let (v, _) = knowledge_flags(args, 2, &["--repo", "--id", "--revision"], &[])?;
+            Ok(KnowledgeOp::Show {
+                repo: knowledge_value(&v, "--repo")?,
+                id: knowledge_value(&v, "--id")?,
+                revision: v.get("--revision").cloned(),
+            })
+        }
+        "update" => {
+            let (v, _) = knowledge_flags(
+                args,
+                2,
+                &["--repo", "--id", "--expected-revision", "--input"],
+                &[],
+            )?;
+            Ok(KnowledgeOp::Update {
+                repo: knowledge_value(&v, "--repo")?,
+                id: knowledge_value(&v, "--id")?,
+                expected_revision: knowledge_value(&v, "--expected-revision")?,
+                input: knowledge_value(&v, "--input")?,
+            })
+        }
+        "history" => {
+            let (v, _) = knowledge_flags(
+                args,
+                2,
+                &["--repo", "--id", "--limit", "--offset", "--generation"],
+                &[],
+            )?;
+            Ok(KnowledgeOp::History {
+                repo: knowledge_value(&v, "--repo")?,
+                id: knowledge_value(&v, "--id")?,
+                limit: v.get("--limit").cloned(),
+                offset: v.get("--offset").cloned(),
+                generation: v.get("--generation").cloned(),
+            })
+        }
+        "search" => {
+            let (v, flags) = knowledge_flags(
+                args,
+                2,
+                &[
+                    "--repo",
+                    "--query",
+                    "--kind",
+                    "--limit",
+                    "--offset",
+                    "--generation",
+                ],
+                &["--include-archived"],
+            )?;
+            Ok(KnowledgeOp::Search {
+                repo: knowledge_value(&v, "--repo")?,
+                query: knowledge_value(&v, "--query")?,
+                kind: v.get("--kind").cloned(),
+                include_archived: flags.contains("--include-archived"),
+                limit: v.get("--limit").cloned(),
+                offset: v.get("--offset").cloned(),
+                generation: v.get("--generation").cloned(),
+            })
+        }
+        "link" => {
+            let (v, _) = knowledge_flags(args, 2, &["--repo", "--input"], &[])?;
+            Ok(KnowledgeOp::Link {
+                repo: knowledge_value(&v, "--repo")?,
+                input: knowledge_value(&v, "--input")?,
+            })
+        }
+        "unlink" => {
+            let (v, _) = knowledge_flags(args, 2, &["--repo", "--relation", "--input"], &[])?;
+            Ok(KnowledgeOp::Unlink {
+                repo: knowledge_value(&v, "--repo")?,
+                relation: knowledge_value(&v, "--relation")?,
+                input: knowledge_value(&v, "--input")?,
+            })
+        }
+        "related" => {
+            let (v, flags) = knowledge_flags(
+                args,
+                2,
+                &[
+                    "--repo",
+                    "--id",
+                    "--revision",
+                    "--direction",
+                    "--limit",
+                    "--offset",
+                    "--generation",
+                ],
+                &["--include-retracted"],
+            )?;
+            Ok(KnowledgeOp::Related {
+                repo: knowledge_value(&v, "--repo")?,
+                id: knowledge_value(&v, "--id")?,
+                revision: v.get("--revision").cloned(),
+                direction: v
+                    .get("--direction")
+                    .cloned()
+                    .unwrap_or_else(|| "outbound".to_string()),
+                include_retracted: flags.contains("--include-retracted"),
+                limit: v.get("--limit").cloned(),
+                offset: v.get("--offset").cloned(),
+                generation: v.get("--generation").cloned(),
+            })
         }
         _ => Err(crate::usage()),
     }
@@ -648,5 +875,73 @@ mod tests {
         assert!(p(&["index"]).is_err());
         assert!(p(&["repo", "list", "extra"]).is_err());
         assert!(p(&["--bogus"]).is_err());
+    }
+
+    #[test]
+    fn parses_knowledge_subcommands_and_flag_forms() {
+        assert!(matches!(
+            p(&["knowledge", "create", "--repo", "r", "--input", "-"]),
+            Ok(Command::Knowledge { .. })
+        ));
+        assert!(matches!(
+            p(&["knowledge", "create", "--repo=r", "--input=-"]),
+            Ok(Command::Knowledge { .. })
+        ));
+        assert!(matches!(
+            p(&[
+                "knowledge",
+                "show",
+                "--repo",
+                "r",
+                "--id",
+                "d1",
+                "--revision",
+                "2"
+            ]),
+            Ok(Command::Knowledge { .. })
+        ));
+        assert!(matches!(
+            p(&[
+                "knowledge",
+                "search",
+                "--repo",
+                "r",
+                "--query",
+                "x",
+                "--include-archived"
+            ]),
+            Ok(Command::Knowledge { .. })
+        ));
+        assert!(matches!(
+            p(&[
+                "knowledge",
+                "related",
+                "--repo",
+                "r",
+                "--id",
+                "d1",
+                "--direction",
+                "inbound",
+                "--include-retracted"
+            ]),
+            Ok(Command::Knowledge { .. })
+        ));
+        // Missing required flags and unknown subcommands are usage errors.
+        assert!(p(&["knowledge", "create", "--repo", "r"]).is_err());
+        assert!(p(&["knowledge", "show", "--repo", "r"]).is_err());
+        assert!(p(&[
+            "knowledge",
+            "update",
+            "--repo",
+            "r",
+            "--id",
+            "d1",
+            "--input",
+            "-"
+        ])
+        .is_err());
+        assert!(p(&["knowledge", "search", "--repo", "r"]).is_err());
+        assert!(p(&["knowledge", "frobnicate", "--repo", "r"]).is_err());
+        assert!(p(&["knowledge"]).is_err());
     }
 }
