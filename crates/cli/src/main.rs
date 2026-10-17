@@ -1333,17 +1333,54 @@ fn knowledge_open(
     Ok((root, conn))
 }
 
+/// Whether the knowledge store database is *genuinely* absent for a read.
+/// A missing path yields `Ok(true)`, which read commands answer with an empty
+/// result and no file creation. Any other state — symlink (dangling or live,
+/// both an escape), directory, fifo, or an uninspectable path — is an error so
+/// a hostile or corrupt path fails closed instead of reading as empty.
+fn knowledge_store_absent(db: &Path) -> Result<bool, String> {
+    match std::fs::symlink_metadata(db) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(e) => Err(format!(
+            "cannot inspect knowledge store '{}': {e}",
+            db.display()
+        )),
+        Ok(md) if md.file_type().is_symlink() => Err(format!(
+            "knowledge store path escapes via link: '{}'",
+            db.display()
+        )),
+        Ok(md) if md.is_file() => Ok(false),
+        Ok(_) => Err(format!(
+            "knowledge store path is not a file: '{}'",
+            db.display()
+        )),
+    }
+}
+
 /// Read strict mutation JSON from stdin (`--input -`). Only `-` is supported.
+///
+/// The read is bounded to [`knowledge::MAX_MUTATION_JSON_BYTES`] (1 MiB) plus
+/// one detection byte: input past that limit is rejected without buffering the
+/// whole oversized stream.
 fn knowledge_input(flag: &str) -> Result<Vec<u8>, String> {
     if flag != "-" {
         return Err(format!(
             "invalid --input value: '{flag}' (only '-' is supported)"
         ));
     }
+    let cap = knowledge::MAX_MUTATION_JSON_BYTES;
     let mut buf = Vec::new();
     std::io::stdin()
+        .lock()
+        .take(cap as u64 + 1)
         .read_to_end(&mut buf)
         .map_err(|e| format!("cannot read stdin: {e}"))?;
+    if buf.len() > cap {
+        return Err(format!(
+            "mutation input too large: exceeds the {cap} byte ({} MiB) limit",
+            cap / (1024 * 1024)
+        ));
+    }
     Ok(buf)
 }
 
@@ -1950,7 +1987,9 @@ fn knowledge_history(
         json::escape(id),
         revisions.join(",")
     );
-    let pagination = pagination_json(limit, offset, page.total, page.truncated, None);
+    let end = offset.saturating_add(page.revisions.len());
+    let next_offset = if end < page.total { Some(end) } else { None };
+    let pagination = pagination_json(limit, offset, page.total, page.truncated, next_offset);
     *out = knowledge_envelope(repo, page.generation, "history", &result, Some(pagination));
     0
 }
@@ -1985,26 +2024,42 @@ fn knowledge_search(
         Ok(v) => v,
         Err(code) => return code,
     };
-    let home = paths::config_dir();
-    let db = knowledge_store::knowledge_db_path(&home, repo);
-    // Missing store: empty success, and no database is created.
-    if !db.is_file() {
-        let result = format!(
-            "{},\"hits\":[]}}",
-            knowledge_query_json(query, kind, include_archived)
-        );
-        *out = knowledge_envelope(
-            repo,
-            0,
-            "search",
-            &result,
-            Some(pagination_json(limit, offset, 0, false, None)),
-        );
-        return 0;
-    }
-    let (root, conn) = match knowledge_open(repo, false, err) {
+    // Validate registration and root binding before answering: an unknown or
+    // retargeted repository must not look like a store that happens to be
+    // empty.
+    let (root, entry) = match knowledge_repo(repo, err) {
         Ok(v) => v,
         Err(code) => return code,
+    };
+    let db = knowledge_store::knowledge_db_path(&paths::config_dir(), repo);
+    match knowledge_store_absent(&db) {
+        // Genuinely absent store: empty success, and no database is created.
+        Ok(true) => {
+            let result = format!(
+                "{},\"hits\":[]}}",
+                knowledge_query_json(query, kind, include_archived)
+            );
+            *out = knowledge_envelope(
+                repo,
+                0,
+                "search",
+                &result,
+                Some(pagination_json(limit, offset, 0, false, None)),
+            );
+            return 0;
+        }
+        Ok(false) => {}
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            return 3;
+        }
+    }
+    let conn = match knowledge_store::open_knowledge(&entry, false) {
+        Ok(c) => c,
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            return 3;
+        }
     };
     let page = match knowledge_store::search(
         &conn,
@@ -2072,37 +2127,14 @@ fn knowledge_link(repo: &str, input: &str, out: &mut String, err: &mut String) -
             return 3;
         }
     };
-    let page = match knowledge_store::related(
-        &conn,
-        &link.src_id,
-        Some(link.src_revision),
-        knowledge_store::RelationDirection::Outbound,
-        true,
-        knowledge::SEARCH_LIMIT_MAX,
-        0,
-        None,
-    ) {
-        Ok(p) => p,
+    let relation = match knowledge_store::relation_by_id(&conn, &link.relation_id) {
+        Ok(r) => r,
         Err(e) => {
             err.push_str(&format!("error: {e}\n"));
             return 3;
         }
     };
-    let relation = match page
-        .relations
-        .iter()
-        .find(|r| r.relation_id == link.relation_id)
-    {
-        Some(r) => r,
-        None => {
-            err.push_str(&format!(
-                "error: relation '{}' not found after link\n",
-                link.relation_id
-            ));
-            return 3;
-        }
-    };
-    *out = knowledge_envelope(repo, generation, "link", &relation_json(relation), None);
+    *out = knowledge_envelope(repo, generation, "link", &relation_json(&relation), None);
     0
 }
 

@@ -1752,6 +1752,25 @@ pub fn related(
     }
 }
 
+/// Exact lookup of one relation by its opaque id, with retraction state. The
+/// link response uses this instead of scanning a bounded `related` page, so a
+/// relation that sorts past the page limit is still reported correctly.
+pub fn relation_by_id(conn: &Connection, relation_id: &str) -> Result<RelationView, String> {
+    conn.query_row(
+        "SELECT r.relation_id, r.src_id, r.src_revision, r.dst_id, r.dst_revision,
+           r.kind, r.author, r.rationale, r.created_unix,
+           t.relation_id, t.author, t.reason
+         FROM relations r
+         LEFT JOIN retractions t ON t.relation_id = r.relation_id
+         WHERE r.relation_id = ?1",
+        [relation_id],
+        relation_from_row,
+    )
+    .optional()
+    .map_err(|e| map_row_error(e, "cannot read relation"))?
+    .ok_or_else(|| format!("unknown relation id: '{relation_id}'"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

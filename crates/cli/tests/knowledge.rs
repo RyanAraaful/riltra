@@ -1170,3 +1170,338 @@ fn knowledge_does_not_touch_m6_index() {
     assert_eq!(code, 0, "index status: {err}");
     assert!(out.contains("\"snapshot\""), "{out}");
 }
+
+// --- Gate I revision regressions ------------------------------------------
+
+/// The link response must find the relation it just committed by exact id, not
+/// by scanning one bounded `related` page. With more than one page of outbound
+/// relations the new row sorts past that page, so a page scan reports a false
+/// failure after a successful commit.
+#[test]
+fn link_response_reads_exact_relation_beyond_one_page() {
+    let h = home("linkdeep");
+    let dir = mkrepo(&h, "krepo");
+    init(&h, &dir, "krepo");
+    assert_eq!(create(&h, "krepo", "d1", "one", "first").0, 0);
+    assert_eq!(create(&h, "krepo", "d2", "two", "second").0, 0);
+    assert_eq!(create(&h, "krepo", "d3", "three", "third").0, 0);
+
+    // Seed 1000 outbound relations from d1 rev1 to d2 rev1 directly, so the new
+    // link (to d3) sorts beyond the 1000-row first page. CLI-only seeding would
+    // need 1000 spawns; seeding the store file as a fixture follows the
+    // existing pattern in tests/m6_corpus/upgrade.rs.
+    let db = h.join("knowledge").join("krepo.db");
+    {
+        let mut conn = rusqlite::Connection::open(&db).expect("open seed db");
+        let tx = conn.transaction().unwrap();
+        for n in 0..1000 {
+            let kind = ["relates_to", "supports", "contradicts"][n % 3];
+            tx.execute(
+                "INSERT INTO relations (relation_id, src_id, src_revision, dst_id,
+                   dst_revision, kind, author, rationale, created_unix)
+                 VALUES (?1, 'd1', 1, 'd2', 1, ?2, 'a', 'r', 0)",
+                rusqlite::params![format!("r{n:04}"), kind],
+            )
+            .unwrap();
+        }
+        tx.commit().unwrap();
+    }
+
+    let (code, out, err) = run(
+        &h,
+        &["knowledge", "search", "--repo", "krepo", "--query", "zzz"],
+    );
+    assert_eq!(code, 0, "seed generation probe: {err}");
+    let gen_before = field_num(&out, "generation");
+
+    let input = br#"{"relation_id":"z1","src_id":"d1","src_revision":1,"dst_id":"d3","dst_revision":1,"kind":"supports","author":"a","rationale":"r"}"#;
+    let (code, out, err) = run_stdin(
+        &h,
+        &["knowledge", "link", "--repo", "krepo", "--input", "-"],
+        input,
+    );
+    assert_eq!(code, 0, "link beyond one page must succeed: {err}");
+    assert!(out.contains("\"operation\":\"link\""), "{out}");
+    assert!(out.contains("\"relation_id\":\"z1\""), "{out}");
+    assert!(out.contains("\"dst_id\":\"d3\""), "{out}");
+    assert_eq!(
+        field_num(&out, "generation"),
+        gen_before + 1,
+        "exactly one generation bump: {out}"
+    );
+
+    // Committed exactly once: visible on the second page, total grew by one.
+    let (code, out, err) = run(
+        &h,
+        &[
+            "knowledge",
+            "related",
+            "--repo",
+            "krepo",
+            "--id",
+            "d1",
+            "--revision",
+            "1",
+            "--limit",
+            "1",
+            "--offset",
+            "1000",
+        ],
+    );
+    assert_eq!(code, 0, "related second page: {err}");
+    assert!(
+        out.contains("\"relation_id\":\"z1\""),
+        "relation must be committed: {out}"
+    );
+    assert!(out.contains("\"total\":1001"), "{out}");
+
+    // Re-linking the same id fails, proving it was committed exactly once.
+    let (code, _, err) = run_stdin(
+        &h,
+        &["knowledge", "link", "--repo", "krepo", "--input", "-"],
+        input,
+    );
+    assert_eq!(code, 3, "re-link must be a duplicate: {err}");
+    assert!(err.contains("duplicate relation id"), "{err}");
+}
+
+/// An unregistered repository must not look like a store that happens to be
+/// empty; the registration and root binding are validated before any answer.
+#[test]
+fn search_unregistered_repo_is_not_empty_success() {
+    let h = home("unknownrepo");
+    let (code, out, err) = run(
+        &h,
+        &["knowledge", "search", "--repo", "ghost", "--query", "x"],
+    );
+    assert_eq!(code, 3, "unknown repo must fail: {err}");
+    assert!(out.is_empty(), "no misleading empty page: {out}");
+    assert!(err.contains("unknown repository"), "{err}");
+    assert!(!h.join("knowledge").join("ghost.db").exists());
+}
+
+/// A hostile path where the store should be (directory, dangling symlink) is
+/// not an absent store: search must fail closed and leave the path untouched.
+#[test]
+fn search_fails_closed_on_hostile_store_paths() {
+    let h = home("hostile");
+    let dir = mkrepo(&h, "krepo");
+    init(&h, &dir, "krepo");
+    let db = h.join("knowledge").join("krepo.db");
+
+    std::fs::create_dir_all(&db).unwrap();
+    let (code, out, err) = run(
+        &h,
+        &["knowledge", "search", "--repo", "krepo", "--query", "x"],
+    );
+    assert_eq!(code, 3, "directory at store path must fail closed: {err}");
+    assert!(out.is_empty());
+    assert!(db.is_dir(), "hostile path must be left untouched");
+    std::fs::remove_dir(&db).unwrap();
+
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(h.join("does-not-exist"), &db).unwrap();
+        let (code, out, err) = run(
+            &h,
+            &["knowledge", "search", "--repo", "krepo", "--query", "x"],
+        );
+        assert_eq!(code, 3, "dangling store symlink must fail closed: {err}");
+        assert!(out.is_empty());
+        assert!(
+            std::fs::symlink_metadata(&db)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "symlink must not be replaced"
+        );
+        std::fs::remove_file(&db).unwrap();
+    }
+}
+
+/// History pagination must report the real next offset, advance across pages
+/// and terminate, while preserving revision order and generation guarding.
+#[test]
+fn history_reports_next_offset_across_pages() {
+    let h = home("histpage");
+    let dir = mkrepo(&h, "krepo");
+    init(&h, &dir, "krepo");
+    assert_eq!(create(&h, "krepo", "d1", "t", "b1").0, 0);
+    for (expected, body) in [(2u64, "b2"), (3, "b3")] {
+        let input = format!(
+            "{{\"title\":\"t\",\"body\":\"{body}\",\"status\":\"active\",\"author\":\"a\",\"evidence\":[]}}"
+        );
+        assert_eq!(
+            run_stdin(
+                &h,
+                &[
+                    "knowledge",
+                    "update",
+                    "--repo",
+                    "krepo",
+                    "--id",
+                    "d1",
+                    "--expected-revision",
+                    &(expected - 1).to_string(),
+                    "--input",
+                    "-",
+                ],
+                input.as_bytes(),
+            )
+            .0,
+            0
+        );
+    }
+
+    let mut seen = Vec::new();
+    let mut offset = 0usize;
+    for expected_next in [1usize, 2] {
+        let (code, out, err) = run(
+            &h,
+            &[
+                "knowledge",
+                "history",
+                "--repo",
+                "krepo",
+                "--id",
+                "d1",
+                "--limit",
+                "1",
+                "--offset",
+                &offset.to_string(),
+            ],
+        );
+        assert_eq!(code, 0, "history page: {err}");
+        assert!(out.contains("\"truncated\":true"), "{out}");
+        assert!(
+            out.contains(&format!("\"next_offset\":{expected_next}")),
+            "{out}"
+        );
+        seen.push(field_num(&out, "revision"));
+        offset = expected_next;
+    }
+
+    let (code, out, err) = run(
+        &h,
+        &[
+            "knowledge",
+            "history",
+            "--repo",
+            "krepo",
+            "--id",
+            "d1",
+            "--limit",
+            "1",
+            "--offset",
+            "2",
+        ],
+    );
+    assert_eq!(code, 0, "final page: {err}");
+    assert!(out.contains("\"truncated\":false"), "{out}");
+    assert!(out.contains("\"next_offset\":null"), "{out}");
+    seen.push(field_num(&out, "revision"));
+
+    let (code, out, err) = run(
+        &h,
+        &[
+            "knowledge",
+            "history",
+            "--repo",
+            "krepo",
+            "--id",
+            "d1",
+            "--limit",
+            "1",
+            "--offset",
+            "9",
+        ],
+    );
+    assert_eq!(code, 0, "past end: {err}");
+    assert!(out.contains("\"truncated\":false"), "{out}");
+    assert!(out.contains("\"next_offset\":null"), "{out}");
+    assert_eq!(seen, vec![1, 2, 3], "ordering unchanged across pages");
+
+    // Generation guarding still applies to the paged read.
+    let (code, out, err) = run(
+        &h,
+        &["knowledge", "search", "--repo", "krepo", "--query", "zzz"],
+    );
+    assert_eq!(code, 0, "generation probe: {err}");
+    let gen = field_num(&out, "generation");
+    assert_eq!(create(&h, "krepo", "d2", "t2", "b").0, 0);
+    let (code, _, err) = run(
+        &h,
+        &[
+            "knowledge",
+            "history",
+            "--repo",
+            "krepo",
+            "--id",
+            "d1",
+            "--generation",
+            &gen.to_string(),
+        ],
+    );
+    assert_eq!(code, 3, "stale generation must still conflict: {err}");
+}
+
+/// Mutation stdin is bounded to the documented cap plus one detection byte:
+/// over-limit input is rejected (exit 2) without waiting for EOF, while input
+/// under the cap is preserved unchanged.
+#[test]
+fn mutation_stdin_is_bounded() {
+    let h = home("boundedstdin");
+    let dir = mkrepo(&h, "krepo");
+    init(&h, &dir, "krepo");
+    let cap = 1024 * 1024usize;
+
+    assert_eq!(
+        run_stdin(
+            &h,
+            &["knowledge", "create", "--repo", "krepo", "--input", "-"],
+            CREATE_D1
+        )
+        .0,
+        0
+    );
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_riltra"))
+        .args(["knowledge", "create", "--repo", "krepo", "--input", "-"])
+        .env("RILTRA_HOME", &h)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn riltra");
+    let mut stdin = child.stdin.take().expect("stdin");
+    stdin
+        .write_all(&vec![b'x'; cap + 1])
+        .expect("write oversized stdin");
+    // Keep `stdin` open on purpose: a bounded reader rejects after cap+1 bytes,
+    // an unbounded one would block here waiting for EOF forever.
+    let mut exited = false;
+    for _ in 0..200 {
+        if child.try_wait().expect("try_wait").is_some() {
+            exited = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    if !exited {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    assert!(
+        exited,
+        "oversized stdin must be rejected without waiting for EOF"
+    );
+    drop(stdin);
+    let output = child.wait_with_output().expect("collect riltra");
+    assert_eq!(output.status.code(), Some(2));
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert!(err.contains("too large"), "{err}");
+    assert!(
+        err.contains(&cap.to_string()),
+        "the cap must be documented in the error: {err}"
+    );
+}
