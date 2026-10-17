@@ -2322,12 +2322,14 @@ pub enum ExportFormat {
     Markdown,
 }
 
-/// A rendered export: the text plus payload counts for envelopes and tests.
+/// A rendered export: the text, payload counts, and the generation the
+/// payload was read from, for envelopes and tests.
 #[derive(Debug, PartialEq)]
 pub struct ExportDocument {
     pub text: String,
     pub records: usize,
     pub relations: usize,
+    pub generation: u64,
 }
 
 /// Import report for the CLI envelope.
@@ -2844,14 +2846,26 @@ fn store_relation(
 /// Render the canonical export of one store. Read-only and deterministic from
 /// the store contents alone; record lines sort by id and revision, relation
 /// lines by endpoint tuple, kind, then relation id (all binary collation).
-pub fn export_document(conn: &Connection, format: ExportFormat) -> Result<ExportDocument, String> {
-    let repo = meta_value(conn, "repo_name")?;
-    let has_lifecycle = lifecycle_present(conn)?;
+pub fn export_document(
+    conn: &mut Connection,
+    format: ExportFormat,
+) -> Result<ExportDocument, String> {
+    // One deferred read transaction: every read below (repo meta, lifecycle
+    // presence, record revisions with their evidence, measurements and
+    // lifecycle events, relation lines with their events, and the reported
+    // generation) sees the same committed snapshot, so the payload and the
+    // generation reported alongside it can never straddle a concurrent
+    // commit. WAL lets the snapshot proceed without blocking writers.
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Deferred)
+        .map_err(|e| format!("cannot begin knowledge export: {e}"))?;
+    let repo = meta_value(&tx, "repo_name")?;
+    let has_lifecycle = lifecycle_present(&tx)?;
 
     let mut record_lines: Vec<String> = Vec::new();
     let mut prose: Vec<PortProse> = Vec::new();
     {
-        let mut stmt = conn
+        let mut stmt = tx
             .prepare("SELECT id, revision, kind FROM records ORDER BY id COLLATE BINARY, revision")
             .map_err(|e| format!("cannot read records: {e}"))?;
         let mut rows = stmt
@@ -2873,7 +2887,7 @@ pub fn export_document(conn: &Connection, format: ExportFormat) -> Result<Export
                 .map_err(|e| format!("cannot read records: {e}"))?;
             let revision = u64::try_from(revision)
                 .map_err(|_| "corrupt knowledge store: negative revision".to_string())?;
-            let rev = store_revision(conn, &id, revision, has_lifecycle)?;
+            let rev = store_revision(&tx, &id, revision, has_lifecycle)?;
             let flush = match &current {
                 Some(rec) => rec.id != id,
                 None => false,
@@ -2903,7 +2917,7 @@ pub fn export_document(conn: &Connection, format: ExportFormat) -> Result<Export
 
     let mut relation_lines: Vec<String> = Vec::new();
     {
-        let mut stmt = conn
+        let mut stmt = tx
             .prepare(
                 "SELECT relation_id, src_id, src_revision, dst_id, dst_revision, kind,
                         author, rationale, created_unix
@@ -2951,7 +2965,7 @@ pub fn export_document(conn: &Connection, format: ExportFormat) -> Result<Export
                     .map_err(|_| "corrupt knowledge store: relation revision out of range")?,
                 dst_revision: u64::try_from(dst_revision)
                     .map_err(|_| "corrupt knowledge store: relation revision out of range")?,
-                events: store_relation_events(conn, &relation_id, has_lifecycle)?,
+                events: store_relation_events(&tx, &relation_id, has_lifecycle)?,
                 relation_id,
                 src_id,
                 dst_id,
@@ -2980,10 +2994,14 @@ pub fn export_document(conn: &Connection, format: ExportFormat) -> Result<Export
         ExportFormat::Jsonl => payload,
         ExportFormat::Markdown => markdown_wrapper(&repo, &payload, &prose),
     };
+    // The generation is read inside the same snapshot as the payload, so the
+    // envelope's generation always describes the exported data.
+    let generation = read_generation(&tx)?;
     Ok(ExportDocument {
         text,
         records,
         relations,
+        generation,
     })
 }
 
@@ -2999,6 +3017,7 @@ pub fn empty_export(repo: &str, format: ExportFormat) -> ExportDocument {
         text,
         records: 0,
         relations: 0,
+        generation: 0,
     }
 }
 
@@ -3250,6 +3269,171 @@ fn check_relation_events(events: &[PortEvent]) -> Result<(), String> {
         }
         if (a.created_unix, a.event.as_str()) >= (b.created_unix, b.event.as_str()) {
             return Err(corrupt_msg("relation events are not in canonical order"));
+        }
+    }
+    Ok(())
+}
+
+/// Semantic coherence of a parsed payload. The store's write paths can only
+/// produce revisions whose lifecycle status agrees with their recorded event,
+/// whose kind agrees with measurement presence, and whose supersede events are
+/// mirrored by their revision-pinned implicit relations, and the supersedes
+/// lineage is acyclic. A payload that violates any of these is not a faithful
+/// export of any coherent store and is refused before a store is opened.
+/// Cross-store cycles cannot form without a merge conflict: the merge plan
+/// already refuses any payload revision that differs from the stored one, so
+/// every stored supersede edge is immutable under import and a cycle would
+/// have to be payload-internal, which the lineage walk below rejects.
+fn check_semantic_coherence(
+    records: &[PortRecord],
+    relations: &[PortRelation],
+) -> Result<(), String> {
+    for rec in records {
+        for rev in &rec.revisions {
+            // The lifecycle status must agree with the recorded event.
+            match (
+                rev.status.as_str(),
+                rev.events.first().map(|e| e.event.as_str()),
+            ) {
+                ("superseded", Some("supersede")) => {}
+                ("retracted", Some("retract")) => {}
+                ("active" | "archived", None) => {}
+                ("active" | "archived", Some("confirm")) => {}
+                (status, event) => {
+                    return Err(invalid_msg(format!(
+                        "record '{}' revision {} status '{status}' disagrees with its lifecycle event {}",
+                        rec.id,
+                        rev.revision,
+                        event.unwrap_or("none")
+                    )));
+                }
+            }
+            // The immutable kind decides measurement eligibility.
+            if (rec.kind == "benchmark") != rev.measurement.is_some() {
+                return Err(invalid_msg(format!(
+                    "record '{}' revision {} kind '{}' disagrees with its measurement presence",
+                    rec.id, rev.revision, rec.kind
+                )));
+            }
+        }
+    }
+    // Every supersede event must be mirrored by its revision-pinned implicit
+    // relation; the relation id itself is already pinned to the store-derived
+    // formula per line.
+    let relation_ids: std::collections::HashSet<&str> =
+        relations.iter().map(|r| r.relation_id.as_str()).collect();
+    for rec in records {
+        for rev in &rec.revisions {
+            if let Some(e) = rev.events.first() {
+                if e.event == "supersede" {
+                    let target_id = e.target_id.as_deref().unwrap_or_default();
+                    let target_revision = e.target_revision.unwrap_or(0);
+                    let expected = format!(
+                        "supersedes:{target_id}:{target_revision}:{}:{}",
+                        rec.id, rev.revision
+                    );
+                    if !relation_ids.contains(expected.as_str()) {
+                        return Err(invalid_msg(format!(
+                            "supersede of '{}:{}' has no implicit relation '{expected}'",
+                            rec.id, rev.revision
+                        )));
+                    }
+                }
+            }
+        }
+    }
+    // Every supersedes relation must be mirrored by the event on the revision
+    // it pins as superseded.
+    for rel in relations {
+        if rel.kind == "supersedes" {
+            let rec = records.iter().find(|r| r.id == rel.dst_id).ok_or_else(|| {
+                invalid_msg(format!(
+                    "supersedes relation '{}' names unknown revision '{}'",
+                    rel.relation_id, rel.dst_id
+                ))
+            })?;
+            let rev = rec
+                .revisions
+                .iter()
+                .find(|v| v.revision == rel.dst_revision)
+                .ok_or_else(|| {
+                    invalid_msg(format!(
+                        "supersedes relation '{}' names unknown revision {}:{}",
+                        rel.relation_id, rel.dst_id, rel.dst_revision
+                    ))
+                })?;
+            let agrees = rev.events.first().map(|e| {
+                e.event == "supersede"
+                    && e.target_id.as_deref() == Some(rel.src_id.as_str())
+                    && e.target_revision == Some(rel.src_revision)
+            });
+            if !agrees.unwrap_or(false) {
+                return Err(invalid_msg(format!(
+                    "supersedes relation '{}' has no agreeing supersede event on {}:{}",
+                    rel.relation_id, rel.dst_id, rel.dst_revision
+                )));
+            }
+        }
+    }
+    supersedes_lineage_is_acyclic(records)
+}
+
+/// The payload-internal supersedes lineage must be acyclic at record level:
+/// the store refuses any supersede transition whose lineage walk (over every
+/// stored supersedes relation, regardless of revision) can reach the record
+/// about to be superseded, so a payload that closes such a cycle is not a
+/// faithful export of any coherent store and is refused before a store is
+/// opened. A record may supersede different targets over its revisions, so a
+/// node can carry several outgoing edges.
+fn supersedes_lineage_is_acyclic(records: &[PortRecord]) -> Result<(), String> {
+    let mut edges: std::collections::HashMap<&str, Vec<&str>> = std::collections::HashMap::new();
+    for rec in records {
+        for rev in &rec.revisions {
+            if let Some(e) = rev.events.first() {
+                if e.event == "supersede" {
+                    edges
+                        .entry(rec.id.as_str())
+                        .or_default()
+                        .push(e.target_id.as_deref().unwrap_or_default());
+                }
+            }
+        }
+    }
+    // Iterative tri-color DFS: 1 = on the current path, 2 = fully explored.
+    let mut state: std::collections::HashMap<&str, u8> = std::collections::HashMap::new();
+    let mut stack: Vec<(&str, usize)> = Vec::new();
+    for start in edges.keys() {
+        if state.contains_key(*start) {
+            continue;
+        }
+        state.insert(*start, 1);
+        stack.push((*start, 0));
+        while let Some(&(node, mut at)) = stack.last() {
+            let children = edges.get(node).map(Vec::as_slice).unwrap_or_default();
+            match children.get(at) {
+                Some(&child) => {
+                    at += 1;
+                    if let Some(last) = stack.last_mut() {
+                        last.1 = at;
+                    }
+                    match state.get(child).copied().unwrap_or(0) {
+                        1 => {
+                            return Err(invalid_msg(format!(
+                                "supersedes lineage forms a cycle through '{child}'"
+                            )));
+                        }
+                        2 => {}
+                        _ => {
+                            state.insert(child, 1);
+                            stack.push((child, 0));
+                        }
+                    }
+                }
+                None => {
+                    state.insert(node, 2);
+                    stack.pop();
+                }
+            }
         }
     }
     Ok(())
@@ -3776,6 +3960,7 @@ pub fn parse_import_payload(text: &str) -> Result<ImportPayload, String> {
             relations.len()
         )));
     }
+    check_semantic_coherence(&records, &relations)?;
     let needs_lifecycle = records
         .iter()
         .any(|r| r.revisions.iter().any(|v| !v.events.is_empty()))
@@ -7794,8 +7979,8 @@ mod port_tests {
         let (home, repo) = setup();
         let mut conn = open(&home, &repo);
         rich_store(&mut conn);
-        let a = export_document(&conn, ExportFormat::Jsonl).unwrap();
-        let b = export_document(&conn, ExportFormat::Jsonl).unwrap();
+        let a = export_document(&mut conn, ExportFormat::Jsonl).unwrap();
+        let b = export_document(&mut conn, ExportFormat::Jsonl).unwrap();
         assert_eq!(
             a.text, b.text,
             "two exports of one store must be byte-identical"
@@ -7860,8 +8045,8 @@ mod port_tests {
         let (home, repo) = setup();
         let mut conn = open(&home, &repo);
         rich_store(&mut conn);
-        let jsonl = export_document(&conn, ExportFormat::Jsonl).unwrap();
-        let md = export_document(&conn, ExportFormat::Markdown).unwrap();
+        let jsonl = export_document(&mut conn, ExportFormat::Jsonl).unwrap();
+        let md = export_document(&mut conn, ExportFormat::Markdown).unwrap();
         assert!(md.text.contains("# Riltra knowledge export"));
         assert!(md.text.contains("```json"));
         assert!(md
@@ -7890,14 +8075,16 @@ mod port_tests {
             &new_record("e1", "decision", "Esc", "line one\n```json\nline two"),
         )
         .unwrap();
-        let md2 = export_document(&conn, ExportFormat::Markdown).unwrap();
+        let md2 = export_document(&mut conn, ExportFormat::Markdown).unwrap();
         assert!(
             md2.text.contains("\\```json"),
             "prose fence must be escaped"
         );
         assert_eq!(
             extract_import_payload(&md2.text).unwrap(),
-            export_document(&conn, ExportFormat::Jsonl).unwrap().text
+            export_document(&mut conn, ExportFormat::Jsonl)
+                .unwrap()
+                .text
         );
 
         assert!(extract_import_payload("plain prose only\n")
@@ -8162,7 +8349,7 @@ mod port_tests {
         let (home1, repo1) = setup();
         let mut c1 = open(&home1, &repo1);
         rich_store(&mut c1);
-        let doc = export_document(&c1, ExportFormat::Jsonl).unwrap();
+        let doc = export_document(&mut c1, ExportFormat::Jsonl).unwrap();
         let payload = parse_import_payload(&doc.text).unwrap();
         assert!(payload.needs_lifecycle);
 
@@ -8175,7 +8362,7 @@ mod port_tests {
         assert_eq!(report.records_unchanged, 0);
         assert!(report.generation > 0);
         assert_eq!(report.generation, read_generation(&c2).unwrap());
-        let doc2 = export_document(&c2, ExportFormat::Jsonl).unwrap();
+        let doc2 = export_document(&mut c2, ExportFormat::Jsonl).unwrap();
         assert_eq!(doc2.text, doc.text, "byte-identical re-export");
         for sql in [
             "SELECT id, revision, event, coalesce(target_id,''), coalesce(target_revision,-1), coalesce(reason,''), author, created_unix FROM record_lifecycle ORDER BY id, revision",
@@ -8202,7 +8389,7 @@ mod port_tests {
         );
         assert_eq!(read_generation(&c2).unwrap(), gen);
         assert_eq!(
-            export_document(&c2, ExportFormat::Jsonl).unwrap().text,
+            export_document(&mut c2, ExportFormat::Jsonl).unwrap().text,
             doc.text
         );
     }
@@ -8216,7 +8403,9 @@ mod port_tests {
             &new_record("d1", "decision", "First", "body one"),
         )
         .unwrap();
-        let v1_text = export_document(&conn, ExportFormat::Jsonl).unwrap().text;
+        let v1_text = export_document(&mut conn, ExportFormat::Jsonl)
+            .unwrap()
+            .text;
         update_validated(
             &mut conn,
             "d1",
@@ -8228,7 +8417,9 @@ mod port_tests {
             },
         )
         .unwrap();
-        let v2_text = export_document(&conn, ExportFormat::Jsonl).unwrap().text;
+        let v2_text = export_document(&mut conn, ExportFormat::Jsonl)
+            .unwrap()
+            .text;
         let p1 = parse_import_payload(&v1_text).unwrap();
         let p2 = parse_import_payload(&v2_text).unwrap();
 
@@ -8239,14 +8430,14 @@ mod port_tests {
         assert_eq!(rep.revisions_appended, 1);
         assert_eq!(rep.records_inserted, 0);
         assert_eq!(
-            export_document(&c2, ExportFormat::Jsonl).unwrap().text,
+            export_document(&mut c2, ExportFormat::Jsonl).unwrap().text,
             v2_text
         );
         let rep2 = import_payload(&mut c2, &p1).unwrap();
         assert_eq!(rep2.records_inserted, 0);
         assert_eq!(rep2.records_unchanged, 1);
         assert_eq!(
-            export_document(&c2, ExportFormat::Jsonl).unwrap().text,
+            export_document(&mut c2, ExportFormat::Jsonl).unwrap().text,
             v2_text,
             "a subset import must not shrink the store"
         );
@@ -8268,7 +8459,7 @@ mod port_tests {
         assert!(err.starts_with("import conflict:"), "{err}");
         assert_eq!(read_generation(&c2).unwrap(), gen);
         assert_eq!(
-            export_document(&c2, ExportFormat::Jsonl).unwrap().text,
+            export_document(&mut c2, ExportFormat::Jsonl).unwrap().text,
             v2_text
         );
         let n: i64 = c2
@@ -8292,7 +8483,7 @@ mod port_tests {
         assert!(err.starts_with("import conflict:"), "{err}");
         assert_eq!(read_generation(&c2).unwrap(), gen);
         assert_eq!(
-            export_document(&c2, ExportFormat::Jsonl).unwrap().text,
+            export_document(&mut c2, ExportFormat::Jsonl).unwrap().text,
             v2_text
         );
 
@@ -8320,7 +8511,7 @@ mod port_tests {
         let err = import_payload(&mut c2, &pa).unwrap_err();
         assert!(err.starts_with("import conflict:"), "{err}");
         assert_eq!(
-            export_document(&c2, ExportFormat::Jsonl).unwrap().text,
+            export_document(&mut c2, ExportFormat::Jsonl).unwrap().text,
             v2_text,
             "conflicting imports must not write"
         );
@@ -8336,7 +8527,9 @@ mod port_tests {
         )
         .unwrap();
         assert_eq!(user_version_of(&conn), 1);
-        let base = export_document(&conn, ExportFormat::Jsonl).unwrap().text;
+        let base = export_document(&mut conn, ExportFormat::Jsonl)
+            .unwrap()
+            .text;
         let p = parse_import_payload(&base).unwrap();
         assert!(!p.needs_lifecycle);
         let rep = import_payload(&mut conn, &p).unwrap();
@@ -8396,5 +8589,280 @@ mod port_tests {
             })
             .unwrap();
         assert_eq!(n, 0);
+    }
+
+    /// A record line with full control over kind, status and revision events.
+    fn record_line_full(id: &str, kind: &str, status: &str, events: &str) -> String {
+        format!(
+            "{{\"type\":\"record\",\"id\":\"{id}\",\"kind\":\"{kind}\",\"head_revision\":1,\
+             \"status\":\"{status}\",\"revisions\":[{{\"revision\":1,\"title\":\"T\",\"body\":\"B\",\
+             \"status\":\"{status}\",\"author\":\"a\",\"created_unix\":10,\"evidence\":[],\
+             \"events\":{events}}}]}}"
+        )
+    }
+
+    /// A relation line between two revision-1 records.
+    fn rel_line(rid: &str, src_id: &str, dst_id: &str, kind: &str) -> String {
+        rel_line_rev(rid, src_id, 1, dst_id, 1, kind)
+    }
+
+    /// A relation line between two explicit revisions.
+    fn rel_line_rev(
+        rid: &str,
+        src_id: &str,
+        src_revision: u64,
+        dst_id: &str,
+        dst_revision: u64,
+        kind: &str,
+    ) -> String {
+        format!(
+            "{{\"type\":\"relation\",\"relation_id\":\"{rid}\",\"src_id\":\"{src_id}\",\
+             \"src_revision\":{src_revision},\"dst_id\":\"{dst_id}\",\"dst_revision\":{dst_revision},\
+             \"kind\":\"{kind}\",\"author\":\"a\",\"rationale\":\"r\",\"created_unix\":12,\"events\":[]}}"
+        )
+    }
+
+    #[test]
+    fn port_export_reports_generation_from_one_snapshot() {
+        use std::thread;
+
+        let (home, repo) = setup();
+        let mut conn = open(&home, &repo);
+        create_validated(&mut conn, &new_record("d1", "decision", "EVEN", "body one")).unwrap();
+        let g0 = read_generation(&conn).unwrap();
+        assert_eq!(g0 % 2, 1, "the fixture starts on an odd generation");
+
+        // A second connection to the same store plays the concurrent writer:
+        // every update appends one revision and bumps the generation by one,
+        // so in any single committed state the head title and the generation
+        // parity are locked together ("EVEN" iff the generation is odd).
+        let writer = open(&home, &repo);
+        let handle = thread::spawn(move || {
+            let mut w = writer;
+            let mut expected = 1u64;
+            for i in 0..250 {
+                let title = if i % 2 == 0 { "ODD" } else { "EVEN" };
+                let input = update_input(title, "body one");
+                if update_validated(
+                    &mut w,
+                    "d1",
+                    expected,
+                    &ValidatedUpdate {
+                        record: input,
+                        evidence: vec![],
+                        measurement: None,
+                    },
+                )
+                .is_ok()
+                {
+                    expected += 1;
+                }
+            }
+        });
+
+        let mut exports = 0usize;
+        loop {
+            let doc = export_document(&mut conn, ExportFormat::Jsonl).unwrap();
+            let generation = doc.generation;
+            let payload = parse_import_payload(&doc.text).unwrap();
+            let head = payload
+                .records
+                .iter()
+                .find(|r| r.id == "d1")
+                .and_then(|r| r.revisions.last())
+                .expect("the export always carries d1");
+            assert_eq!(
+                head.title == "EVEN",
+                generation % 2 == 1,
+                "exported head {:?} is inconsistent with reported generation {generation}",
+                head.title
+            );
+            exports += 1;
+            if exports >= 250 {
+                break;
+            }
+        }
+        handle.join().unwrap();
+        conn.close().unwrap();
+    }
+
+    #[test]
+    fn port_import_rejects_status_event_disagreement() {
+        let meta = meta_line(1, 0);
+        let supersede_event = r#"[{"event":"supersede","target_id":"d2","target_revision":1,"reason":"r","author":"a","created_unix":11}]"#;
+        let retract_event = r#"[{"event":"retract","reason":"r","author":"a","created_unix":11}]"#;
+        let confirm_event = r#"[{"event":"confirm","author":"a","created_unix":11}]"#;
+        // Every status/event pairing except the four the store can author.
+        let cases = [
+            ("superseded", "[]"),
+            ("retracted", "[]"),
+            ("active", retract_event),
+            ("active", supersede_event),
+            ("archived", supersede_event),
+            ("superseded", confirm_event),
+            ("retracted", confirm_event),
+            ("retracted", supersede_event),
+        ];
+        for (status, events) in cases {
+            let text = format!(
+                "{meta}\n{}\n",
+                record_line_full("d1", "decision", status, events)
+            );
+            let err = parse_import_payload(&text).unwrap_err();
+            assert!(
+                err.starts_with("invalid import payload"),
+                "status {status} with events {events}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn port_import_accepts_coherent_status_event_pairs() {
+        let meta = meta_line(1, 0);
+        let cases = [
+            (
+                "retracted",
+                r#"[{"event":"retract","reason":"r","author":"a","created_unix":11}]"#,
+            ),
+            (
+                "active",
+                r#"[{"event":"confirm","author":"a","created_unix":11}]"#,
+            ),
+            ("archived", "[]"),
+            ("active", "[]"),
+        ];
+        for (status, events) in cases {
+            let text = format!(
+                "{meta}\n{}\n",
+                record_line_full("d1", "decision", status, events)
+            );
+            assert!(
+                parse_import_payload(&text).is_ok(),
+                "coherent status {status} with events {events} must parse"
+            );
+        }
+    }
+
+    #[test]
+    fn port_import_rejects_kind_measurement_disagreement() {
+        let meta = meta_line(1, 0);
+        let measurement = r#"{"method":"m","environment":"e","sample_count":3,"metrics":[{"name":"latency","value":1.5,"unit":"ms"}]}"#;
+        // A benchmark revision without measurement.
+        let bench = record_line_full("b1", "benchmark", "active", "[]");
+        let err = parse_import_payload(&format!("{meta}\n{bench}\n")).unwrap_err();
+        assert!(err.starts_with("invalid import payload"), "{err}");
+        // A non-benchmark revision carrying measurement.
+        let mut decision = record_line_full("d1", "decision", "active", "[]");
+        decision = decision.replacen(
+            "\"events\":[]",
+            &format!("\"events\":[],\"measurement\":{measurement}"),
+            1,
+        );
+        let err = parse_import_payload(&format!("{meta}\n{decision}\n")).unwrap_err();
+        assert!(err.starts_with("invalid import payload"), "{err}");
+        // The coherent pairings parse.
+        let bench_full = record_line_full("b1", "benchmark", "active", "[]").replacen(
+            "\"events\":[]",
+            &format!("\"events\":[],\"measurement\":{measurement}"),
+            1,
+        );
+        assert!(
+            parse_import_payload(&format!("{meta}\n{bench_full}\n")).is_ok(),
+            "benchmark with measurement must parse"
+        );
+        assert!(
+            parse_import_payload(&format!(
+                "{meta}\n{}\n",
+                record_line_full("d1", "decision", "active", "[]")
+            ))
+            .is_ok(),
+            "decision without measurement must parse"
+        );
+    }
+
+    #[test]
+    fn port_import_rejects_supersede_event_relation_disagreement() {
+        let meta2 = meta_line(2, 1);
+        let d1_sup = record_line_full(
+            "d1",
+            "decision",
+            "superseded",
+            r#"[{"event":"supersede","target_id":"d2","target_revision":1,"reason":"r","author":"a","created_unix":11}]"#,
+        );
+        let d2 = record_line_full("d2", "decision", "active", "[]");
+        // The event without its revision-pinned implicit relation.
+        let err =
+            parse_import_payload(&format!("{}\n{d1_sup}\n{d2}\n", meta_line(2, 0))).unwrap_err();
+        assert!(err.starts_with("invalid import payload"), "{err}");
+        // A caller-style relation id is already refused per line by the
+        // store-derived formula check (exit 2), before any agreement runs.
+        let err = parse_import_payload(&format!(
+            "{meta2}\n{d1_sup}\n{d2}\n{}\n",
+            rel_line("sr1", "d2", "d1", "supersedes")
+        ))
+        .unwrap_err();
+        assert!(err.starts_with("invalid import payload"), "{err}");
+        // The relation without its event.
+        let d1_plain = record_line_full("d1", "decision", "active", "[]");
+        let err = parse_import_payload(&format!(
+            "{meta2}\n{d1_plain}\n{d2}\n{}\n",
+            rel_line("supersedes:d2:1:d1:1", "d2", "d1", "supersedes")
+        ))
+        .unwrap_err();
+        assert!(err.starts_with("invalid import payload"), "{err}");
+        // The coherent pair parses.
+        let ok = parse_import_payload(&format!(
+            "{meta2}\n{d1_sup}\n{d2}\n{}\n",
+            rel_line("supersedes:d2:1:d1:1", "d2", "d1", "supersedes")
+        ));
+        assert!(ok.is_ok(), "{ok:?}");
+    }
+
+    #[test]
+    fn port_import_rejects_supersedes_cycles() {
+        let supersede_event = |target: &str, target_revision: u64| {
+            format!(
+                r#"[{{"event":"supersede","target_id":"{target}","target_revision":{target_revision},"reason":"r","author":"a","created_unix":11}}]"#
+            )
+        };
+        // Mutual replacement: d1 superseded by d2 and d2 superseded by d1.
+        let meta2 = meta_line(2, 2);
+        let d1 = record_line_full("d1", "decision", "superseded", &supersede_event("d2", 1));
+        let d2 = record_line_full("d2", "decision", "superseded", &supersede_event("d1", 1));
+        let text = format!(
+            "{meta2}\n{d1}\n{d2}\n{}\n{}\n",
+            rel_line("supersedes:d1:1:d2:1", "d1", "d2", "supersedes"),
+            rel_line("supersedes:d2:1:d1:1", "d2", "d1", "supersedes")
+        );
+        let err = parse_import_payload(&text).unwrap_err();
+        assert!(err.starts_with("invalid import payload"), "{err}");
+        // Mutual replacement across revisions: d1 rev2 is replaced by d2 rev1
+        // and d2 rev2 by d1 rev2. The store refuses that record-level cycle,
+        // so the payload must be refused too.
+        let two_rev_record = |id: &str, target: &str, target_rev: u64| {
+            format!(
+                "{{\"type\":\"record\",\"id\":\"{id}\",\"kind\":\"decision\",\"head_revision\":2,\"status\":\"superseded\",\"revisions\":[{{\"revision\":1,\"title\":\"T\",\"body\":\"B\",\"status\":\"active\",\"author\":\"a\",\"created_unix\":10,\"evidence\":[],\"events\":[]}},{{\"revision\":2,\"title\":\"T\",\"body\":\"B\",\"status\":\"superseded\",\"author\":\"a\",\"created_unix\":11,\"evidence\":[],\"events\":{}}}]}}",
+                supersede_event(target, target_rev)
+            )
+        };
+        let text = format!(
+            "{}\n{}\n{}\n{}\n{}\n",
+            meta_line(2, 2),
+            two_rev_record("d1", "d2", 1),
+            two_rev_record("d2", "d1", 2),
+            rel_line_rev("supersedes:d1:2:d2:2", "d1", 2, "d2", 2, "supersedes"),
+            rel_line_rev("supersedes:d2:1:d1:2", "d2", 1, "d1", 2, "supersedes")
+        );
+        let err = parse_import_payload(&text).unwrap_err();
+        assert!(err.starts_with("invalid import payload"), "{err}");
+        // Self replacement.
+        let meta1 = meta_line(1, 1);
+        let d1_self = record_line_full("d1", "decision", "superseded", &supersede_event("d1", 1));
+        let text = format!(
+            "{meta1}\n{d1_self}\n{}\n",
+            rel_line("supersedes:d1:1:d1:1", "d1", "d1", "supersedes")
+        );
+        let err = parse_import_payload(&text).unwrap_err();
+        assert!(err.starts_with("invalid import payload"), "{err}");
     }
 }

@@ -3063,6 +3063,145 @@ fn port_v1_store_export_import_keeps_foundation_compatibility() {
     );
 }
 
+/// A record line with explicit status and revision events.
+fn record_line_with_events(id: &str, status: &str, events: &str) -> String {
+    format!(
+        "{{\"type\":\"record\",\"id\":\"{id}\",\"kind\":\"decision\",\"head_revision\":1,\
+         \"status\":\"{status}\",\"revisions\":[{{\"revision\":1,\"title\":\"T\",\"body\":\"B\",\
+         \"status\":\"{status}\",\"author\":\"a\",\"created_unix\":10,\"evidence\":[],\
+         \"events\":{events}}}]}}"
+    )
+}
+
+/// A supersedes relation line between two revisions.
+fn supersedes_relation_line(rid: &str, src_id: &str, dst_id: &str) -> String {
+    format!(
+        "{{\"type\":\"relation\",\"relation_id\":\"{rid}\",\"src_id\":\"{src_id}\",\
+         \"src_revision\":1,\"dst_id\":\"{dst_id}\",\"dst_revision\":1,\"kind\":\"supersedes\",\
+         \"author\":\"a\",\"rationale\":\"r\",\"created_unix\":12,\"events\":[]}}"
+    )
+}
+
+#[test]
+fn port_import_coherence_rejections_are_atomic() {
+    let supersede_event = r#"[{"event":"supersede","target_id":"d2","target_revision":1,"reason":"r","author":"a","created_unix":11}]"#;
+    // Each payload violates one authored-data invariant the store enforces.
+    let cases: Vec<(&str, String)> = vec![
+        // Lifecycle status without its recorded event.
+        (
+            "status without event",
+            format!(
+                "{}\n{}\n",
+                meta_line(1, 0),
+                record_line_with_events("d1", "superseded", "[]")
+            ),
+        ),
+        // Supersede event without the status transition.
+        (
+            "event without status",
+            format!(
+                "{}\n{}\n{}\n{}\n",
+                meta_line(2, 1),
+                record_line_with_events("d1", "active", supersede_event),
+                record_line_with_events("d2", "active", "[]"),
+                supersedes_relation_line("supersedes:d2:1:d1:1", "d2", "d1")
+            ),
+        ),
+        // Benchmark revision without measurement data.
+        (
+            "benchmark without measurement",
+            format!(
+                "{}\n{{\"type\":\"record\",\"id\":\"b1\",\"kind\":\"benchmark\",\"head_revision\":1,\
+                 \"status\":\"active\",\"revisions\":[{{\"revision\":1,\"title\":\"T\",\"body\":\"B\",\
+                 \"status\":\"active\",\"author\":\"a\",\"created_unix\":10,\"evidence\":[],\"events\":[]}}]}}\n",
+                meta_line(1, 0)
+            ),
+        ),
+        // Non-benchmark revision carrying measurement data.
+        (
+            "measurement without benchmark",
+            format!(
+                "{}\n{{\"type\":\"record\",\"id\":\"d1\",\"kind\":\"decision\",\"head_revision\":1,\
+                 \"status\":\"active\",\"revisions\":[{{\"revision\":1,\"title\":\"T\",\"body\":\"B\",\
+                 \"status\":\"active\",\"author\":\"a\",\"created_unix\":10,\"evidence\":[],\
+                 \"measurement\":{{\"method\":\"m\",\"environment\":\"e\",\"sample_count\":3,\
+                 \"metrics\":[{{\"name\":\"latency\",\"value\":1.5,\"unit\":\"ms\"}}]}},\"events\":[]}}]}}\n",
+                meta_line(1, 0)
+            ),
+        ),
+        // Supersede event without its revision-pinned implicit relation.
+        (
+            "event without relation",
+            format!(
+                "{}\n{}\n{}\n",
+                meta_line(2, 0),
+                record_line_with_events("d1", "superseded", supersede_event),
+                record_line_with_events("d2", "active", "[]")
+            ),
+        ),
+        // Mutual replacement: a supersedes cycle.
+        (
+            "supersedes cycle",
+            format!(
+                "{}\n{}\n{}\n{}\n{}\n",
+                meta_line(2, 2),
+                record_line_with_events("d1", "superseded", supersede_event),
+                record_line_with_events(
+                    "d2",
+                    "superseded",
+                    r#"[{"event":"supersede","target_id":"d1","target_revision":1,"reason":"r","author":"a","created_unix":11}]"#
+                ),
+                supersedes_relation_line("supersedes:d1:1:d2:1", "d1", "d2"),
+                supersedes_relation_line("supersedes:d2:1:d1:1", "d2", "d1")
+            ),
+        ),
+    ];
+    for (name, payload) in cases {
+        let h = home("port-coh");
+        let dir = mkrepo(&h, "krepo");
+        init(&h, &dir, "krepo");
+        let f = h.join("p.jsonl");
+        write_text(&f, &payload);
+        let (code, _, err) = import(&h, "krepo", &f);
+        assert_eq!(code, 2, "{name}: {err}");
+        assert!(err.contains("invalid import payload"), "{name}: {err}");
+        assert!(
+            !db_path(&h, "krepo").exists(),
+            "{name}: a refused import must not create a store"
+        );
+    }
+
+    // A seeded store is left byte-identical by a refused import.
+    let h = home("port-coh-seed");
+    port_seed(&h);
+    let good = h.join("good.jsonl");
+    assert_eq!(export(&h, "krepo", &["--out", good.to_str().unwrap()]).0, 0);
+    let good_text = read_text(&good);
+    // Drop the implicit supersedes relation and fix the declared count: the
+    // event on d1 then has no revision-pinned relation to agree with.
+    let filtered: String = good_text
+        .lines()
+        .filter(|l| !l.contains("\"supersedes:d2:1:d1:2\""))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mutated = format!("{filtered}\n").replacen("\"relations\":3", "\"relations\":2", 1);
+    let bad = h.join("bad.jsonl");
+    write_text(&bad, &mutated);
+    let (code, _, err) = import(&h, "krepo", &bad);
+    assert_eq!(code, 2, "seeded: {err}");
+    assert!(err.contains("invalid import payload"), "seeded: {err}");
+    let after = h.join("after.jsonl");
+    assert_eq!(
+        export(&h, "krepo", &["--out", after.to_str().unwrap()]).0,
+        0
+    );
+    assert_eq!(
+        read_text(&after),
+        good_text,
+        "a refused import must not change the store"
+    );
+}
+
 #[test]
 fn port_merge_appends_supersets_skips_subsets_and_rejects_divergence() {
     let h1 = home("port-merge-1");

@@ -1844,27 +1844,24 @@ fn knowledge_export(
         match knowledge_store_absent(&db) {
             Ok(true) => (knowledge_store::empty_export(&entry.name, format), 0),
             Ok(false) => {
-                let conn = match knowledge_store::open_knowledge(&entry, false) {
+                let mut conn = match knowledge_store::open_knowledge(&entry, false) {
                     Ok(c) => c,
                     Err(e) => {
                         err.push_str(&format!("error: {e}\n"));
                         return 3;
                     }
                 };
-                let doc = match knowledge_store::export_document(&conn, format) {
+                // The export reads its generation from the same snapshot as
+                // the payload, so the envelope's generation always describes
+                // the exported data.
+                let doc = match knowledge_store::export_document(&mut conn, format) {
                     Ok(d) => d,
                     Err(e) => {
                         err.push_str(&format!("error: {e}\n"));
                         return 3;
                     }
                 };
-                let generation = match knowledge_store::read_generation(&conn) {
-                    Ok(g) => g,
-                    Err(e) => {
-                        err.push_str(&format!("error: {e}\n"));
-                        return 3;
-                    }
-                };
+                let generation = doc.generation;
                 (doc, generation)
             }
             Err(e) => {
