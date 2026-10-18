@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
-//! M8 CP1/CP3: MCP stdio server. CP1 serves initialize; CP3 registers the
-//! three read-only tools (design gate §3) through the rmcp tool macros.
+//! M8 CP1/CP3/CP4: MCP stdio server. CP1 serves initialize; CP3 registers the
+//! first read-only tools; CP4 adds the graph tools (callers, callees, trace,
+//! impact) — seven tools total (design gate §3) through the rmcp tool macros.
 //! Tool calls reuse the CLI's response formatters byte-for-byte, and the
 //! index read path (`store::open_read`) never creates, migrates, or replaces
 //! a database. stdout stays protocol-only; blocking work runs on the tokio
 //! blocking pool.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, Implementation, ServerCapabilities, ServerConfig};
@@ -33,6 +34,73 @@ struct CodeSearchInput {
     /// Maximum hits to return (CLI default 50, maximum 1000).
     limit: Option<usize>,
     /// Hits to skip before returning results (default 0).
+    offset: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(crate = "rmcp::schemars")]
+struct EdgeInput {
+    /// Registered repository name.
+    repo: String,
+    /// Repository-relative path of the anchor position.
+    path: String,
+    /// 1-based line of the anchor position.
+    line: u32,
+    /// 1-based column of the anchor position.
+    col: u32,
+    /// Optional exact SCIP symbol identity to check against the position.
+    symbol: Option<String>,
+    /// Maximum edges to return (CLI default 50, maximum 1000).
+    limit: Option<usize>,
+    /// Edges to skip before returning results (default 0).
+    offset: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(crate = "rmcp::schemars")]
+struct TraceInput {
+    /// Registered repository name.
+    repo: String,
+    /// Repository-relative path of the anchor position.
+    path: String,
+    /// 1-based line of the anchor position.
+    line: u32,
+    /// 1-based column of the anchor position.
+    col: u32,
+    /// Optional exact SCIP symbol identity to check against the position.
+    symbol: Option<String>,
+    /// Optional destination anchor `PATH:LINE:COL` (CLI `--to` grammar).
+    to: Option<String>,
+    /// Maximum traversal depth (CLI default 3, 1-6).
+    depth: Option<usize>,
+    /// Maximum paths to return (CLI default 50, maximum 1000).
+    limit: Option<usize>,
+    /// Paths to skip before returning results (default 0).
+    offset: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(crate = "rmcp::schemars")]
+struct ImpactInput {
+    /// Registered repository name.
+    repo: String,
+    /// Repository-relative path of the anchor position.
+    path: String,
+    /// 1-based line of the anchor position.
+    line: u32,
+    /// 1-based column of the anchor position.
+    col: u32,
+    /// Optional exact SCIP symbol identity to check against the position.
+    symbol: Option<String>,
+    /// Maximum traversal depth (CLI default 3, 1-6). Impact takes no
+    /// destination, and unknown parameters are rejected.
+    depth: Option<usize>,
+    /// Maximum paths to return (CLI default 50, maximum 1000).
+    limit: Option<usize>,
+    /// Paths to skip before returning results (default 0).
     offset: Option<usize>,
 }
 
@@ -90,6 +158,71 @@ impl RiltraMcp {
         Parameters(input): Parameters<CodeSearchInput>,
     ) -> CallToolResult {
         blocking(move || code_search_doc(&input)).await
+    }
+
+    #[tool(
+        name = "riltra_code_callers",
+        description = "Call sites that reference the anchor symbol (same document as CLI `callers`); heuristic edges stay `POTENTIAL_CALL`, never promoted to `CALLS`.",
+        annotations(
+            title = "Find callers",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn riltra_code_callers(
+        &self,
+        Parameters(input): Parameters<EdgeInput>,
+    ) -> CallToolResult {
+        blocking(move || edge_doc(&input, GraphMode::Callers)).await
+    }
+
+    #[tool(
+        name = "riltra_code_callees",
+        description = "Symbols the anchor definition calls (same document as CLI `callees`).",
+        annotations(
+            title = "Find callees",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn riltra_code_callees(
+        &self,
+        Parameters(input): Parameters<EdgeInput>,
+    ) -> CallToolResult {
+        blocking(move || edge_doc(&input, GraphMode::Callees)).await
+    }
+
+    #[tool(
+        name = "riltra_code_trace",
+        description = "Transitive call paths from the anchor, optionally to a destination (same document as CLI `trace`); paths are plausible traversal, not execution.",
+        annotations(
+            title = "Trace call paths",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn riltra_code_trace(&self, Parameters(input): Parameters<TraceInput>) -> CallToolResult {
+        blocking(move || trace_doc(&input)).await
+    }
+
+    #[tool(
+        name = "riltra_code_impact",
+        description = "Reverse transitive callers of the anchor with a coverage verdict (same document as CLI `impact`); impact is plausible, not execution.",
+        annotations(
+            title = "Estimate impact",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn riltra_code_impact(
+        &self,
+        Parameters(input): Parameters<ImpactInput>,
+    ) -> CallToolResult {
+        blocking(move || impact_doc(&input)).await
     }
 }
 
@@ -377,6 +510,338 @@ fn search_doc(
         total,
         hits,
     }))
+}
+
+// --- CP4: graph tools --------------------------------------------------------
+
+/// CLI-parity anchor check (`cmd_edge`/`cmd_graph` exit-2 texts).
+fn graph_anchor(line: u32, col: u32) -> Result<(), CallToolResult> {
+    if line == 0 {
+        return Err(tool_error(
+            "invalid_input",
+            &format!("invalid --line value: '{line}'"),
+        ));
+    }
+    if col == 0 {
+        return Err(tool_error(
+            "invalid_input",
+            &format!("invalid --col value: '{col}'"),
+        ));
+    }
+    Ok(())
+}
+
+/// CLI-parity page-range check (`--limit` default 50/max 1000, `--offset`).
+fn graph_page(
+    limit: Option<usize>,
+    offset: Option<usize>,
+) -> Result<(usize, usize), CallToolResult> {
+    let limit = limit.unwrap_or(index::DEFAULT_SEARCH_LIMIT);
+    if !(1..=index::MAX_SEARCH_LIMIT).contains(&limit) {
+        return Err(tool_error(
+            "invalid_input",
+            &format!("--limit must be between 1 and {}", index::MAX_SEARCH_LIMIT),
+        ));
+    }
+    let offset = offset.unwrap_or(0);
+    if offset > i64::MAX as usize - index::MAX_SEARCH_LIMIT {
+        return Err(tool_error(
+            "invalid_input",
+            "--offset exceeds supported range",
+        ));
+    }
+    Ok((limit, offset))
+}
+
+/// CLI-parity depth check (`--depth` default 3, 1-6).
+fn graph_depth(depth: Option<usize>) -> Result<usize, CallToolResult> {
+    let depth = depth.unwrap_or(3);
+    if !(1..=crate::edges::TRACE_MAX_DEPTH).contains(&depth) {
+        return Err(tool_error(
+            "invalid_input",
+            &format!(
+                "--depth must be between 1 and {}",
+                crate::edges::TRACE_MAX_DEPTH
+            ),
+        ));
+    }
+    Ok(depth)
+}
+
+/// Same parse as the CLI's `trace_position`: a positive 1-based number or the
+/// flag's refusal text.
+fn positional(value: &str, flag: &str) -> Result<u32, String> {
+    value
+        .parse::<u32>()
+        .ok()
+        .filter(|n| *n > 0)
+        .ok_or_else(|| format!("invalid {flag} value: '{value}'"))
+}
+
+fn bad_destination() -> CallToolResult {
+    tool_error("invalid_input", "--to must be PATH:LINE:COL")
+}
+
+/// The CLI `--to` grammar: `PATH:LINE:COL`, all positive 1-based numbers.
+fn parse_destination(to: &str) -> Result<(&str, u32, u32), CallToolResult> {
+    let (rest, col) = to.rsplit_once(':').ok_or_else(bad_destination)?;
+    let (path, line) = rest.rsplit_once(':').ok_or_else(bad_destination)?;
+    if path.is_empty() {
+        return Err(tool_error("invalid_input", "--to requires a path"));
+    }
+    let line = positional(line, "--to line").map_err(|e| tool_error("invalid_input", &e))?;
+    let col = positional(col, "--to col").map_err(|e| tool_error("invalid_input", &e))?;
+    Ok((path, line, col))
+}
+
+/// Missing index or snapshot: the CLI's no-snapshot text, classified
+/// `no_index` (the read path never creates or migrates storage).
+fn missing_index() -> CallToolResult {
+    tool_error("no_index", "no snapshot: index the repository first")
+}
+
+/// Registry + recorded-root resolution for the graph tools: the same checks
+/// and messages as `repo_status` and the CLI's root resolution.
+fn graph_repo_root(repo: &str) -> Result<(PathBuf, PathBuf), CallToolResult> {
+    let home = paths::config_dir();
+    let reg = match registry::load(&paths::registry_path()) {
+        Ok(reg) => reg,
+        Err(e) => return Err(tool_error("store_error", &e)),
+    };
+    let entry = match registry::find(&reg, repo) {
+        Some(entry) => entry,
+        None => {
+            return Err(tool_error(
+                "not_registered",
+                &format!("unknown repository: '{repo}'"),
+            ))
+        }
+    };
+    let recorded = entry.root.clone();
+    let canon = match paths::canonical_root(Path::new(&recorded)) {
+        Ok(canon) => canon,
+        Err(_) => {
+            return Err(tool_error(
+                "not_registered",
+                &format!("registered root is missing: '{recorded}'"),
+            ))
+        }
+    };
+    if canon.to_string_lossy() != recorded {
+        return Err(tool_error(
+            "not_registered",
+            &format!("registered root moved or retargeted (record '{recorded}')"),
+        ));
+    }
+    Ok((home, canon))
+}
+
+/// Classify a graph-query refusal by its CLI text (design gate §3): missing
+/// snapshot -> `no_index`; anchor/identity/path refusals -> `invalid_input`;
+/// everything else is `store_error` (fail-closed), message preserved.
+fn graph_query_error(message: String) -> CallToolResult {
+    let kind = if message.starts_with("no snapshot:") {
+        "no_index"
+    } else if message.starts_with("anchor")
+        || message.starts_with("occurrence has no symbol identity")
+        || message.starts_with("source has no identity")
+        || message.starts_with("no anchor here")
+        || message.contains("document path")
+        || message.starts_with("invalid edge query bounds")
+        || message.starts_with("invalid trace bounds")
+    {
+        "invalid_input"
+    } else {
+        "store_error"
+    };
+    tool_error(kind, &message)
+}
+
+/// Which graph document a call produces.
+#[derive(Clone, Copy)]
+enum GraphMode {
+    Callers,
+    Callees,
+    Trace,
+    Impact,
+}
+
+/// A validated request plus the paths the connection query needs; validation
+/// happens before the read-only open, exactly like the CLI validators.
+enum Prepared<'a> {
+    Edge(index::EdgeRequest<'a>, PathBuf, String),
+    Graph(index::TraceRequest<'a>, PathBuf, String, Option<String>),
+}
+
+#[allow(clippy::too_many_arguments)]
+fn graph_doc(
+    repo: &str,
+    path: &str,
+    line: u32,
+    col: u32,
+    symbol: Option<&str>,
+    to: Option<&str>,
+    depth: Option<usize>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+    mode: GraphMode,
+) -> CallToolResult {
+    if let Err(e) = graph_anchor(line, col) {
+        return e;
+    }
+    let is_graph = matches!(mode, GraphMode::Trace | GraphMode::Impact);
+    let depth = if is_graph {
+        match graph_depth(depth) {
+            Ok(d) => d,
+            Err(e) => return e,
+        }
+    } else {
+        3
+    };
+    let (limit, offset) = match graph_page(limit, offset) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let destination = match to.map(parse_destination).transpose() {
+        Ok(d) => d,
+        Err(e) => return e,
+    };
+    let (home, canon) = match graph_repo_root(repo) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let prepared = match mode {
+        GraphMode::Callers | GraphMode::Callees => {
+            let request = index::EdgeRequest {
+                anchor: index::SpanQuery {
+                    rel: path,
+                    line1: line,
+                    col1: col,
+                    refs: false,
+                },
+                symbol,
+                direction: if matches!(mode, GraphMode::Callers) {
+                    index::EdgeDir::Callers
+                } else {
+                    index::EdgeDir::Callees
+                },
+                limit,
+                offset,
+            };
+            match index::validated_edge_anchor(&canon, &request) {
+                Ok((canon, validated)) => Prepared::Edge(request, canon, validated),
+                Err(e) => return tool_error("invalid_input", &e),
+            }
+        }
+        GraphMode::Trace | GraphMode::Impact => {
+            let request = index::TraceRequest {
+                source: index::SpanQuery {
+                    rel: path,
+                    line1: line,
+                    col1: col,
+                    refs: false,
+                },
+                symbol,
+                destination: destination.map(|(p, l, c)| index::SpanQuery {
+                    rel: p,
+                    line1: l,
+                    col1: c,
+                    refs: false,
+                }),
+                depth,
+                limit,
+                offset,
+            };
+            match index::validated_trace_anchor(&canon, &request) {
+                Ok((canon, rel, dest_path)) => Prepared::Graph(request, canon, rel, dest_path),
+                Err(e) => return tool_error("invalid_input", &e),
+            }
+        }
+    };
+    match store::open_read(&store::db_path(&home, repo)) {
+        store::IndexRead::Missing => missing_index(),
+        store::IndexRead::Outdated(version) => {
+            tool_error("schema_outdated", &outdated_message(repo, version))
+        }
+        store::IndexRead::Ahead(version) => tool_error(
+            "schema_ahead",
+            &format!(
+                "database schema v{version} is newer than supported v{}",
+                store::SCHEMA_VERSION
+            ),
+        ),
+        store::IndexRead::Error(message) => tool_error("store_error", &message),
+        store::IndexRead::Ready(mut conn) => match prepared {
+            Prepared::Edge(request, canon, validated) => {
+                match index::edge_query_conn(&mut conn, repo, &canon, &validated, &request, || {}) {
+                    Ok(out) => doc(&response::edge_query_json(&out)),
+                    Err(e) => graph_query_error(e),
+                }
+            }
+            Prepared::Graph(request, canon, rel, dest_path) => {
+                let started = std::time::Instant::now();
+                match index::graph_query_conn(
+                    &mut conn,
+                    repo,
+                    &canon,
+                    &rel,
+                    dest_path.as_deref(),
+                    &request,
+                    started,
+                    || {},
+                    matches!(mode, GraphMode::Impact),
+                ) {
+                    Ok(out) => doc(&response::trace_query_json(&out)),
+                    Err(e) => graph_query_error(e),
+                }
+            }
+        },
+    }
+}
+
+fn edge_doc(input: &EdgeInput, mode: GraphMode) -> CallToolResult {
+    graph_doc(
+        &input.repo,
+        &input.path,
+        input.line,
+        input.col,
+        input.symbol.as_deref(),
+        None,
+        None,
+        input.limit,
+        input.offset,
+        mode,
+    )
+}
+
+fn trace_doc(input: &TraceInput) -> CallToolResult {
+    graph_doc(
+        &input.repo,
+        &input.path,
+        input.line,
+        input.col,
+        input.symbol.as_deref(),
+        input.to.as_deref(),
+        input.depth,
+        input.limit,
+        input.offset,
+        GraphMode::Trace,
+    )
+}
+
+fn impact_doc(input: &ImpactInput) -> CallToolResult {
+    graph_doc(
+        &input.repo,
+        &input.path,
+        input.line,
+        input.col,
+        input.symbol.as_deref(),
+        None,
+        input.depth,
+        input.limit,
+        input.offset,
+        GraphMode::Impact,
+    )
 }
 
 /// Run the MCP stdio server to completion. Exit codes follow the CLI:
