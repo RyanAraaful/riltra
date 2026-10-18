@@ -39,10 +39,14 @@ dependencies beyond itself:
   candidates with line/column spans and byte offsets for Python, JavaScript,
   TypeScript, Rust, C, and C++ (`scan`); other extensions are reported as
   unsupported, never guessed.
-- **Durable code index** — SQLite-backed snapshots of the syntax facts with
+- **Durable code index** - SQLite-backed snapshots of the syntax facts with
   source digests, provenance, full-text search, and explicit
   fresh/stale/unknown freshness (`index`, `search`); one database file per
   repository under the local Riltra home.
+- **MCP server (read-only)** - `riltra mcp` serves eleven read-only tools over
+  local stdio for MCP clients. Reads never create or migrate a store: a missing
+  index returns `no-index` without creating files, and an unsupported schema is
+  refused as `schema_outdated` with a CLI migration instruction.
 
 ## Quick start
 
@@ -96,6 +100,41 @@ Notes:
   missing executable — nothing is silently faked.
 - Run `cargo run -q -p riltra -- --help` for the full command list.
 
+## MCP server (read-only)
+
+`riltra mcp` starts a local stdio MCP server for coding agents. It exposes
+eleven read-only tools:
+
+- `riltra_repo_list`, `riltra_repo_status`, `riltra_health`
+- `riltra_code_search`, `riltra_code_callers`, `riltra_code_callees`,
+  `riltra_code_trace`, `riltra_code_impact`
+- `riltra_knowledge_search`, `riltra_knowledge_show`, `riltra_knowledge_related`
+
+The server never creates, migrates, or replaces a database. A missing index or
+knowledge store returns its documented empty/`no-index` result without creating
+files; a store with an unsupported schema is refused as `schema_outdated`
+without modification, with a CLI migration instruction. Results keep the same
+freshness, provenance, and `POTENTIAL_CALL`/`CALLS` semantics as the CLI.
+
+Minimal OpenCode configuration for the local stdio server:
+
+```jsonc
+{
+  "mcp": {
+    "servers": {
+      "riltra": {
+        "type": "local",
+        "command": ["riltra", "mcp"],
+        "environment": { "RILTRA_HOME": "<your Riltra home>" }
+      }
+    }
+  }
+}
+```
+
+See [docs/pilots/cp7a/README.md](docs/pilots/cp7a/README.md) for the CP7-A
+benchmark report, raw evidence, and limitations.
+
 ## Roadmap (not yet implemented)
 
 The following are planned directions, not working features and not dated
@@ -107,7 +146,6 @@ stored index; the roadmap is about going further:
 - Freshness tracking: always-clear staleness status and incremental refresh.
 - Opt-in semantic providers (language servers / index formats) for deeper accuracy.
 - Persistent, revisioned knowledge graph for decisions, constraints, and benchmarks.
-- An MCP server so AI agents can query code and knowledge through one interface.
 
 ## Project status
 
