@@ -210,8 +210,13 @@ Local gate on the frozen tree (`harness/run-gate.ps1`, logs under `gate/`):
 - `cargo clippy --locked --all-targets -- -D warnings` — exit 0;
 - `cargo test --locked` — exit 0, **634 passed / 0 failed** across 8 suites.
 
-The CI result on Windows/Ubuntu/macOS is recorded in the commit that follows
-this report (push verification). No golden or snapshot was modified; the source
+CI run
+[39157182381](https://github.com/RyanAraaful/riltra/actions/runs/39157182381)
+on commit `6449a42f16e9863fca2da99dd0ce6842152bb451` (the report commit): all
+three jobs green — windows-latest 4m34s, ubuntu-latest 1m13s, macos-latest
+1m54s, each running `cargo fmt --all -- --check`,
+`cargo clippy --all-targets -- -D warnings`, `cargo check --locked`, and
+`cargo test --locked`. No golden or snapshot was modified; the source
 worktree was clean at the baseline commit throughout measurement.
 
 ## G8 — dependency governance: PASS
