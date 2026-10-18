@@ -297,13 +297,18 @@ pub fn restore_from(
     // stale WAL/SHM/journal may hold committed transactions of the store
     // being replaced; their safety cannot be proven, so the restore must
     // not proceed. Nothing is moved, deleted, or modified.
+    // shortcut: this is safe only against a quiescent store — another
+    // process can create a companion between this check and the rename
+    // below; upgrade when restore must tolerate concurrent opens.
     for p in companions.iter() {
         if std::fs::symlink_metadata(p).is_ok() {
             let _ = std::fs::remove_file(&staged);
             return Err(format!(
-                "knowledge store has live companion '{}': its committed \
-                 transactions cannot be proven safe to discard; refusing \
-                 to restore without modifying the store or companion",
+                "knowledge store has companion '{}': its committed \
+                 transactions cannot be proven safe to discard, so the \
+                 restore refuses without modifying the store or companion; \
+                 close every process using this store, confirm the companion \
+                 holds no needed transactions, remove it, then retry",
                 p.display()
             ));
         }
