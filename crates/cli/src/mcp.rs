@@ -198,7 +198,7 @@ fn repo_status_doc(input: &RepoStatusInput) -> CallToolResult {
 /// identical for both index-reading tools.
 fn outdated_message(repo: &str, version: u32) -> String {
     format!(
-        "index schema v{version} is outdated; run `riltra index status {repo}` (or `riltra index {repo}`) with the CLI to migrate, then retry"
+        "index schema v{version} is outdated; run `riltra index status --repo {repo}` with the CLI to migrate, then retry"
     )
 }
 

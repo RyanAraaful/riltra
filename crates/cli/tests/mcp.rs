@@ -801,6 +801,8 @@ fn f1_legacy_v1_refused_without_migration_and_still_cli_migratable() {
         conn.execute_batch(V1_TABLES).unwrap();
     }
     let mut s = ready(&h);
+    // The one exact, copy-runnable command the refusals must hand the user.
+    let command = "riltra index status --repo v1repo";
     for (id, tool, args) in [
         (
             2,
@@ -814,13 +816,14 @@ fn f1_legacy_v1_refused_without_migration_and_still_cli_migratable() {
         let d = doc(&res);
         assert_eq!(d["kind"], "schema_outdated", "{tool}: {d}");
         assert!(
-            d["message"].as_str().unwrap().contains("migrate"),
-            "{tool}: {d}"
+            d["message"].as_str().unwrap().contains(command),
+            "{tool}: refusal must name the exact CLI command `{command}`: {d}"
         );
     }
     assert_eq!(user_version(&db), 1, "MCP must not migrate");
-    // The CLI migration path still upgrades the same file afterwards.
-    let (code, out, err) = run_cli(&h, &["index", "status", "--repo", "v1repo"]);
+    // Executing exactly that command migrates the file through the CLI.
+    let args: Vec<&str> = command.split_whitespace().skip(1).collect();
+    let (code, out, err) = run_cli(&h, &args);
     assert_eq!(code, 0, "{out} {err}");
     assert_eq!(user_version(&db), 4, "CLI migration path intact");
     // And the MCP read path works again on the migrated database.
