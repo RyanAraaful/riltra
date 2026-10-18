@@ -106,6 +106,10 @@ pub enum IndexRead {
 /// is validated on the same connection the caller reads through, so a
 /// version check cannot race a check-then-open gap into a writable reopen.
 /// `immutable=1` is deliberately not used: live databases may change.
+/// `SQLITE_OPEN_NOFOLLOW` is deliberately not used either: SQLite rejects any
+/// path whose resolved chain contains a symlinked component (macOS `/var` is
+/// a symlink), so it would fail every macOS read; the `symlink_metadata`
+/// gate above is the fail-closed control for the database path itself.
 pub fn open_read(path: &Path) -> IndexRead {
     match std::fs::symlink_metadata(path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return IndexRead::Missing,
@@ -121,9 +125,7 @@ pub fn open_read(path: &Path) -> IndexRead {
         }
         Ok(_) => {}
     }
-    // NOFOLLOW is belt-and-suspenders behind the symlink_metadata gate.
-    let flags =
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW;
+    let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY;
     let conn = match Connection::open_with_flags(path, flags) {
         Ok(conn) => conn,
         Err(e) => return IndexRead::Error(format!("cannot open database read-only: {e}")),
