@@ -2793,6 +2793,111 @@ fn t2_knowledge_search_matches_cli_missing_empty_populated_paging_and_escaping()
 }
 
 #[test]
+fn r1_missing_store_generation_guard_matches_cli() {
+    let h = home("cp5-r1");
+    let r = home("cp5-r1-repo");
+    init_repo(&h, &r, "krepo");
+    let db = knowledge_db(&h, "krepo");
+    let before = listing(&h);
+
+    let mut s = ready(&h);
+    // Omitted and 0: valid generation-0 empty success.
+    let got = kjson(
+        &mut s,
+        2,
+        "riltra_knowledge_search",
+        &json!({"repo": "krepo", "query": "x"}),
+    );
+    assert_eq!(got["generation"], json!(0));
+    assert_eq!(got["result"]["hits"], json!([]));
+    kparity(
+        &h,
+        &got,
+        &["knowledge", "search", "--repo", "krepo", "--query", "x"],
+    );
+    let got = kjson(
+        &mut s,
+        3,
+        "riltra_knowledge_search",
+        &json!({"repo": "krepo", "query": "x", "generation": 0}),
+    );
+    assert_eq!(got["generation"], json!(0));
+    kparity(
+        &h,
+        &got,
+        &[
+            "knowledge",
+            "search",
+            "--repo",
+            "krepo",
+            "--query",
+            "x",
+            "--generation",
+            "0",
+        ],
+    );
+
+    // Any nonzero generation conflicts against the absent store's generation 0.
+    for (id, generation) in [(4, 1), (5, 7)] {
+        let text = generation.to_string();
+        let d = kerr(
+            &h,
+            &mut s,
+            id,
+            "riltra_knowledge_search",
+            &json!({"repo": "krepo", "query": "x", "generation": generation}),
+            &[
+                "knowledge",
+                "search",
+                "--repo",
+                "krepo",
+                "--query",
+                "x",
+                "--generation",
+                &text,
+            ],
+        );
+        assert_eq!(d["kind"], "conflict", "{d}");
+        assert_eq!(
+            d["message"],
+            json!(format!(
+                "knowledge generation conflict: expected {generation} but store is at 0"
+            )),
+            "{d}"
+        );
+    }
+
+    // An unregistered repository is still not_registered, never empty success.
+    let d = kerr(
+        &h,
+        &mut s,
+        6,
+        "riltra_knowledge_search",
+        &json!({"repo": "nope", "query": "x", "generation": 5}),
+        &[
+            "knowledge",
+            "search",
+            "--repo",
+            "nope",
+            "--query",
+            "x",
+            "--generation",
+            "5",
+        ],
+    );
+    assert_eq!(d["kind"], "not_registered", "{d}");
+
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
+    assert!(!db.exists(), "no knowledge database may be created");
+    assert_eq!(
+        listing(&h),
+        before,
+        "missing-store reads must create nothing"
+    );
+}
+
+#[test]
 fn t3_knowledge_show_matches_cli_revisions_lifecycle_and_evidence() {
     let h = home("cp5-show");
     let r = home("cp5-show-repo");
@@ -2915,6 +3020,78 @@ fn t3_knowledge_show_matches_cli_revisions_lifecycle_and_evidence() {
         ],
     );
 
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn r2_knowledge_show_snapshot_on_v1_and_under_concurrent_writes() {
+    // Foundation v1 store: latest and historical shows are unchanged and the
+    // read never migrates.
+    let h1 = home("cp5-r2-v1");
+    let r1 = home("cp5-r2-v1-repo");
+    init_repo(&h1, &r1, "v1repo");
+    kcreate(&h1, "v1repo", K_D1);
+    let db1 = knowledge_db(&h1, "v1repo");
+    assert_eq!(user_version(&db1), 1);
+    let mut s = ready(&h1);
+    for (id, mcp, cli) in [
+        (2, json!({"repo": "v1repo", "id": "d1"}), vec!["--id", "d1"]),
+        (
+            3,
+            json!({"repo": "v1repo", "id": "d1", "revision": 1}),
+            vec!["--id", "d1", "--revision", "1"],
+        ),
+    ] {
+        let got = kjson(&mut s, id, "riltra_knowledge_show", &mcp);
+        assert_eq!(got["generation"], json!(1), "{got}");
+        let mut args = vec!["knowledge", "show", "--repo", "v1repo"];
+        args.extend(cli);
+        kparity(&h1, &got, &args);
+    }
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
+    assert_eq!(user_version(&db1), 1, "v1 show must not migrate");
+
+    // Concurrent writer: with only d1 and only updates, the generation equals
+    // d1's revision after every commit. Every envelope must therefore pair a
+    // revision with the generation from the same snapshot.
+    let h = home("cp5-r2-live");
+    let r = home("cp5-r2-live-repo");
+    init_repo(&h, &r, "krepo");
+    kcreate(&h, "krepo", K_D1);
+    let mut s = ready(&h);
+    let writer = {
+        let h = h.clone();
+        std::thread::spawn(move || {
+            for revision in 1..=8 {
+                kupdate(
+                    &h,
+                    "krepo",
+                    "d1",
+                    revision,
+                    &format!(
+                        r#"{{"title":"Live {revision}","body":"body {revision}","status":"active","author":"a","evidence":[]}}"#
+                    ),
+                );
+            }
+        })
+    };
+    for id in 10..18 {
+        let got = kjson(
+            &mut s,
+            id,
+            "riltra_knowledge_show",
+            &json!({"repo": "krepo", "id": "d1"}),
+        );
+        assert_eq!(got["result"]["id"], json!("d1"), "{got}");
+        assert_eq!(
+            got["generation"].as_u64(),
+            got["result"]["revision"].as_u64(),
+            "record and envelope must come from one snapshot: {got}"
+        );
+    }
+    writer.join().unwrap();
     let (code, _) = s.finish();
     assert_eq!(code, 0);
 }

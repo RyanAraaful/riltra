@@ -1045,7 +1045,11 @@ fn knowledge_search_doc(input: &KnowledgeSearchInput) -> CallToolResult {
     let db = knowledge_store::knowledge_db_path(&home, &input.repo);
     match knowledge_store_absent(&db) {
         // Genuinely absent store: empty success, and no database is created.
+        // A nonzero generation expectation still conflicts against generation 0.
         Ok(true) => {
+            if let Err(e) = knowledge_store::check_missing_store_generation(input.generation) {
+                return knowledge_query_error(e);
+            }
             return doc(&response::knowledge_envelope(
                 &input.repo,
                 0,
@@ -1058,7 +1062,7 @@ fn knowledge_search_doc(input: &KnowledgeSearchInput) -> CallToolResult {
                     &canon,
                 ),
                 Some(response::pagination_json(limit, offset, 0, false, None)),
-            ))
+            ));
         }
         Ok(false) => {}
         Err(e) => return tool_error("store_error", &e),
@@ -1113,14 +1117,11 @@ fn knowledge_show_doc(input: &KnowledgeShowInput) -> CallToolResult {
         Ok(conn) => conn,
         Err(e) => return knowledge_query_error(e),
     };
-    let record = match knowledge_store::show_record(&conn, &input.id, input.revision) {
-        Ok(record) => record,
-        Err(e) => return knowledge_query_error(e),
-    };
-    let generation = match knowledge_store::read_generation(&conn) {
-        Ok(generation) => generation,
-        Err(e) => return knowledge_query_error(e),
-    };
+    let (record, generation) =
+        match knowledge_store::show_snapshot(&conn, &input.id, input.revision) {
+            Ok(pair) => pair,
+            Err(e) => return knowledge_query_error(e),
+        };
     doc(&response::knowledge_envelope(
         &input.repo,
         generation,

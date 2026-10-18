@@ -460,6 +460,77 @@ fn missing_store_search_empty_without_creating_db() {
 }
 
 #[test]
+fn missing_store_search_generation_guard_matches_contract() {
+    let h = home("nostore-gen");
+    let dir = mkrepo(&h, "krepo");
+    init(&h, &dir, "krepo");
+    let db = h.join("knowledge").join("krepo.db");
+
+    // Omitted or zero generation: generation-0 empty success, no store created.
+    for extra in [Vec::new(), vec!["--generation", "0"]] {
+        let mut args = vec![
+            "knowledge",
+            "search",
+            "--repo",
+            "krepo",
+            "--query",
+            "anything",
+        ];
+        args.extend(extra);
+        let (code, out, err) = run(&h, &args);
+        assert_eq!(code, 0, "{args:?}: {err}");
+        assert!(out.contains("\"generation\":0"), "{out}");
+        assert!(out.contains("\"hits\":[]"), "{out}");
+        assert!(!db.exists(), "{args:?} must not create a store");
+    }
+
+    // Any nonzero generation conflicts against the absent store's generation 0.
+    for generation in ["1", "7"] {
+        let (code, out, err) = run(
+            &h,
+            &[
+                "knowledge",
+                "search",
+                "--repo",
+                "krepo",
+                "--query",
+                "anything",
+                "--generation",
+                generation,
+            ],
+        );
+        assert_eq!(code, 3, "generation {generation}: {err}");
+        assert!(out.is_empty(), "conflict emitted a document: {out}");
+        assert_eq!(
+            err,
+            format!(
+                "error: knowledge generation conflict: expected {generation} but store is at 0\n"
+            ),
+            "generation {generation}"
+        );
+        assert!(!db.exists(), "conflict must not create a store");
+    }
+
+    // An unregistered repository is not an empty store.
+    let (code, out, err) = run(
+        &h,
+        &[
+            "knowledge",
+            "search",
+            "--repo",
+            "nope",
+            "--query",
+            "anything",
+            "--generation",
+            "5",
+        ],
+    );
+    assert_ne!(code, 0);
+    assert!(out.is_empty());
+    assert!(err.contains("unknown repository"), "{err}");
+}
+
+#[test]
 fn corrupt_store_fails_closed_without_delete_or_recreate() {
     let h = home("corrupt");
     let dir = mkrepo(&h, "krepo");

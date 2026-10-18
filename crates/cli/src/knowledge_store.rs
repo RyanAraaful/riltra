@@ -662,6 +662,17 @@ fn now_unix() -> i64 {
         .unwrap_or(0)
 }
 
+/// Generation guard for a genuinely absent store: the empty store is
+/// generation 0, so only an omitted or zero expectation may succeed.
+pub fn check_missing_store_generation(generation: Option<u64>) -> Result<(), String> {
+    match generation {
+        Some(expected) if expected != 0 => Err(format!(
+            "knowledge generation conflict: expected {expected} but store is at 0"
+        )),
+        _ => Ok(()),
+    }
+}
+
 /// Current monotonic knowledge generation (bumped by every mutation).
 pub fn read_generation(conn: &Connection) -> Result<u64, String> {
     let raw: String = conn
@@ -1504,6 +1515,61 @@ pub fn show_record(
     record.evidence = read_evidence(conn, id, rev_i64)?;
     load_record_lifecycle(conn, lifecycle_present(conn)?, &mut record)?;
     Ok(record)
+}
+
+/// Read one revision and the store generation from one SQLite read
+/// transaction: both describe the same committed snapshot even while another
+/// connection commits. `probe` is a test-only seam between the two reads;
+/// production callers use [`show_snapshot`], which passes none.
+fn show_snapshot_inner(
+    conn: &Connection,
+    id: &str,
+    revision: Option<u64>,
+    probe: Option<&dyn Fn()>,
+) -> Result<(RecordVersion, u64), String> {
+    conn.execute_batch("BEGIN")
+        .map_err(|e| format!("cannot begin knowledge read: {e}"))?;
+    let pair = (|| {
+        let record = show_record(conn, id, revision)?;
+        if let Some(run) = probe {
+            run();
+        }
+        let generation = read_generation(conn)?;
+        Ok((record, generation))
+    })();
+    match pair {
+        Ok(pair) => {
+            conn.execute_batch("COMMIT")
+                .map_err(|e| format!("cannot commit knowledge read: {e}"))?;
+            Ok(pair)
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(e)
+        }
+    }
+}
+
+/// Read one revision (`None` = current head) and the current generation from
+/// one read snapshot. Never creates or mutates anything.
+pub fn show_snapshot(
+    conn: &Connection,
+    id: &str,
+    revision: Option<u64>,
+) -> Result<(RecordVersion, u64), String> {
+    show_snapshot_inner(conn, id, revision, None)
+}
+
+/// Test-only probe invoked between the record read and the generation read,
+/// so a test can commit from another connection exactly on that boundary.
+#[cfg(test)]
+pub(crate) fn show_snapshot_with_probe(
+    conn: &Connection,
+    id: &str,
+    revision: Option<u64>,
+    probe: Option<&dyn Fn()>,
+) -> Result<(RecordVersion, u64), String> {
+    show_snapshot_inner(conn, id, revision, probe)
 }
 
 /// Whether this store carries the v2 lifecycle tables. Reads check the table
@@ -5714,6 +5780,88 @@ mod tests {
         );
         // The concurrent commit itself is intact afterwards.
         assert_eq!(show_record(&conn, "d1", None).unwrap().revision, 2);
+        conn.close().unwrap();
+    }
+
+    #[test]
+    fn knowledge_show_snapshot_reads_record_and_generation_together() {
+        use std::sync::{Arc, Barrier};
+        let (home, repo) = setup("show-snapshot");
+        let mut conn = open_rw(&home, &repo);
+        create_record(&mut conn, &new_record("d1", "snap show")).unwrap();
+        conn.close().unwrap();
+
+        // Why the helper exists: two separate implicit reads can straddle a
+        // commit, pairing revision 1 with generation 2.
+        let conn = open_knowledge_at(&home, &repo, false).unwrap();
+        let record = show_record(&conn, "d1", None).unwrap();
+        let mut writer_conn = open_knowledge_at(&home, &repo, true).unwrap();
+        update_record(
+            &mut writer_conn,
+            "d1",
+            1,
+            &update_to("writer one", "active"),
+        )
+        .unwrap();
+        let generation = read_generation(&conn).unwrap();
+        assert_eq!(
+            (record.revision, generation),
+            (1, 2),
+            "separate reads can describe different commits"
+        );
+
+        // The helper: a writer commits exactly between the record read and the
+        // generation read; both still come from the pre-commit snapshot.
+        // Barriers order the threads deterministically, no sleeps.
+        let barrier = Arc::new(Barrier::new(2));
+        let mut writer_conn = open_knowledge_at(&home, &repo, true).unwrap();
+        let parked = barrier.clone();
+        let released = barrier.clone();
+        let writer = std::thread::spawn(move || {
+            parked.wait();
+            update_record(
+                &mut writer_conn,
+                "d1",
+                2,
+                &update_to("writer two", "active"),
+            )
+            .unwrap();
+            writer_conn.close().unwrap();
+            released.wait();
+        });
+        let (snapshot_record, snapshot_generation) = show_snapshot_with_probe(
+            &conn,
+            "d1",
+            None,
+            Some(&|| {
+                barrier.wait();
+                barrier.wait();
+            }),
+        )
+        .unwrap();
+        writer.join().unwrap();
+
+        assert_eq!(snapshot_record.revision, 2);
+        assert_eq!(
+            snapshot_generation, 2,
+            "record and envelope must describe one snapshot"
+        );
+        // The concurrent commit landed intact after the read transaction.
+        assert_eq!(show_record(&conn, "d1", None).unwrap().revision, 3);
+        assert_eq!(read_generation(&conn).unwrap(), 3);
+
+        // Historical selection still works, and quiescent reads change nothing.
+        let version: u32 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        let (old, generation) = show_snapshot(&conn, "d1", Some(1)).unwrap();
+        assert_eq!((old.revision, generation), (1, 3));
+        let after_version: u32 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(after_version, version);
+        assert_eq!(read_generation(&conn).unwrap(), 3);
+
         conn.close().unwrap();
     }
 

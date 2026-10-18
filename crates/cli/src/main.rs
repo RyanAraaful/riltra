@@ -1831,15 +1831,8 @@ fn knowledge_show(
         Ok(v) => v,
         Err(code) => return code,
     };
-    let record = match knowledge_store::show_record(&conn, id, revision) {
-        Ok(r) => r,
-        Err(e) => {
-            err.push_str(&format!("error: {e}\n"));
-            return 3;
-        }
-    };
-    let generation = match knowledge_store::read_generation(&conn) {
-        Ok(g) => g,
+    let (record, generation) = match knowledge_store::show_snapshot(&conn, id, revision) {
+        Ok(pair) => pair,
         Err(e) => {
             err.push_str(&format!("error: {e}\n"));
             return 3;
@@ -2012,7 +2005,12 @@ fn knowledge_search(
     let db = knowledge_store::knowledge_db_path(&paths::config_dir(), repo);
     match knowledge_store_absent(&db) {
         // Genuinely absent store: empty success, and no database is created.
+        // A nonzero generation expectation still conflicts against generation 0.
         Ok(true) => {
+            if let Err(e) = knowledge_store::check_missing_store_generation(generation) {
+                err.push_str(&format!("error: {e}\n"));
+                return 3;
+            }
             let result = response::knowledge_search_result_json(
                 query,
                 kind,
