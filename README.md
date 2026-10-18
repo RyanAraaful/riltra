@@ -113,8 +113,8 @@ stored index; the roadmap is about going further:
 
 Riltra is in early, pre-release development. Continuous integration runs format,
 compile, lint, and test checks on Windows, Linux, and macOS for every change.
-See [docs/m2-validation.md](docs/m2-validation.md) for the latest verified
-capabilities and their evidence.
+See [docs/m7-validation.md](docs/m7-validation.md) for the latest verified
+capabilities, limits, and their evidence.
 
 ## Contributing
 

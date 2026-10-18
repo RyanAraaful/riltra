@@ -8,12 +8,15 @@
 // errors so scripts stay machine-readable.
 
 mod args;
+mod backup;
 mod doctor;
 mod edges;
 mod git;
 mod ignore;
 mod index;
 mod json;
+mod knowledge;
+mod knowledge_store;
 mod lsp;
 mod paths;
 mod registry;
@@ -27,10 +30,12 @@ mod syntax;
 #[cfg(test)]
 mod testutil;
 
+use std::io::Read;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use args::Command;
+use serde::de::{Deserialize, Deserializer, MapAccess, Visitor};
 
 const NAME: &str = "riltra";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -44,7 +49,7 @@ pub(crate) fn usage() -> String {
   {NAME} semantic query --repo <name> --path <rel> --line <n> --col <n> [--refs] [--lsp-server <abs-path>]
   {NAME} callers --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--limit <n>] [--offset <n>]
   {NAME} callees --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--limit <n>] [--offset <n>]
-  {NAME} trace --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--to <path:line:col>] [--depth <n>] [--limit <n>] [--offset <n>]\n  {NAME} impact --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--depth <n>] [--limit <n>] [--offset <n>]\n\nCommands:\n  status       Print deterministic bootstrap status as JSON\n  init         Register a local repository root\n  repo list    List registered repositories as JSON\n  repo status  Git/worktree fingerprint of a registered repository\n  doctor       Path-security and repository health checks as JSON\n  scan         Syntax facts (definitions/imports/calls) as JSON\n  index        Build the durable code index for a repository\n  index status Report index freshness (fresh/stale/unknown) as JSON\n  search       Search indexed symbols as JSON\n  semantic import Import a SCIP index against the live snapshot as JSON\n  semantic status Per-provider binding verification as JSON\n  semantic query Single-hop definition/reference lookup as JSON\n  callers Direct callers of the anchored identity as JSON\n  callees Direct callees of the anchored identity as JSON\n  trace Bounded plausible static paths with per-hop evidence\n  impact Conservative inbound impact with evidence and UNKNOWN default\n"
+  {NAME} trace --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--to <path:line:col>] [--depth <n>] [--limit <n>] [--offset <n>]\n  {NAME} impact --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--depth <n>] [--limit <n>] [--offset <n>]\n  {NAME} knowledge create --repo <name> --input -\n  {NAME} knowledge show --repo <name> --id <id> [--revision <n>]\n  {NAME} knowledge update --repo <name> --id <id> --expected-revision <n> --input -\n  {NAME} knowledge history --repo <name> --id <id> [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge search --repo <name> --query <text> [--kind <kind>] [--include-archived] [--include-superseded] [--include-retracted] [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge link --repo <name> --input -\n  {NAME} knowledge unlink --repo <name> --relation <id> --input -\n  {NAME} knowledge related --repo <name> --id <id> [--revision <n>] [--direction inbound|outbound] [--include-retracted] [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge export --repo <name> [--format jsonl|md] [--out <path>]\n  {NAME} knowledge import --repo <name> --file <path>\n  {NAME} knowledge backup --repo <name> --out <path>\n  {NAME} knowledge restore --repo <name> --file <path> [--overwrite]\n  {NAME} knowledge verify --repo <name>\n\nCommands:\n  status       Print deterministic bootstrap status as JSON\n  init         Register a local repository root\n  repo list    List registered repositories as JSON\n  repo status  Git/worktree fingerprint of a registered repository\n  doctor       Path-security and repository health checks as JSON\n  scan         Syntax facts (definitions/imports/calls) as JSON\n  index        Build the durable code index for a repository\n  index status Report index freshness (fresh/stale/unknown) as JSON\n  search       Search indexed symbols as JSON\n  semantic import Import a SCIP index against the live snapshot as JSON\n  semantic status Per-provider binding verification as JSON\n  semantic query Single-hop definition/reference lookup as JSON\n  callers Direct callers of the anchored identity as JSON\n  callees Direct callees of the anchored identity as JSON\n  trace Bounded plausible static paths with per-hop evidence\n  impact Conservative inbound impact with evidence and UNKNOWN default\n"
     )
 }
 
@@ -673,6 +678,7 @@ fn dispatch(cmd: Command, out: &mut String, err: &mut String) -> i32 {
         Command::Edge { op } => cmd_edge(op, out, err),
         Command::Trace(args) => cmd_trace(args, out, err),
         Command::Impact(args) => cmd_graph(args, out, err, true),
+        Command::Knowledge { op } => cmd_knowledge(op, out, err),
     }
 }
 
@@ -1215,6 +1221,1402 @@ fn run(args: &[String], out: &mut String, err: &mut String) -> i32 {
         }
         Ok(cmd) => dispatch(cmd, out, err),
     }
+}
+
+// ---------------------------------------------------------------------------
+// M7 knowledge CLI: thin dispatch over the Task 1-6 store/model functions.
+// Exit codes: 0 success (including empty search), 2 invalid arguments/input,
+// 3 repository/storage errors, missing IDs, revision/generation conflicts.
+// ---------------------------------------------------------------------------
+
+fn cmd_knowledge(op: args::KnowledgeOp, out: &mut String, err: &mut String) -> i32 {
+    match op {
+        args::KnowledgeOp::Create { repo, input } => knowledge_create(&repo, &input, out, err),
+        args::KnowledgeOp::Show { repo, id, revision } => {
+            knowledge_show(&repo, &id, revision.as_deref(), out, err)
+        }
+        args::KnowledgeOp::Update {
+            repo,
+            id,
+            expected_revision,
+            input,
+        } => knowledge_update(&repo, &id, &expected_revision, &input, out, err),
+        args::KnowledgeOp::History {
+            repo,
+            id,
+            limit,
+            offset,
+            generation,
+        } => knowledge_history(
+            &repo,
+            &id,
+            limit.as_deref(),
+            offset.as_deref(),
+            generation.as_deref(),
+            out,
+            err,
+        ),
+        args::KnowledgeOp::Search {
+            repo,
+            query,
+            kind,
+            include_archived,
+            include_superseded,
+            include_retracted,
+            limit,
+            offset,
+            generation,
+        } => knowledge_search(
+            &repo,
+            &query,
+            kind.as_deref(),
+            include_archived,
+            include_superseded,
+            include_retracted,
+            limit.as_deref(),
+            offset.as_deref(),
+            generation.as_deref(),
+            out,
+            err,
+        ),
+        args::KnowledgeOp::Link { repo, input } => knowledge_link(&repo, &input, out, err),
+        args::KnowledgeOp::Unlink {
+            repo,
+            relation,
+            input,
+        } => knowledge_unlink(&repo, &relation, &input, out, err),
+        args::KnowledgeOp::Export {
+            repo,
+            format,
+            out: out_path,
+        } => knowledge_export(&repo, format.as_deref(), out_path.as_deref(), out, err),
+        args::KnowledgeOp::Import { repo, file } => knowledge_import(&repo, &file, out, err),
+        args::KnowledgeOp::Backup {
+            repo,
+            out: out_path,
+        } => knowledge_backup(&repo, &out_path, out, err),
+        args::KnowledgeOp::Restore {
+            repo,
+            file,
+            overwrite,
+        } => knowledge_restore(&repo, &file, overwrite, out, err),
+        args::KnowledgeOp::Verify { repo } => knowledge_verify(&repo, out, err),
+        args::KnowledgeOp::Related {
+            repo,
+            id,
+            revision,
+            direction,
+            include_retracted,
+            limit,
+            offset,
+            generation,
+        } => knowledge_related(
+            &repo,
+            &id,
+            revision.as_deref(),
+            &direction,
+            include_retracted,
+            limit.as_deref(),
+            offset.as_deref(),
+            generation.as_deref(),
+            out,
+            err,
+        ),
+    }
+}
+
+/// Load the registry entry and canonical root for `--repo`, returning a
+/// `RepoEntry` usable by `open_knowledge`.
+fn knowledge_repo(name: &str, err: &mut String) -> Result<(String, registry::RepoEntry), i32> {
+    let (root, _) = resolve_recorded_root(name, err)?;
+    Ok((
+        root.clone(),
+        registry::RepoEntry {
+            name: name.to_string(),
+            root,
+            added_unix: 0,
+        },
+    ))
+}
+
+/// Open the knowledge store. `create=true` is used only by explicit
+/// mutations; reads never create a database.
+fn knowledge_open(
+    name: &str,
+    create: bool,
+    err: &mut String,
+) -> Result<(String, rusqlite::Connection), i32> {
+    let (root, entry) = knowledge_repo(name, err)?;
+    let conn = knowledge_store::open_knowledge(&entry, create).map_err(|e| {
+        err.push_str(&format!("error: {e}\n"));
+        3
+    })?;
+    Ok((root, conn))
+}
+
+/// Whether the knowledge store database is *genuinely* absent for a read.
+/// A missing path yields `Ok(true)`, which read commands answer with an empty
+/// result and no file creation. Any other state — symlink (dangling or live,
+/// both an escape), directory, fifo, or an uninspectable path — is an error so
+/// a hostile or corrupt path fails closed instead of reading as empty.
+fn knowledge_store_absent(db: &Path) -> Result<bool, String> {
+    match std::fs::symlink_metadata(db) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(e) => Err(format!(
+            "cannot inspect knowledge store '{}': {e}",
+            db.display()
+        )),
+        Ok(md) if md.file_type().is_symlink() => Err(format!(
+            "knowledge store path escapes via link: '{}'",
+            db.display()
+        )),
+        Ok(md) if md.is_file() => Ok(false),
+        Ok(_) => Err(format!(
+            "knowledge store path is not a file: '{}'",
+            db.display()
+        )),
+    }
+}
+
+/// Read strict mutation JSON from stdin (`--input -`). Only `-` is supported.
+///
+/// The read is bounded to [`knowledge::MAX_MUTATION_JSON_BYTES`] (1 MiB) plus
+/// one detection byte: input past that limit is rejected without buffering the
+/// whole oversized stream.
+fn knowledge_input(flag: &str) -> Result<Vec<u8>, String> {
+    if flag != "-" {
+        return Err(format!(
+            "invalid --input value: '{flag}' (only '-' is supported)"
+        ));
+    }
+    let cap = knowledge::MAX_MUTATION_JSON_BYTES;
+    let mut buf = Vec::new();
+    std::io::stdin()
+        .lock()
+        .take(cap as u64 + 1)
+        .read_to_end(&mut buf)
+        .map_err(|e| format!("cannot read stdin: {e}"))?;
+    if buf.len() > cap {
+        return Err(format!(
+            "mutation input too large: exceeds the {cap} byte ({} MiB) limit",
+            cap / (1024 * 1024)
+        ));
+    }
+    Ok(buf)
+}
+
+fn knowledge_page_args(
+    limit: Option<&str>,
+    offset: Option<&str>,
+    generation: Option<&str>,
+    err: &mut String,
+) -> Result<(usize, usize, Option<u64>), i32> {
+    let limit = match parse_count(limit, knowledge::SEARCH_LIMIT_DEFAULT, "limit") {
+        Ok(n) => n,
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            return Err(2);
+        }
+    };
+    if limit == 0 || limit > knowledge::SEARCH_LIMIT_MAX {
+        err.push_str(&format!(
+            "error: --limit must be between 1 and {}\n",
+            knowledge::SEARCH_LIMIT_MAX
+        ));
+        return Err(2);
+    }
+    let offset = match parse_count(offset, 0, "offset") {
+        Ok(n) => n,
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            return Err(2);
+        }
+    };
+    let generation = match generation {
+        None => None,
+        Some(text) => match text.parse::<u64>() {
+            Ok(n) => Some(n),
+            Err(_) => {
+                err.push_str(&format!("error: invalid --generation value: '{text}'\n"));
+                return Err(2);
+            }
+        },
+    };
+    Ok((limit, offset, generation))
+}
+
+fn parse_optional_u64(
+    value: Option<&str>,
+    flag: &str,
+    err: &mut String,
+) -> Result<Option<u64>, i32> {
+    match value {
+        None => Ok(None),
+        Some(text) => match text.parse::<u64>() {
+            Ok(n) => Ok(Some(n)),
+            Err(_) => {
+                err.push_str(&format!("error: invalid --{flag} value: '{text}'\n"));
+                Err(2)
+            }
+        },
+    }
+}
+
+/// A write failure is a storage error (exit 3); an evidence-capture failure
+/// and an invalid lifecycle transition (self-supersession, cycle, retracted
+/// endpoint, double retraction) are input errors (exit 2). Unknown endpoints
+/// and targets stay in the storage/conflict class (exit 3).
+fn knowledge_write_error(e: &str) -> i32 {
+    if e.starts_with("cannot capture evidence") || e.starts_with("invalid lifecycle transition") {
+        2
+    } else {
+        3
+    }
+}
+
+// --- strict JSON for link/unlink inputs ------------------------------------
+
+/// A JSON object that preserves every key occurrence, so duplicate and
+/// unknown keys can be rejected (a plain `serde_json::Value` map collapses
+/// duplicates to the last one).
+struct RawObject(Vec<(String, serde_json::Value)>);
+
+impl<'de> Deserialize<'de> for RawObject {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct RawVisitor;
+        impl<'de> Visitor<'de> for RawVisitor {
+            type Value = RawObject;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a JSON object")
+            }
+            fn visit_map<A>(self, mut map: A) -> Result<RawObject, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut fields = Vec::new();
+                while let Some(key) = map.next_key::<String>()? {
+                    let value = map.next_value::<serde_json::Value>()?;
+                    fields.push((key, value));
+                }
+                Ok(RawObject(fields))
+            }
+        }
+        deserializer.deserialize_map(RawVisitor)
+    }
+}
+
+pub(crate) fn strict_object(
+    bytes: &[u8],
+    known: &[&str],
+) -> Result<Vec<(String, serde_json::Value)>, String> {
+    if bytes.len() > knowledge::MAX_MUTATION_JSON_BYTES {
+        return Err(format!(
+            "mutation input too large: {} bytes, at most {} allowed",
+            bytes.len(),
+            knowledge::MAX_MUTATION_JSON_BYTES
+        ));
+    }
+    let parsed: RawObject =
+        serde_json::from_slice(bytes).map_err(|e| format!("invalid JSON: {e}"))?;
+    let mut seen: Vec<String> = Vec::new();
+    for (key, _) in &parsed.0 {
+        if seen.iter().any(|k| k == key) {
+            return Err(format!("duplicate field `{key}`"));
+        }
+        if !known.contains(&key.as_str()) {
+            return Err(format!("unknown field `{key}`"));
+        }
+        seen.push(key.clone());
+    }
+    Ok(parsed.0)
+}
+
+fn field_value<'a>(
+    fields: &'a [(String, serde_json::Value)],
+    key: &str,
+) -> Result<&'a serde_json::Value, String> {
+    fields
+        .iter()
+        .find(|(k, _)| k == key)
+        .map(|(_, v)| v)
+        .ok_or_else(|| format!("missing required field `{key}`"))
+}
+
+pub(crate) fn field_str(
+    fields: &[(String, serde_json::Value)],
+    key: &str,
+) -> Result<String, String> {
+    match field_value(fields, key)? {
+        serde_json::Value::String(s) => Ok(s.clone()),
+        _ => Err(format!("field `{key}` must be a string")),
+    }
+}
+
+pub(crate) fn field_u64(fields: &[(String, serde_json::Value)], key: &str) -> Result<u64, String> {
+    match field_value(fields, key)? {
+        serde_json::Value::Number(n) => n
+            .as_u64()
+            .ok_or_else(|| format!("field `{key}` must be a non-negative integer")),
+        _ => Err(format!("field `{key}` must be a non-negative integer")),
+    }
+}
+
+struct LinkInput {
+    relation_id: String,
+    src_id: String,
+    src_revision: u64,
+    dst_id: String,
+    dst_revision: u64,
+    kind: String,
+    author: String,
+    rationale: String,
+    confirm: bool,
+}
+
+fn parse_link_input(bytes: &[u8]) -> Result<LinkInput, String> {
+    let fields = strict_object(
+        bytes,
+        &[
+            "relation_id",
+            "src_id",
+            "src_revision",
+            "dst_id",
+            "dst_revision",
+            "kind",
+            "author",
+            "rationale",
+            "confirm_state",
+        ],
+    )?;
+    // The only expressible confirmation request is `"confirmed"`; anything
+    // else is rejected exactly like an unknown value.
+    let confirm = match fields.iter().find(|(k, _)| k == "confirm_state") {
+        None => false,
+        Some((_, serde_json::Value::String(s))) if s == "confirmed" => true,
+        Some(_) => return Err("field `confirm_state` must be the string \"confirmed\"".to_string()),
+    };
+    let input = LinkInput {
+        relation_id: field_str(&fields, "relation_id")?,
+        src_id: field_str(&fields, "src_id")?,
+        src_revision: field_u64(&fields, "src_revision")?,
+        dst_id: field_str(&fields, "dst_id")?,
+        dst_revision: field_u64(&fields, "dst_revision")?,
+        kind: field_str(&fields, "kind")?,
+        author: field_str(&fields, "author")?,
+        rationale: field_str(&fields, "rationale")?,
+        confirm,
+    };
+    knowledge::validate_relation_id(&input.relation_id)?;
+    knowledge::validate_relation_kind(&input.kind)?;
+    knowledge::validate_id(&input.src_id)?;
+    knowledge::validate_id(&input.dst_id)?;
+    if input.author.is_empty() || input.author.len() > knowledge::MAX_AUTHOR_BYTES {
+        return Err(format!(
+            "field `author` must be 1..={} bytes",
+            knowledge::MAX_AUTHOR_BYTES
+        ));
+    }
+    if input.rationale.is_empty() || input.rationale.len() > knowledge::MAX_RATIONALE_BYTES {
+        return Err(format!(
+            "field `rationale` must be 1..={} bytes",
+            knowledge::MAX_RATIONALE_BYTES
+        ));
+    }
+    Ok(input)
+}
+
+struct UnlinkInput {
+    author: String,
+    reason: String,
+}
+
+fn parse_unlink_input(bytes: &[u8]) -> Result<UnlinkInput, String> {
+    let fields = strict_object(bytes, &["author", "reason"])?;
+    let input = UnlinkInput {
+        author: field_str(&fields, "author")?,
+        reason: field_str(&fields, "reason")?,
+    };
+    if input.author.is_empty() || input.author.len() > knowledge::MAX_AUTHOR_BYTES {
+        return Err(format!(
+            "field `author` must be 1..={} bytes",
+            knowledge::MAX_AUTHOR_BYTES
+        ));
+    }
+    if input.reason.is_empty() || input.reason.len() > knowledge::MAX_RATIONALE_BYTES {
+        return Err(format!(
+            "field `reason` must be 1..={} bytes",
+            knowledge::MAX_RATIONALE_BYTES
+        ));
+    }
+    Ok(input)
+}
+
+// --- deterministic JSON emission -------------------------------------------
+
+fn opt_str(value: &Option<String>) -> String {
+    match value {
+        Some(s) => format!("\"{}\"", json::escape(s)),
+        None => "null".to_string(),
+    }
+}
+
+fn opt_i64(value: Option<i64>) -> String {
+    match value {
+        Some(n) => n.to_string(),
+        None => "null".to_string(),
+    }
+}
+
+fn opt_u64(value: Option<u64>) -> String {
+    match value {
+        Some(n) => n.to_string(),
+        None => "null".to_string(),
+    }
+}
+
+fn opt_usize(value: Option<usize>) -> String {
+    match value {
+        Some(n) => n.to_string(),
+        None => "null".to_string(),
+    }
+}
+
+fn measurement_json(m: &knowledge::BenchmarkData) -> String {
+    let metrics: Vec<String> = m
+        .metrics
+        .iter()
+        .map(|x| {
+            format!(
+                "{{\"name\":\"{}\",\"value\":{},\"unit\":\"{}\"}}",
+                json::escape(&x.name),
+                x.value,
+                json::escape(&x.unit)
+            )
+        })
+        .collect();
+    format!(
+        "{{\"method\":\"{}\",\"environment\":\"{}\",\"sample_count\":{},\"metrics\":[{}]}}",
+        json::escape(&m.method),
+        json::escape(&m.environment),
+        m.sample_count,
+        metrics.join(",")
+    )
+}
+
+fn freshness_json(f: &knowledge::EvidenceFreshness) -> String {
+    match f {
+        knowledge::EvidenceFreshness::Fresh => "{\"status\":\"fresh\"}".to_string(),
+        knowledge::EvidenceFreshness::Stale { observed_digest } => format!(
+            "{{\"status\":\"stale\",\"observed_digest\":\"{}\"}}",
+            json::escape(observed_digest)
+        ),
+        knowledge::EvidenceFreshness::Unresolved { reason } => {
+            format!(
+                "{{\"status\":\"unresolved\",\"reason\":\"{}\"}}",
+                json::escape(reason)
+            )
+        }
+    }
+}
+
+fn evidence_json(item: &knowledge::CapturedEvidence, root: &Path) -> String {
+    let freshness = freshness_json(&knowledge_store::evidence_freshness(item, root));
+    format!(
+        "{{\"path\":\"{}\",\"byte_start\":{},\"byte_end\":{},\"digest\":\"{}\",\"git_head\":{},\"git_branch\":{},\"freshness\":{}}}",
+        json::escape(&item.path),
+        opt_i64(item.byte_start),
+        opt_i64(item.byte_end),
+        json::escape(&item.digest),
+        opt_str(&item.git_head),
+        opt_str(&item.git_branch),
+        freshness
+    )
+}
+
+/// One revision as JSON. Evidence is sampled against `root`; freshness is
+/// reported, never used to promote the claim above `Unverified`.
+fn record_json(record: &knowledge::RecordVersion, root: &Path) -> String {
+    let evidence: Vec<String> = record
+        .evidence
+        .iter()
+        .map(|item| evidence_json(item, root))
+        .collect();
+    let measurement = match &record.measurement {
+        Some(m) => measurement_json(m),
+        None => "null".to_string(),
+    };
+    // Full-stage lifecycle fields appear only when the revision actually
+    // carries them, so Foundation output on v1 stores stays byte-identical.
+    let mut lifecycle = String::new();
+    if let Some(target) = &record.superseded_by {
+        lifecycle.push_str(&format!(
+            ",\"superseded_by\":{{\"id\":\"{}\",\"revision\":{}}}",
+            json::escape(&target.id),
+            target.revision
+        ));
+    }
+    if let Some(reason) = &record.retracted_reason {
+        lifecycle.push_str(&format!(
+            ",\"retracted_reason\":\"{}\"",
+            json::escape(reason)
+        ));
+    }
+    if let Some(author) = &record.retracted_author {
+        lifecycle.push_str(&format!(
+            ",\"retracted_author\":\"{}\"",
+            json::escape(author)
+        ));
+    }
+    if let Some(state) = &record.confirm_state {
+        lifecycle.push_str(&format!(",\"confirm_state\":\"{}\"", json::escape(state)));
+    }
+    format!(
+        "{{\"id\":\"{}\",\"revision\":{},\"kind\":\"{}\",\"title\":\"{}\",\"body\":\"{}\",\"status\":\"{}\",\"author\":\"{}\",\"created_unix\":{},\"measurement\":{},\"evidence\":[{}],\"verification\":\"{}\",\"support\":\"{}\"{lifecycle}}}",
+        json::escape(&record.id),
+        record.revision,
+        json::escape(&record.kind),
+        json::escape(&record.title),
+        json::escape(&record.body),
+        json::escape(&record.status),
+        json::escape(&record.author),
+        record.created_unix,
+        measurement,
+        evidence.join(","),
+        knowledge::VERIFICATION_UNVERIFIED,
+        knowledge::evidence_support(record.evidence.len())
+    )
+}
+
+fn relation_json(r: &knowledge_store::RelationView) -> String {
+    // The confirmation state appears only once Full-stage data exists (v2
+    // stores); v1 output stays byte-identical.
+    let mut confirm = String::new();
+    if let Some(state) = &r.confirm_state {
+        confirm.push_str(&format!(",\"confirm_state\":\"{}\"", json::escape(state)));
+    }
+    format!(
+        "{{\"relation_id\":\"{}\",\"src_id\":\"{}\",\"src_revision\":{},\"dst_id\":\"{}\",\"dst_revision\":{},\"kind\":\"{}\",\"author\":\"{}\",\"rationale\":\"{}\",\"created_unix\":{},\"retracted\":{},\"retraction_author\":{},\"retraction_reason\":{}{confirm}}}",
+        json::escape(&r.relation_id),
+        json::escape(&r.src_id),
+        r.src_revision,
+        json::escape(&r.dst_id),
+        r.dst_revision,
+        json::escape(&r.kind),
+        json::escape(&r.author),
+        json::escape(&r.rationale),
+        r.created_unix,
+        r.retracted,
+        opt_str(&r.retraction_author),
+        opt_str(&r.retraction_reason)
+    )
+}
+
+fn pagination_json(
+    limit: usize,
+    offset: usize,
+    total: usize,
+    truncated: bool,
+    next_offset: Option<usize>,
+) -> String {
+    format!(
+        "{{\"limit\":{},\"offset\":{},\"total\":{},\"truncated\":{},\"next_offset\":{}}}",
+        limit,
+        offset,
+        total,
+        truncated,
+        opt_usize(next_offset)
+    )
+}
+
+/// `knowledge export`: canonical JSONL straight to stdout, or a Markdown
+/// wrapper; with `--out` the file is written and the envelope reports it. A
+/// genuinely absent store exports an empty metadata-only payload and creates
+/// nothing, exactly like the other read commands.
+fn knowledge_export(
+    repo: &str,
+    format: Option<&str>,
+    out_path: Option<&str>,
+    out: &mut String,
+    err: &mut String,
+) -> i32 {
+    let format = match format {
+        None | Some("jsonl") => knowledge_store::ExportFormat::Jsonl,
+        Some("md") => knowledge_store::ExportFormat::Markdown,
+        Some(other) => {
+            err.push_str(&format!(
+                "error: unknown export format '{other}' (jsonl or md)\n"
+            ));
+            return 2;
+        }
+    };
+    let (_root, entry) = match knowledge_repo(repo, err) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    let db = knowledge_store::knowledge_db_path(&paths::config_dir(), &entry.name);
+    let (doc, generation): (knowledge_store::ExportDocument, u64) =
+        match knowledge_store_absent(&db) {
+            Ok(true) => (knowledge_store::empty_export(&entry.name, format), 0),
+            Ok(false) => {
+                let mut conn = match knowledge_store::open_knowledge(&entry, false) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        err.push_str(&format!("error: {e}\n"));
+                        return 3;
+                    }
+                };
+                // The export reads its generation from the same snapshot as
+                // the payload, so the envelope's generation always describes
+                // the exported data.
+                let doc = match knowledge_store::export_document(&mut conn, format) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        err.push_str(&format!("error: {e}\n"));
+                        return 3;
+                    }
+                };
+                let generation = doc.generation;
+                (doc, generation)
+            }
+            Err(e) => {
+                err.push_str(&format!("error: {e}\n"));
+                return 3;
+            }
+        };
+    let Some(path) = out_path else {
+        *out = doc.text;
+        return 0;
+    };
+    if let Err(e) = std::fs::write(path, &doc.text) {
+        err.push_str(&format!("error: cannot write export file '{path}': {e}\n"));
+        return 3;
+    }
+    let format_name = match format {
+        knowledge_store::ExportFormat::Jsonl => "jsonl",
+        knowledge_store::ExportFormat::Markdown => "md",
+    };
+    let result = format!(
+        "{{\"format\":\"{format_name}\",\"path\":\"{}\",\"records\":{},\"relations\":{},\"bytes\":{}}}",
+        json::escape(path),
+        doc.records,
+        doc.relations,
+        doc.text.len()
+    );
+    *out = knowledge_envelope(&entry.name, generation, "export", &result, None);
+    0
+}
+
+/// `knowledge import`: extract and validate the payload before any store is
+/// touched, then merge under one transaction. Malformed input is a
+/// usage-class failure (2); corrupt coherence, conflicts, and storage
+/// failures fail closed with 3.
+fn knowledge_import(repo: &str, file: &str, out: &mut String, err: &mut String) -> i32 {
+    let text = match read_import_file(file) {
+        Ok(t) => t,
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            return 2;
+        }
+    };
+    let payload_text = match knowledge_store::extract_import_payload(&text) {
+        Ok(t) => t,
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            return 2;
+        }
+    };
+    let payload = match knowledge_store::parse_import_payload(&payload_text) {
+        Ok(p) => p,
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            return import_error_exit(&e);
+        }
+    };
+    let (_root, mut conn) = match knowledge_open(repo, true, err) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    let report = match knowledge_store::import_payload(&mut conn, &payload) {
+        Ok(r) => r,
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            return import_error_exit(&e);
+        }
+    };
+    let result = format!(
+        "{{\"records_inserted\":{},\"revisions_appended\":{},\"relations_inserted\":{},\"records_unchanged\":{},\"relations_unchanged\":{}}}",
+        report.records_inserted,
+        report.revisions_appended,
+        report.relations_inserted,
+        report.records_unchanged,
+        report.relations_unchanged
+    );
+    *out = knowledge_envelope(repo, report.generation, "import", &result, None);
+    0
+}
+
+/// Resolve `--repo`, refuse an absent store, and open the live read
+/// connection: the shared prologue of backup and verify, which operate on
+/// the store itself rather than treating an absent store as empty.
+fn knowledge_existing_store(
+    repo: &str,
+    err: &mut String,
+) -> Result<(String, registry::RepoEntry, rusqlite::Connection), i32> {
+    let (root, entry) = knowledge_repo(repo, err)?;
+    let db = knowledge_store::knowledge_db_path(&paths::config_dir(), &entry.name);
+    match knowledge_store_absent(&db) {
+        Ok(true) => {
+            err.push_str(&format!(
+                "error: no knowledge store for repository '{repo}'\n"
+            ));
+            return Err(3);
+        }
+        Ok(false) => {}
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            return Err(3);
+        }
+    }
+    let conn = knowledge_open(repo, false, err)?;
+    Ok((root, entry, conn.1))
+}
+
+/// `knowledge backup`: consistent snapshot of the live store plus a manifest
+/// bound to the registered repository and canonical root. Read-only against
+/// the store; the manifest describes the snapshot itself.
+fn knowledge_backup(repo: &str, out_path: &str, out: &mut String, err: &mut String) -> i32 {
+    let (root, entry, conn) = match knowledge_existing_store(repo, err) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    let base = Path::new(out_path);
+    let (manifest, generation) = match backup::backup_to(&conn, &entry, Path::new(&root), base) {
+        Ok(v) => v,
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            return 3;
+        }
+    };
+    let backup_paths = backup::backup_paths(base);
+    let result = format!(
+        "{{\"db\":\"{}\",\"manifest\":\"{}\",\"schema_version\":{},\"records\":{},\"relations\":{}}}",
+        json::escape(&backup_paths.db.to_string_lossy()),
+        json::escape(&backup_paths.manifest.to_string_lossy()),
+        manifest.schema_version,
+        manifest.records,
+        manifest.relations
+    );
+    *out = knowledge_envelope(&entry.name, generation, "backup", &result, None);
+    0
+}
+
+/// `knowledge verify`: structural verification of the live store. Every
+/// refusal carries the specific structural reason (exit 3).
+fn knowledge_verify(repo: &str, out: &mut String, err: &mut String) -> i32 {
+    let (root, entry, conn) = match knowledge_existing_store(repo, err) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    let check = match knowledge_store::verify_store(&conn, &entry, Path::new(&root)) {
+        Ok(c) => c,
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            return 3;
+        }
+    };
+    let generation = match knowledge_store::read_generation(&conn) {
+        Ok(g) => g,
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            return 3;
+        }
+    };
+    let result = format!(
+        "{{\"status\":\"ok\",\"schema_version\":{},\"records\":{},\"relations\":{}}}",
+        check.schema_version, check.records, check.relations
+    );
+    *out = knowledge_envelope(&entry.name, generation, "verify", &result, None);
+    0
+}
+
+/// `knowledge restore`: offline restore of a backup into this repository's
+/// store. Every refusal leaves the existing store untouched.
+fn knowledge_restore(
+    repo: &str,
+    file: &str,
+    overwrite: bool,
+    out: &mut String,
+    err: &mut String,
+) -> i32 {
+    let (root, entry) = match knowledge_repo(repo, err) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    match backup::restore_from(
+        &paths::config_dir(),
+        &entry,
+        Path::new(&root),
+        Path::new(file),
+        overwrite,
+    ) {
+        Ok(report) => {
+            let db = knowledge_store::knowledge_db_path(&paths::config_dir(), &entry.name);
+            let result = format!(
+                "{{\"path\":\"{}\",\"schema_version\":{},\"records\":{},\"relations\":{},\"overwrote\":{}}}",
+                json::escape(&db.to_string_lossy()),
+                report.schema_version,
+                report.records,
+                report.relations,
+                report.overwrote
+            );
+            *out = knowledge_envelope(&entry.name, report.generation, "restore", &result, None);
+            0
+        }
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            3
+        }
+    }
+}
+
+fn import_error_exit(message: &str) -> i32 {
+    if message.starts_with("invalid import payload") {
+        2
+    } else {
+        3
+    }
+}
+
+/// Bounded read of an import file: regular file only, cap enforced on the
+/// metadata first and again while reading so a growing file cannot slip past.
+fn read_import_file(file: &str) -> Result<String, String> {
+    let path = Path::new(file);
+    let meta =
+        std::fs::metadata(path).map_err(|e| format!("cannot read import file '{file}': {e}"))?;
+    if !meta.is_file() {
+        return Err(format!("import file is not a regular file: '{file}'"));
+    }
+    if meta.len() > knowledge_store::MAX_IMPORT_FILE_BYTES {
+        return Err(format!(
+            "invalid import payload: import file is too large: {} bytes, at most {} allowed",
+            meta.len(),
+            knowledge_store::MAX_IMPORT_FILE_BYTES
+        ));
+    }
+    let handle =
+        std::fs::File::open(path).map_err(|e| format!("cannot read import file '{file}': {e}"))?;
+    let mut buf = Vec::new();
+    use std::io::Read;
+    handle
+        .take(knowledge_store::MAX_IMPORT_FILE_BYTES + 1)
+        .read_to_end(&mut buf)
+        .map_err(|e| format!("cannot read import file '{file}': {e}"))?;
+    if buf.len() as u64 > knowledge_store::MAX_IMPORT_FILE_BYTES {
+        return Err(format!(
+            "invalid import payload: import file is too large: over {} bytes allowed",
+            knowledge_store::MAX_IMPORT_FILE_BYTES
+        ));
+    }
+    String::from_utf8(buf)
+        .map_err(|_| format!("invalid import payload: import file is not valid UTF-8: '{file}'"))
+}
+
+fn knowledge_envelope(
+    repo: &str,
+    generation: u64,
+    operation: &str,
+    result: &str,
+    pagination: Option<String>,
+) -> String {
+    match pagination {
+        Some(p) => format!(
+            "{{\"schema_version\":1,\"repo\":\"{}\",\"generation\":{},\"operation\":\"{}\",\"result\":{},\"pagination\":{}}}\n",
+            json::escape(repo),
+            generation,
+            operation,
+            result,
+            p
+        ),
+        None => format!(
+            "{{\"schema_version\":1,\"repo\":\"{}\",\"generation\":{},\"operation\":\"{}\",\"result\":{}}}\n",
+            json::escape(repo),
+            generation,
+            operation,
+            result
+        ),
+    }
+}
+
+fn knowledge_query_json(query: &str, kind: Option<&str>, include_archived: bool) -> String {
+    format!(
+        "{{\"query\":\"{}\",\"kind\":{},\"include_archived\":{}}}",
+        json::escape(query),
+        opt_str(&kind.map(str::to_string)),
+        include_archived
+    )
+}
+
+// --- subcommands -----------------------------------------------------------
+
+fn knowledge_create(repo: &str, input: &str, out: &mut String, err: &mut String) -> i32 {
+    let bytes = match knowledge_input(input) {
+        Ok(b) => b,
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            return 2;
+        }
+    };
+    let validated = match knowledge::validate_create_json(&bytes) {
+        Ok(v) => v,
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            return 2;
+        }
+    };
+    let id = validated.record.id.clone();
+    let (root, mut conn) = match knowledge_open(repo, true, err) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    let (revision, generation) = match knowledge_store::create_validated(&mut conn, &validated) {
+        Ok(v) => v,
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            return knowledge_write_error(&e);
+        }
+    };
+    let record = match knowledge_store::show_record(&conn, &id, Some(revision)) {
+        Ok(r) => r,
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            return 3;
+        }
+    };
+    *out = knowledge_envelope(
+        repo,
+        generation,
+        "create",
+        &record_json(&record, Path::new(&root)),
+        None,
+    );
+    0
+}
+
+fn knowledge_show(
+    repo: &str,
+    id: &str,
+    revision: Option<&str>,
+    out: &mut String,
+    err: &mut String,
+) -> i32 {
+    let revision = match parse_optional_u64(revision, "revision", err) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    let (root, conn) = match knowledge_open(repo, false, err) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    let record = match knowledge_store::show_record(&conn, id, revision) {
+        Ok(r) => r,
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            return 3;
+        }
+    };
+    let generation = match knowledge_store::read_generation(&conn) {
+        Ok(g) => g,
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            return 3;
+        }
+    };
+    *out = knowledge_envelope(
+        repo,
+        generation,
+        "show",
+        &record_json(&record, Path::new(&root)),
+        None,
+    );
+    0
+}
+
+fn knowledge_update(
+    repo: &str,
+    id: &str,
+    expected: &str,
+    input: &str,
+    out: &mut String,
+    err: &mut String,
+) -> i32 {
+    let bytes = match knowledge_input(input) {
+        Ok(b) => b,
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            return 2;
+        }
+    };
+    let validated = match knowledge::validate_update_json(&bytes) {
+        Ok(v) => v,
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            return 2;
+        }
+    };
+    let expected_revision = match parse_count(Some(expected), 0, "expected-revision") {
+        Ok(n) => match u64::try_from(n) {
+            Ok(v) => v,
+            Err(_) => {
+                err.push_str("error: invalid --expected-revision value\n");
+                return 2;
+            }
+        },
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            return 2;
+        }
+    };
+    // A missing store is a storage error, and must not be created by a failed
+    // update: check existence before opening read-write.
+    if !knowledge_store::knowledge_db_path(&paths::config_dir(), repo).is_file() {
+        err.push_str(&format!(
+            "error: no knowledge store for repository '{repo}'\n"
+        ));
+        return 3;
+    }
+    let (root, mut conn) = match knowledge_open(repo, true, err) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    let (revision, generation) =
+        match knowledge_store::update_validated(&mut conn, id, expected_revision, &validated) {
+            Ok(v) => v,
+            Err(e) => {
+                err.push_str(&format!("error: {e}\n"));
+                return knowledge_write_error(&e);
+            }
+        };
+    let record = match knowledge_store::show_record(&conn, id, Some(revision)) {
+        Ok(r) => r,
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            return 3;
+        }
+    };
+    *out = knowledge_envelope(
+        repo,
+        generation,
+        "update",
+        &record_json(&record, Path::new(&root)),
+        None,
+    );
+    0
+}
+
+fn knowledge_history(
+    repo: &str,
+    id: &str,
+    limit: Option<&str>,
+    offset: Option<&str>,
+    generation: Option<&str>,
+    out: &mut String,
+    err: &mut String,
+) -> i32 {
+    let (limit, offset, generation) = match knowledge_page_args(limit, offset, generation, err) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    let (root, conn) = match knowledge_open(repo, false, err) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    let page = match knowledge_store::history(&conn, id, limit, offset, generation) {
+        Ok(p) => p,
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            return 3;
+        }
+    };
+    let revisions: Vec<String> = page
+        .revisions
+        .iter()
+        .map(|r| record_json(r, Path::new(&root)))
+        .collect();
+    let result = format!(
+        "{{\"id\":\"{}\",\"revisions\":[{}]}}",
+        json::escape(id),
+        revisions.join(",")
+    );
+    let end = offset.saturating_add(page.revisions.len());
+    let next_offset = if end < page.total { Some(end) } else { None };
+    let pagination = pagination_json(limit, offset, page.total, page.truncated, next_offset);
+    *out = knowledge_envelope(repo, page.generation, "history", &result, Some(pagination));
+    0
+}
+
+#[allow(clippy::too_many_arguments)]
+fn knowledge_search(
+    repo: &str,
+    query: &str,
+    kind: Option<&str>,
+    include_archived: bool,
+    include_superseded: bool,
+    include_retracted: bool,
+    limit: Option<&str>,
+    offset: Option<&str>,
+    generation: Option<&str>,
+    out: &mut String,
+    err: &mut String,
+) -> i32 {
+    if let Some(k) = kind {
+        if let Err(e) = knowledge::validate_kind(k) {
+            err.push_str(&format!("error: {e}\n"));
+            return 2;
+        }
+    }
+    if query.len() > knowledge::MAX_QUERY_TEXT_BYTES {
+        err.push_str(&format!(
+            "error: search query is {} bytes, at most {} allowed\n",
+            query.len(),
+            knowledge::MAX_QUERY_TEXT_BYTES
+        ));
+        return 2;
+    }
+    let (limit, offset, generation) = match knowledge_page_args(limit, offset, generation, err) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    // Validate registration and root binding before answering: an unknown or
+    // retargeted repository must not look like a store that happens to be
+    // empty.
+    let (root, entry) = match knowledge_repo(repo, err) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    let db = knowledge_store::knowledge_db_path(&paths::config_dir(), repo);
+    match knowledge_store_absent(&db) {
+        // Genuinely absent store: empty success, and no database is created.
+        Ok(true) => {
+            let result = format!(
+                "{},\"hits\":[]}}",
+                knowledge_query_json(query, kind, include_archived)
+            );
+            *out = knowledge_envelope(
+                repo,
+                0,
+                "search",
+                &result,
+                Some(pagination_json(limit, offset, 0, false, None)),
+            );
+            return 0;
+        }
+        Ok(false) => {}
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            return 3;
+        }
+    }
+    let conn = match knowledge_store::open_knowledge(&entry, false) {
+        Ok(c) => c,
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            return 3;
+        }
+    };
+    let page = match knowledge_store::search(
+        &conn,
+        query,
+        kind,
+        include_archived,
+        include_superseded,
+        include_retracted,
+        limit,
+        offset,
+        generation,
+    ) {
+        Ok(p) => p,
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            return 3;
+        }
+    };
+    let hits: Vec<String> = page
+        .hits
+        .iter()
+        .map(|r| record_json(r, Path::new(&root)))
+        .collect();
+    let result = format!(
+        "{},\"hits\":[{}]}}",
+        knowledge_query_json(query, kind, include_archived),
+        hits.join(",")
+    );
+    let pagination = pagination_json(limit, offset, page.total, page.truncated, page.next_offset);
+    *out = knowledge_envelope(repo, page.generation, "search", &result, Some(pagination));
+    0
+}
+
+fn knowledge_link(repo: &str, input: &str, out: &mut String, err: &mut String) -> i32 {
+    let bytes = match knowledge_input(input) {
+        Ok(b) => b,
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            return 2;
+        }
+    };
+    let link = match parse_link_input(&bytes) {
+        Ok(l) => l,
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            return 2;
+        }
+    };
+    let (_root, mut conn) = match knowledge_open(repo, true, err) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    let generation = match knowledge_store::link(
+        &mut conn,
+        &link.relation_id,
+        &link.src_id,
+        link.src_revision,
+        &link.dst_id,
+        link.dst_revision,
+        &link.kind,
+        &link.author,
+        &link.rationale,
+        link.confirm,
+    ) {
+        Ok(g) => g,
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            return 3;
+        }
+    };
+    let relation = match knowledge_store::relation_by_id(&conn, &link.relation_id) {
+        Ok(r) => r,
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            return 3;
+        }
+    };
+    *out = knowledge_envelope(repo, generation, "link", &relation_json(&relation), None);
+    0
+}
+
+fn knowledge_unlink(
+    repo: &str,
+    relation: &str,
+    input: &str,
+    out: &mut String,
+    err: &mut String,
+) -> i32 {
+    let bytes = match knowledge_input(input) {
+        Ok(b) => b,
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            return 2;
+        }
+    };
+    let unlink = match parse_unlink_input(&bytes) {
+        Ok(u) => u,
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            return 2;
+        }
+    };
+    if let Err(e) = knowledge::validate_relation_reference(relation) {
+        err.push_str(&format!("error: {e}\n"));
+        return 2;
+    }
+    let (_root, mut conn) = match knowledge_open(repo, true, err) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    let generation =
+        match knowledge_store::unlink(&mut conn, relation, &unlink.author, &unlink.reason) {
+            Ok(g) => g,
+            Err(e) => {
+                err.push_str(&format!("error: {e}\n"));
+                return 3;
+            }
+        };
+    // The retraction event is the result; endpoints stay retrievable through
+    // `related --include-retracted`.
+    let result = format!(
+        "{{\"relation_id\":\"{}\",\"retracted\":true,\"retraction_author\":\"{}\",\"retraction_reason\":\"{}\"}}",
+        json::escape(relation),
+        json::escape(&unlink.author),
+        json::escape(&unlink.reason)
+    );
+    *out = knowledge_envelope(repo, generation, "unlink", &result, None);
+    0
+}
+
+#[allow(clippy::too_many_arguments)]
+fn knowledge_related(
+    repo: &str,
+    id: &str,
+    revision: Option<&str>,
+    direction: &str,
+    include_retracted: bool,
+    limit: Option<&str>,
+    offset: Option<&str>,
+    generation: Option<&str>,
+    out: &mut String,
+    err: &mut String,
+) -> i32 {
+    let (limit, offset, generation) = match knowledge_page_args(limit, offset, generation, err) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    let revision = match parse_optional_u64(revision, "revision", err) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    let dir = match direction {
+        "outbound" => knowledge_store::RelationDirection::Outbound,
+        "inbound" => knowledge_store::RelationDirection::Inbound,
+        _ => {
+            err.push_str(&format!(
+                "error: invalid --direction value: '{direction}' (expected inbound or outbound)\n"
+            ));
+            return 2;
+        }
+    };
+    let (_root, conn) = match knowledge_open(repo, false, err) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    let page = match knowledge_store::related(
+        &conn,
+        id,
+        revision,
+        dir,
+        include_retracted,
+        limit,
+        offset,
+        generation,
+    ) {
+        Ok(p) => p,
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            return 3;
+        }
+    };
+    let relations: Vec<String> = page.relations.iter().map(relation_json).collect();
+    let result = format!(
+        "{{\"id\":\"{}\",\"revision\":{},\"direction\":\"{}\",\"relations\":[{}]}}",
+        json::escape(id),
+        opt_u64(revision),
+        direction,
+        relations.join(",")
+    );
+    let pagination = pagination_json(limit, offset, page.total, page.truncated, page.next_offset);
+    *out = knowledge_envelope(repo, page.generation, "related", &result, Some(pagination));
+    0
 }
 
 fn main() {

@@ -5,3 +5,7 @@
 # Owner's private planning doc: kept out of the public repo (see backup outside
 # this directory). Never commit this file.
 OPEN_SOURCE_CODE_INTELLIGENCE_KNOWLEDGE_BLUEPRINT.md
+
+# Internal planning/specification documents: kept out of the public repo.
+# Private backup lives outside this directory. Never commit these.
+docs/superpowers/
