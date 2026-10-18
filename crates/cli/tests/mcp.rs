@@ -9,7 +9,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -717,15 +717,18 @@ fn g4_protocol_level_rejections_stay_protocol_level() {
             || v["result"]["structuredContent"]["kind"].is_null(),
         "no domain error kind may be manufactured: {v}"
     );
-    // Malformed JSON-RPC: protocol parse error, not a tool result.
+    // Unparsable JSON (serde_json Category::Syntax) is ignored by rmcp by
+    // design: no response must arrive, the stream must stay connected, and the
+    // next valid request must succeed. This is a positive contract check, not
+    // an optional branch. Upstream #1353 concerns only the -32600 reply for
+    // structurally invalid frames on the async_rw error path, not this silence.
     s.send("{not json");
-    if let Ok(line) = s.lines.recv_timeout(Duration::from_secs(3)) {
-        let v: serde_json::Value = serde_json::from_str(&line).expect("stdout must stay JSON-RPC");
-        assert_eq!(v["jsonrpc"], "2.0");
-        assert!(
-            v["error"].as_object().is_some(),
-            "expected a JSON-RPC error: {v}"
-        );
+    match s.lines.recv_timeout(Duration::from_secs(3)) {
+        Err(RecvTimeoutError::Timeout) => {}
+        Err(RecvTimeoutError::Disconnected) => {
+            panic!("server closed stdout after unparsable JSON instead of ignoring it")
+        }
+        Ok(line) => panic!("unparsable JSON must be ignored without a response, got: {line}"),
     }
     // Valid requests still work after protocol-level refusals.
     let res = call_tool(&mut s, 4, "riltra_health", &json!({}));
@@ -733,6 +736,45 @@ fn g4_protocol_level_rejections_stay_protocol_level() {
     assert_eq!(doc(&res)["repo_count"], json!(0));
     let (code, _) = s.finish();
     assert_eq!(code, 0);
+}
+
+#[test]
+fn g4_structurally_invalid_jsonrpc_gets_invalid_request() {
+    // Well-formed JSON that is not a JSON-RPC message (serde_json
+    // Category::Data) gets the transport's -32600 reply. Exercise it on a fresh
+    // process before initialize, with no outstanding responses: rmcp 3.5.1 can
+    // lose this reply when it competes with a response-send task because
+    // AsyncRwTransport::receive is not cancel-safe on this path
+    // (modelcontextprotocol/rust-sdk#1353). That upstream race is separate from
+    // Riltra's domain-error classification and is deliberately not worked
+    // around here; CP7 interoperability evaluation owns it.
+    let h = home("cp6-data-error");
+    let mut s = spawn(&h);
+    s.send(r#"{"foo":"bar"}"#);
+    let v = s.recv();
+    assert_eq!(v["error"]["code"], json!(-32600), "{v}");
+    assert_eq!(v["error"]["message"], json!("Invalid request"), "{v}");
+    assert!(v.get("id").is_none(), "protocol error carries no id: {v}");
+    assert!(v.get("result").is_none(), "no successful result: {v}");
+    assert!(v["error"].get("kind").is_none(), "no domain kind: {v}");
+    assert!(
+        v["error"]
+            .get("data")
+            .is_none_or(|d| d.get("kind").is_none()),
+        "no domain error classification: {v}"
+    );
+    // The same session still initializes and serves a valid request.
+    s.send(initialize_request());
+    let v = s.recv();
+    assert_eq!(v["id"], 1, "initialize after protocol error: {v}");
+    s.send(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#);
+    let res = call_tool(&mut s, 2, "riltra_repo_list", &json!({}));
+    assert!(!is_error(&res), "{res}");
+    assert_eq!(doc(&res)["repos"].as_array().unwrap().len(), 0);
+    let (code, err) = s.finish();
+    assert_eq!(code, 0);
+    assert!(!err.contains("panicked"), "server panicked: {err}");
+    assert_home_untouched(&h);
 }
 
 #[test]
@@ -783,15 +825,15 @@ fn g4_invalid_requests_do_not_kill_the_server() {
     );
     let v = s.recv();
     assert!(v["error"].as_object().is_some(), "{v}");
-    // Malformed JSON-RPC.
+    // Unparsable JSON is ignored by rmcp: no response may arrive, and the
+    // session must remain usable. An unexpected response or a disconnect fails.
     s.send("{not json");
-    if let Ok(line) = s.lines.recv_timeout(Duration::from_secs(3)) {
-        let v: serde_json::Value = serde_json::from_str(&line).expect("stdout must stay JSON-RPC");
-        assert_eq!(v["jsonrpc"], "2.0");
-        assert!(
-            v["error"].as_object().is_some(),
-            "expected a JSON-RPC error: {v}"
-        );
+    match s.lines.recv_timeout(Duration::from_secs(3)) {
+        Err(RecvTimeoutError::Timeout) => {}
+        Err(RecvTimeoutError::Disconnected) => {
+            panic!("server closed stdout after unparsable JSON instead of ignoring it")
+        }
+        Ok(line) => panic!("unparsable JSON must be ignored without a response, got: {line}"),
     }
     // Valid after malformed: clean EOF afterwards.
     let d = doc(&call_tool(&mut s, 6, "riltra_repo_list", &json!({})));
