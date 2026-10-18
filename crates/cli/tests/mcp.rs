@@ -163,7 +163,7 @@ fn mcp_initialize_handshake_reports_identity() {
 }
 
 #[test]
-fn mcp_tools_list_advertises_exactly_seven_readonly_tools() {
+fn mcp_tools_list_advertises_exactly_ten_readonly_tools() {
     let h = home("tools");
     let mut s = ready(&h);
     s.send(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#);
@@ -183,10 +183,19 @@ fn mcp_tools_list_advertises_exactly_seven_readonly_tools() {
             "riltra_code_impact",
             "riltra_code_search",
             "riltra_code_trace",
+            "riltra_knowledge_related",
+            "riltra_knowledge_search",
+            "riltra_knowledge_show",
             "riltra_repo_list",
             "riltra_repo_status"
         ],
-        "CP4 advertises exactly the seven read-only tools"
+        "CP5 advertises exactly the ten read-only tools"
+    );
+    assert!(
+        !names
+            .iter()
+            .any(|n| n.contains("health") || n.contains("write")),
+        "no health or write tool may be advertised: {names:?}"
     );
     for t in tools {
         let name = t["name"].as_str().unwrap();
@@ -268,6 +277,96 @@ fn mcp_tools_list_advertises_exactly_seven_readonly_tools() {
         assert_eq!(keys, expected, "{tool}: properties: {schema}");
         assert_eq!(schema["additionalProperties"], false, "{tool}: {schema}");
     }
+    // CP5 knowledge tools: search requires repo+query, show/related require
+    // repo+id; show takes no generation, related defaults direction to
+    // outbound; unknown parameters are rejected everywhere.
+    let search_schema = &find("riltra_knowledge_search")["inputSchema"];
+    let mut required: Vec<&str> = search_schema["required"]
+        .as_array()
+        .unwrap_or_else(|| panic!("knowledge_search: required array: {search_schema}"))
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    required.sort_unstable();
+    assert_eq!(required, ["query", "repo"], "{search_schema}");
+    let mut keys: Vec<&str> = search_schema["properties"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "generation",
+            "include_archived",
+            "include_retracted",
+            "include_superseded",
+            "kind",
+            "limit",
+            "offset",
+            "query",
+            "repo"
+        ],
+        "{search_schema}"
+    );
+    assert_eq!(
+        search_schema["additionalProperties"], false,
+        "{search_schema}"
+    );
+    let show_schema = &find("riltra_knowledge_show")["inputSchema"];
+    let mut required: Vec<&str> = show_schema["required"]
+        .as_array()
+        .unwrap_or_else(|| panic!("knowledge_show: required array: {show_schema}"))
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    required.sort_unstable();
+    assert_eq!(required, ["id", "repo"], "{show_schema}");
+    let mut keys: Vec<&str> = show_schema["properties"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(keys, ["id", "repo", "revision"], "{show_schema}");
+    assert_eq!(show_schema["additionalProperties"], false, "{show_schema}");
+    let related_schema = &find("riltra_knowledge_related")["inputSchema"];
+    let mut required: Vec<&str> = related_schema["required"]
+        .as_array()
+        .unwrap_or_else(|| panic!("knowledge_related: required array: {related_schema}"))
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    required.sort_unstable();
+    assert_eq!(required, ["id", "repo"], "{related_schema}");
+    let mut keys: Vec<&str> = related_schema["properties"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "direction",
+            "generation",
+            "id",
+            "include_retracted",
+            "limit",
+            "offset",
+            "repo",
+            "revision"
+        ],
+        "{related_schema}"
+    );
+    assert_eq!(
+        related_schema["additionalProperties"], false,
+        "{related_schema}"
+    );
     let (code, _) = s.finish();
     assert_eq!(code, 0, "clean disconnect must exit 0");
     assert_home_untouched(&h);
@@ -2311,4 +2410,1096 @@ fn t5_graph_reads_leave_v4_untouched_and_survive_concurrent_rebuild() {
     let (code, _) = s.finish();
     assert_eq!(code, 0);
     assert_eq!(user_version(&db), 4);
+}
+
+// --- CP5: knowledge tools ---------------------------------------------------
+
+fn run_cli_stdin(cfg: &Path, args: &[&str], input: &[u8]) -> (i32, String, String) {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_riltra"))
+        .args(args)
+        .env("RILTRA_HOME", cfg)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn riltra");
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin")
+        .write_all(input)
+        .expect("write stdin");
+    let output = child.wait_with_output().expect("wait riltra");
+    (
+        output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+fn knowledge_db(cfg: &Path, name: &str) -> PathBuf {
+    cfg.join("knowledge").join(format!("{name}.db"))
+}
+
+fn kcreate(cfg: &Path, repo: &str, payload: &str) {
+    let (code, _out, err) = run_cli_stdin(
+        cfg,
+        &["knowledge", "create", "--repo", repo, "--input", "-"],
+        payload.as_bytes(),
+    );
+    assert_eq!(code, 0, "knowledge create {repo}: {err}");
+}
+
+fn kupdate(cfg: &Path, repo: &str, id: &str, expected: u64, payload: &str) {
+    let (code, _out, err) = run_cli_stdin(
+        cfg,
+        &[
+            "knowledge",
+            "update",
+            "--repo",
+            repo,
+            "--id",
+            id,
+            "--expected-revision",
+            &expected.to_string(),
+            "--input",
+            "-",
+        ],
+        payload.as_bytes(),
+    );
+    assert_eq!(code, 0, "knowledge update {id}: {err}");
+}
+
+fn klink(cfg: &Path, repo: &str, payload: &str) {
+    let (code, _out, err) = run_cli_stdin(
+        cfg,
+        &["knowledge", "link", "--repo", repo, "--input", "-"],
+        payload.as_bytes(),
+    );
+    assert_eq!(code, 0, "knowledge link: {err}");
+}
+
+fn kunlink(cfg: &Path, repo: &str, relation: &str, payload: &str) {
+    let (code, _out, err) = run_cli_stdin(
+        cfg,
+        &[
+            "knowledge",
+            "unlink",
+            "--repo",
+            repo,
+            "--relation",
+            relation,
+            "--input",
+            "-",
+        ],
+        payload.as_bytes(),
+    );
+    assert_eq!(code, 0, "knowledge unlink {relation}: {err}");
+}
+
+/// One knowledge tool document; the shared `doc` helper already proves the
+/// text payload parses and equals `structuredContent`.
+fn kjson(s: &mut Session, id: i64, tool: &str, args: &Value) -> Value {
+    doc(&call_tool(s, id, tool, args))
+}
+
+/// The parsed MCP document must equal the parsed CLI document exactly.
+fn kparity(cfg: &Path, got: &Value, cli_args: &[&str]) {
+    let expected = cli_json(cfg, cli_args);
+    assert_eq!(got, &expected, "MCP and CLI must agree for {cli_args:?}");
+}
+
+/// A refusal: `isError`, classified, carrying the CLI's exact message text.
+fn kerr(
+    cfg: &Path,
+    s: &mut Session,
+    id: i64,
+    tool: &str,
+    args: &Value,
+    cli_args: &[&str],
+) -> Value {
+    let res = call_tool(s, id, tool, args);
+    assert!(is_error(&res), "{tool} must refuse: {res}");
+    let d = doc(&res);
+    let (code, _out, err) = run_cli(cfg, cli_args);
+    assert_ne!(code, 0, "CLI must refuse too: {cli_args:?}");
+    let message = err
+        .strip_prefix("error: ")
+        .expect("CLI failure carries 'error: '")
+        .trim_end();
+    assert_eq!(d["message"], message, "CLI message must be preserved");
+    d
+}
+
+const K_D1: &str = r#"{"id":"d1","kind":"decision","title":"First","body":"kjson alpha","status":"active","author":"a","evidence":[]}"#;
+
+#[test]
+fn t2_knowledge_search_matches_cli_missing_empty_populated_paging_and_escaping() {
+    let h = home("cp5-search");
+    let r = home("cp5-search-repo");
+    init_repo(&h, &r, "krepo");
+    let mut s = ready(&h);
+    let mut id = 2;
+
+    // Missing store: empty generation-0 success, and nothing is created.
+    let before = listing(&h);
+    let got = kjson(
+        &mut s,
+        id,
+        "riltra_knowledge_search",
+        &json!({"repo": "krepo", "query": "kjson"}),
+    );
+    assert_eq!(got["generation"], json!(0));
+    assert_eq!(got["result"]["hits"], json!([]));
+    kparity(
+        &h,
+        &got,
+        &["knowledge", "search", "--repo", "krepo", "--query", "kjson"],
+    );
+    assert!(
+        !knowledge_db(&h, "krepo").exists(),
+        "search created a store"
+    );
+    assert_eq!(listing(&h), before, "search touched storage");
+    id += 1;
+
+    // Empty store: a zero-record import still answers a valid empty page.
+    let payload = h.join("empty.jsonl");
+    std::fs::write(
+        &payload,
+        r#"{"type":"meta","format":"riltra-knowledge","version":1,"repo":"krepo","records":0,"relations":0}"#,
+    )
+    .unwrap();
+    let (code, _out, err) = run_cli(
+        &h,
+        &[
+            "knowledge",
+            "import",
+            "--repo",
+            "krepo",
+            "--file",
+            payload.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "empty import: {err}");
+    let got = kjson(
+        &mut s,
+        id,
+        "riltra_knowledge_search",
+        &json!({"repo": "krepo", "query": "kjson"}),
+    );
+    assert_eq!(got["generation"], json!(0));
+    assert_eq!(got["result"]["hits"], json!([]));
+    kparity(
+        &h,
+        &got,
+        &["knowledge", "search", "--repo", "krepo", "--query", "kjson"],
+    );
+    id += 1;
+
+    // Populated store including a record whose fields need JSON escaping.
+    kcreate(&h, "krepo", K_D1);
+    kcreate(
+        &h,
+        "krepo",
+        r#"{"id":"d2","kind":"decision","title":"Second","body":"kjson beta","status":"active","author":"a","evidence":[]}"#,
+    );
+    kcreate(
+        &h,
+        "krepo",
+        r#"{"id":"b1","kind":"benchmark","title":"Perf","body":"kjson bench","status":"active","author":"a","evidence":[],"measurement":{"method":"m","environment":"e","sample_count":3,"metrics":{"latency":{"value":1.5,"unit":"ms"}}}}"#,
+    );
+    let tricky = json!({
+        "id": "e1",
+        "kind": "decision",
+        "title": "Quote \"Q\" back\\slash",
+        "body": "kjson line1\nline2\ttab",
+        "status": "active",
+        "author": "a",
+        "evidence": []
+    })
+    .to_string();
+    kcreate(&h, "krepo", &tricky);
+    for (mcp, cli) in [
+        (
+            json!({"repo": "krepo", "query": "kjson"}),
+            vec!["--query", "kjson"],
+        ),
+        (
+            json!({"repo": "krepo", "query": "kjson", "limit": 2}),
+            vec!["--query", "kjson", "--limit", "2"],
+        ),
+        (
+            json!({"repo": "krepo", "query": "kjson", "limit": 2, "offset": 2}),
+            vec!["--query", "kjson", "--limit", "2", "--offset", "2"],
+        ),
+        (
+            json!({"repo": "krepo", "query": "kjson", "kind": "benchmark"}),
+            vec!["--query", "kjson", "--kind", "benchmark"],
+        ),
+        (
+            json!({"repo": "krepo", "query": "zzznope"}),
+            vec!["--query", "zzznope"],
+        ),
+        (
+            json!({"repo": "krepo", "query": "kjson", "include_archived": true}),
+            vec!["--query", "kjson", "--include-archived"],
+        ),
+        (
+            json!({"repo": "krepo", "query": "kjson", "generation": 4}),
+            vec!["--query", "kjson", "--generation", "4"],
+        ),
+    ] {
+        let got = kjson(&mut s, id, "riltra_knowledge_search", &mcp);
+        let mut args = vec!["knowledge", "search", "--repo", "krepo"];
+        args.extend(cli);
+        kparity(&h, &got, &args);
+        id += 1;
+    }
+
+    // Ordering is by record id and the page bounds are exact.
+    let got = kjson(
+        &mut s,
+        id,
+        "riltra_knowledge_search",
+        &json!({"repo": "krepo", "query": "kjson", "limit": 2}),
+    );
+    assert_eq!(
+        got["pagination"],
+        json!({"limit": 2, "offset": 0, "total": 4, "truncated": true, "next_offset": 2})
+    );
+    let hits = got["result"]["hits"].as_array().unwrap();
+    assert_eq!(hits[0]["id"], json!("b1"));
+    assert_eq!(hits[1]["id"], json!("d1"));
+    id += 1;
+
+    // Escaped fields round-trip byte-exactly.
+    let got = kjson(
+        &mut s,
+        id,
+        "riltra_knowledge_search",
+        &json!({"repo": "krepo", "query": "kjson"}),
+    );
+    assert_eq!(got["generation"], json!(4));
+    let e1 = got["result"]["hits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|hit| hit["id"] == json!("e1"))
+        .unwrap();
+    assert_eq!(e1["title"], json!("Quote \"Q\" back\\slash"));
+    assert_eq!(e1["body"], json!("kjson line1\nline2\ttab"));
+    id += 1;
+
+    // Visibility flags: superseded and retracted records stay hidden unless
+    // explicitly requested, with their lifecycle payloads.
+    kupdate(
+        &h,
+        "krepo",
+        "d2",
+        1,
+        r#"{"title":"Second v2","body":"kjson beta v2","status":"superseded","author":"a","evidence":[],"superseded_by":{"id":"d1","revision":1},"reason":"replaced by d1"}"#,
+    );
+    kupdate(
+        &h,
+        "krepo",
+        "b1",
+        1,
+        r#"{"title":"Perf","body":"kjson bench","status":"retracted","author":"a","evidence":[],"reason":"wrong"}"#,
+    );
+    for (mcp, cli) in [
+        (
+            json!({"repo": "krepo", "query": "kjson", "include_superseded": true}),
+            vec!["--query", "kjson", "--include-superseded"],
+        ),
+        (
+            json!({"repo": "krepo", "query": "kjson", "include_retracted": true}),
+            vec!["--query", "kjson", "--include-retracted"],
+        ),
+        (
+            json!({"repo": "krepo", "query": "kjson", "include_archived": true, "include_superseded": true, "include_retracted": true}),
+            vec![
+                "--query",
+                "kjson",
+                "--include-archived",
+                "--include-superseded",
+                "--include-retracted",
+            ],
+        ),
+        (
+            json!({"repo": "krepo", "query": "kjson"}),
+            vec!["--query", "kjson"],
+        ),
+    ] {
+        let got = kjson(&mut s, id, "riltra_knowledge_search", &mcp);
+        let mut args = vec!["knowledge", "search", "--repo", "krepo"];
+        args.extend(cli);
+        kparity(&h, &got, &args);
+        id += 1;
+    }
+    let got = kjson(
+        &mut s,
+        id,
+        "riltra_knowledge_search",
+        &json!({"repo": "krepo", "query": "kjson"}),
+    );
+    let ids: Vec<&str> = got["result"]["hits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|hit| hit["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["d1", "e1"]);
+    id += 1;
+    let got = kjson(
+        &mut s,
+        id,
+        "riltra_knowledge_search",
+        &json!({"repo": "krepo", "query": "kjson", "include_archived": true, "include_superseded": true, "include_retracted": true}),
+    );
+    let ids: Vec<&str> = got["result"]["hits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|hit| hit["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["b1", "d1", "d2", "e1"]);
+    id += 1;
+
+    // Repository isolation: a second registered repo in the same home never
+    // sees this store.
+    let other = home("cp5-search-other");
+    init_repo(&h, &other, "other");
+    let got = kjson(
+        &mut s,
+        id,
+        "riltra_knowledge_search",
+        &json!({"repo": "other", "query": "kjson"}),
+    );
+    assert_eq!(got["generation"], json!(0));
+    assert_eq!(got["result"]["hits"], json!([]));
+    id += 1;
+    let res = call_tool(
+        &mut s,
+        id,
+        "riltra_knowledge_show",
+        &json!({"repo": "other", "id": "d1"}),
+    );
+    assert!(is_error(&res), "{res}");
+    assert_eq!(doc(&res)["kind"], json!("store_missing"));
+
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn t3_knowledge_show_matches_cli_revisions_lifecycle_and_evidence() {
+    let h = home("cp5-show");
+    let r = home("cp5-show-repo");
+    init_repo(&h, &r, "krepo");
+    std::fs::write(r.join("a.py"), "alpha beta gamma").unwrap();
+    kcreate(
+        &h,
+        "krepo",
+        r#"{"id":"d1","kind":"decision","title":"First","body":"body one","status":"active","author":"a","evidence":[{"path":"a.py"}]}"#,
+    );
+    kcreate(
+        &h,
+        "krepo",
+        r#"{"id":"d2","kind":"decision","title":"Second","body":"body two","status":"active","author":"a","evidence":[]}"#,
+    );
+    kupdate(
+        &h,
+        "krepo",
+        "d1",
+        1,
+        r#"{"title":"First v2","body":"body one v2","status":"superseded","author":"a","evidence":[{"path":"a.py"}],"superseded_by":{"id":"d2","revision":1},"reason":"replaced by d2"}"#,
+    );
+    kupdate(
+        &h,
+        "krepo",
+        "d2",
+        1,
+        r#"{"title":"Second v2","body":"body two v2","status":"active","author":"a","evidence":[],"confirm_state":"confirmed"}"#,
+    );
+
+    let mut s = ready(&h);
+    let mut id = 2;
+    for (mcp, cli) in [
+        (json!({"repo": "krepo", "id": "d1"}), vec!["--id", "d1"]),
+        (
+            json!({"repo": "krepo", "id": "d1", "revision": 1}),
+            vec!["--id", "d1", "--revision", "1"],
+        ),
+        (
+            json!({"repo": "krepo", "id": "d1", "revision": 2}),
+            vec!["--id", "d1", "--revision", "2"],
+        ),
+        (json!({"repo": "krepo", "id": "d2"}), vec!["--id", "d2"]),
+    ] {
+        let got = kjson(&mut s, id, "riltra_knowledge_show", &mcp);
+        let mut args = vec!["knowledge", "show", "--repo", "krepo"];
+        args.extend(cli);
+        kparity(&h, &got, &args);
+        id += 1;
+    }
+
+    // Supersession comes from the stored lifecycle events; the old revision
+    // stays addressable and carries no full-stage fields.
+    let got = kjson(
+        &mut s,
+        id,
+        "riltra_knowledge_show",
+        &json!({"repo": "krepo", "id": "d1"}),
+    );
+    assert_eq!(got["generation"], json!(4));
+    assert_eq!(got["result"]["revision"], json!(2));
+    assert_eq!(got["result"]["status"], json!("superseded"));
+    assert_eq!(
+        got["result"]["superseded_by"],
+        json!({"id": "d2", "revision": 1})
+    );
+    assert_eq!(
+        got["result"]["evidence"][0]["freshness"]["status"],
+        json!("fresh")
+    );
+    assert_eq!(got["result"]["verification"], json!("Unverified"));
+    assert_eq!(got["result"]["support"], json!("unverified"));
+    id += 1;
+    let got = kjson(
+        &mut s,
+        id,
+        "riltra_knowledge_show",
+        &json!({"repo": "krepo", "id": "d1", "revision": 1}),
+    );
+    assert!(got["result"].get("superseded_by").is_none(), "{got}");
+    assert_eq!(got["result"]["confirm_state"], json!("candidate"));
+    id += 1;
+
+    // Confirmation is provenance, never promotion: d2 is confirmed on a v2
+    // store and still reports Unverified.
+    let got = kjson(
+        &mut s,
+        id,
+        "riltra_knowledge_show",
+        &json!({"repo": "krepo", "id": "d2"}),
+    );
+    assert_eq!(got["result"]["confirm_state"], json!("confirmed"));
+    assert_eq!(got["result"]["verification"], json!("Unverified"));
+    id += 1;
+
+    // Edited bytes: freshness turns stale, the bound path is unchanged.
+    std::fs::write(r.join("a.py"), "alpha beta gamma changed").unwrap();
+    let got = kjson(
+        &mut s,
+        id,
+        "riltra_knowledge_show",
+        &json!({"repo": "krepo", "id": "d1", "revision": 1}),
+    );
+    assert_eq!(
+        got["result"]["evidence"][0]["freshness"]["status"],
+        json!("stale")
+    );
+    kparity(
+        &h,
+        &got,
+        &[
+            "knowledge",
+            "show",
+            "--repo",
+            "krepo",
+            "--id",
+            "d1",
+            "--revision",
+            "1",
+        ],
+    );
+
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn t4_knowledge_related_matches_cli_directions_retracted_and_paging() {
+    let h = home("cp5-related");
+    let r = home("cp5-related-repo");
+    init_repo(&h, &r, "krepo");
+    kcreate(&h, "krepo", K_D1);
+    kcreate(
+        &h,
+        "krepo",
+        r#"{"id":"d2","kind":"decision","title":"Second","body":"body two","status":"active","author":"a","evidence":[]}"#,
+    );
+    kcreate(
+        &h,
+        "krepo",
+        r#"{"id":"d3","kind":"decision","title":"Third","body":"body three","status":"active","author":"a","evidence":[]}"#,
+    );
+    klink(
+        &h,
+        "krepo",
+        r#"{"relation_id":"r1","src_id":"d2","src_revision":1,"dst_id":"d1","dst_revision":1,"kind":"supports","author":"a","rationale":"because","confirm_state":"confirmed"}"#,
+    );
+    klink(
+        &h,
+        "krepo",
+        r#"{"relation_id":"r2","src_id":"d3","src_revision":1,"dst_id":"d1","dst_revision":1,"kind":"relates_to","author":"a","rationale":"maybe"}"#,
+    );
+    klink(
+        &h,
+        "krepo",
+        r#"{"relation_id":"r3","src_id":"d3","src_revision":1,"dst_id":"d2","dst_revision":1,"kind":"relates_to","author":"a","rationale":"gone"}"#,
+    );
+    kunlink(&h, "krepo", "r3", r#"{"author":"a","reason":"mistake"}"#);
+    // d3 moves to revision 2: the revision-1 bindings stay addressable.
+    kupdate(
+        &h,
+        "krepo",
+        "d3",
+        1,
+        r#"{"title":"Third v2","body":"body three v2","status":"active","author":"a","evidence":[]}"#,
+    );
+
+    let mut s = ready(&h);
+    let generation = kjson(
+        &mut s,
+        2,
+        "riltra_knowledge_show",
+        &json!({"repo": "krepo", "id": "d1"}),
+    )["generation"]
+        .as_u64()
+        .unwrap();
+    let generation_text = generation.to_string();
+
+    let mut id = 3;
+    for (mcp, cli) in [
+        // `direction` defaults to outbound.
+        (json!({"repo": "krepo", "id": "d2"}), vec!["--id", "d2"]),
+        (
+            json!({"repo": "krepo", "id": "d1", "direction": "inbound"}),
+            vec!["--id", "d1", "--direction", "inbound"],
+        ),
+        (
+            json!({"repo": "krepo", "id": "d3", "revision": 1}),
+            vec!["--id", "d3", "--revision", "1"],
+        ),
+        (json!({"repo": "krepo", "id": "d3"}), vec!["--id", "d3"]),
+        (
+            json!({"repo": "krepo", "id": "d2", "direction": "inbound"}),
+            vec!["--id", "d2", "--direction", "inbound"],
+        ),
+        (
+            json!({"repo": "krepo", "id": "d2", "direction": "inbound", "include_retracted": true}),
+            vec![
+                "--id",
+                "d2",
+                "--direction",
+                "inbound",
+                "--include-retracted",
+            ],
+        ),
+        (
+            json!({"repo": "krepo", "id": "d1", "direction": "inbound", "limit": 1}),
+            vec!["--id", "d1", "--direction", "inbound", "--limit", "1"],
+        ),
+        (
+            json!({"repo": "krepo", "id": "d1", "direction": "inbound", "limit": 1, "offset": 1}),
+            vec![
+                "--id",
+                "d1",
+                "--direction",
+                "inbound",
+                "--limit",
+                "1",
+                "--offset",
+                "1",
+            ],
+        ),
+        (
+            json!({"repo": "krepo", "id": "d1", "direction": "inbound", "generation": generation}),
+            vec![
+                "--id",
+                "d1",
+                "--direction",
+                "inbound",
+                "--generation",
+                generation_text.as_str(),
+            ],
+        ),
+    ] {
+        let got = kjson(&mut s, id, "riltra_knowledge_related", &mcp);
+        let mut args = vec!["knowledge", "related", "--repo", "krepo"];
+        args.extend(cli);
+        kparity(&h, &got, &args);
+        id += 1;
+    }
+
+    // Retracted relations: hidden by default, explicit opt-in, payload kept.
+    let got = kjson(
+        &mut s,
+        id,
+        "riltra_knowledge_related",
+        &json!({"repo": "krepo", "id": "d2", "direction": "inbound", "include_retracted": true}),
+    );
+    let rel = &got["result"]["relations"][0];
+    assert_eq!(rel["relation_id"], json!("r3"));
+    assert_eq!(rel["retracted"], json!(true));
+    assert_eq!(rel["retraction_author"], json!("a"));
+    assert_eq!(rel["retraction_reason"], json!("mistake"));
+    id += 1;
+    let got = kjson(
+        &mut s,
+        id,
+        "riltra_knowledge_related",
+        &json!({"repo": "krepo", "id": "d2", "direction": "inbound"}),
+    );
+    assert_eq!(got["result"]["relations"], json!([]));
+    id += 1;
+
+    // Confirmation rides only where a stored event exists; head revision 2
+    // of d3 has no pinned relations while revision 1 keeps its binding.
+    let got = kjson(
+        &mut s,
+        id,
+        "riltra_knowledge_related",
+        &json!({"repo": "krepo", "id": "d2"}),
+    );
+    assert_eq!(
+        got["result"]["relations"][0]["confirm_state"],
+        json!("confirmed")
+    );
+    id += 1;
+    let got = kjson(
+        &mut s,
+        id,
+        "riltra_knowledge_related",
+        &json!({"repo": "krepo", "id": "d3"}),
+    );
+    assert_eq!(got["result"]["relations"], json!([]));
+    id += 1;
+    let got = kjson(
+        &mut s,
+        id,
+        "riltra_knowledge_related",
+        &json!({"repo": "krepo", "id": "d3", "revision": 1}),
+    );
+    assert_eq!(got["result"]["relations"][0]["relation_id"], json!("r2"));
+    id += 1;
+
+    // Page bounds are exact.
+    let got = kjson(
+        &mut s,
+        id,
+        "riltra_knowledge_related",
+        &json!({"repo": "krepo", "id": "d1", "direction": "inbound", "limit": 1}),
+    );
+    assert_eq!(
+        got["pagination"],
+        json!({"limit": 1, "offset": 0, "total": 2, "truncated": true, "next_offset": 1})
+    );
+
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn t4_knowledge_error_taxonomy_matches_cli_texts() {
+    let h = home("cp5-errors");
+    let r = home("cp5-errors-repo");
+    init_repo(&h, &r, "krepo");
+    let mut s = ready(&h);
+
+    // Repository problems: not_registered with the CLI text.
+    for (id, tool, mcp, cli) in [
+        (
+            2,
+            "riltra_knowledge_search",
+            json!({"repo": "ghost", "query": "x"}),
+            vec!["knowledge", "search", "--repo", "ghost", "--query", "x"],
+        ),
+        (
+            3,
+            "riltra_knowledge_show",
+            json!({"repo": "ghost", "id": "d1"}),
+            vec!["knowledge", "show", "--repo", "ghost", "--id", "d1"],
+        ),
+        (
+            4,
+            "riltra_knowledge_related",
+            json!({"repo": "ghost", "id": "d1"}),
+            vec!["knowledge", "related", "--repo", "ghost", "--id", "d1"],
+        ),
+    ] {
+        let d = kerr(&h, &mut s, id, tool, &mcp, &cli);
+        assert_eq!(d["kind"], "not_registered", "{tool}: {d}");
+    }
+
+    // Missing store: show/related refuse as store_missing, nothing created.
+    let before = listing(&h);
+    let d = kerr(
+        &h,
+        &mut s,
+        5,
+        "riltra_knowledge_show",
+        &json!({"repo": "krepo", "id": "d1"}),
+        &["knowledge", "show", "--repo", "krepo", "--id", "d1"],
+    );
+    assert_eq!(d["kind"], "store_missing", "{d}");
+    let d = kerr(
+        &h,
+        &mut s,
+        6,
+        "riltra_knowledge_related",
+        &json!({"repo": "krepo", "id": "d1"}),
+        &["knowledge", "related", "--repo", "krepo", "--id", "d1"],
+    );
+    assert_eq!(d["kind"], "store_missing", "{d}");
+    assert_eq!(listing(&h), before, "refusals must not create storage");
+
+    kcreate(&h, "krepo", K_D1);
+
+    // Input problems: invalid_input with the CLI exit-2 texts.
+    for (id, tool, mcp, cli) in [
+        (
+            7,
+            "riltra_knowledge_search",
+            json!({"repo": "krepo", "query": "body", "kind": "bogus"}),
+            vec![
+                "knowledge",
+                "search",
+                "--repo",
+                "krepo",
+                "--query",
+                "body",
+                "--kind",
+                "bogus",
+            ],
+        ),
+        (
+            8,
+            "riltra_knowledge_search",
+            json!({"repo": "krepo", "query": "body", "limit": 0}),
+            vec![
+                "knowledge",
+                "search",
+                "--repo",
+                "krepo",
+                "--query",
+                "body",
+                "--limit",
+                "0",
+            ],
+        ),
+        (
+            9,
+            "riltra_knowledge_search",
+            json!({"repo": "krepo", "query": "body", "limit": 1001}),
+            vec![
+                "knowledge",
+                "search",
+                "--repo",
+                "krepo",
+                "--query",
+                "body",
+                "--limit",
+                "1001",
+            ],
+        ),
+        (
+            10,
+            "riltra_knowledge_show",
+            json!({"repo": "krepo", "id": "missing"}),
+            vec!["knowledge", "show", "--repo", "krepo", "--id", "missing"],
+        ),
+        (
+            11,
+            "riltra_knowledge_show",
+            json!({"repo": "krepo", "id": "d1", "revision": 99}),
+            vec![
+                "knowledge",
+                "show",
+                "--repo",
+                "krepo",
+                "--id",
+                "d1",
+                "--revision",
+                "99",
+            ],
+        ),
+        (
+            12,
+            "riltra_knowledge_related",
+            json!({"repo": "krepo", "id": "missing"}),
+            vec!["knowledge", "related", "--repo", "krepo", "--id", "missing"],
+        ),
+        (
+            13,
+            "riltra_knowledge_related",
+            json!({"repo": "krepo", "id": "d1", "direction": "sideways"}),
+            vec![
+                "knowledge",
+                "related",
+                "--repo",
+                "krepo",
+                "--id",
+                "d1",
+                "--direction",
+                "sideways",
+            ],
+        ),
+    ] {
+        let d = kerr(&h, &mut s, id, tool, &mcp, &cli);
+        assert_eq!(d["kind"], "invalid_input", "{tool}: {d}");
+    }
+
+    // Stale generation: conflict with the CLI's message.
+    let d = kerr(
+        &h,
+        &mut s,
+        14,
+        "riltra_knowledge_search",
+        &json!({"repo": "krepo", "query": "body", "generation": 99}),
+        &[
+            "knowledge",
+            "search",
+            "--repo",
+            "krepo",
+            "--query",
+            "body",
+            "--generation",
+            "99",
+        ],
+    );
+    assert_eq!(d["kind"], "conflict", "{d}");
+    let d = kerr(
+        &h,
+        &mut s,
+        15,
+        "riltra_knowledge_related",
+        &json!({"repo": "krepo", "id": "d1", "generation": 99}),
+        &[
+            "knowledge",
+            "related",
+            "--repo",
+            "krepo",
+            "--id",
+            "d1",
+            "--generation",
+            "99",
+        ],
+    );
+    assert_eq!(d["kind"], "conflict", "{d}");
+
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn t5_knowledge_reads_leave_stores_untouched_and_create_nothing() {
+    let h = home("cp5-readonly");
+    let r = home("cp5-readonly-repo");
+    init_repo(&h, &r, "krepo");
+    kcreate(&h, "krepo", K_D1);
+    let db = knowledge_db(&h, "krepo");
+    assert_eq!(user_version(&db), 1);
+    let schema_v1 = schema_dump(&db);
+
+    // Foundation v1 store: reads never migrate.
+    let mut s = ready(&h);
+    kjson(
+        &mut s,
+        2,
+        "riltra_knowledge_search",
+        &json!({"repo": "krepo", "query": "kjson"}),
+    );
+    kjson(
+        &mut s,
+        3,
+        "riltra_knowledge_show",
+        &json!({"repo": "krepo", "id": "d1"}),
+    );
+    kjson(
+        &mut s,
+        4,
+        "riltra_knowledge_related",
+        &json!({"repo": "krepo", "id": "d1"}),
+    );
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
+    assert_eq!(user_version(&db), 1, "v1 read must not migrate");
+    assert_eq!(schema_dump(&db), schema_v1, "v1 schema must be untouched");
+
+    // Full-stage v2 store: reads plus concurrent CLI writes stay consistent.
+    kupdate(
+        &h,
+        "krepo",
+        "d1",
+        1,
+        r#"{"title":"First v2","body":"kjson alpha v2","status":"active","author":"a","evidence":[],"confirm_state":"confirmed"}"#,
+    );
+    assert_eq!(user_version(&db), 2);
+    let schema_v2 = schema_dump(&db);
+    let mut s = ready(&h);
+    let writer = {
+        let h = h.clone();
+        std::thread::spawn(move || {
+            for i in 0..3 {
+                kcreate(
+                    &h,
+                    "krepo",
+                    &format!(
+                        r#"{{"id":"w{i}","kind":"decision","title":"W{i}","body":"kjson w{i}","status":"active","author":"a","evidence":[]}}"#
+                    ),
+                );
+            }
+        })
+    };
+    for id in 10..16 {
+        let got = kjson(
+            &mut s,
+            id,
+            "riltra_knowledge_search",
+            &json!({"repo": "krepo", "query": "kjson"}),
+        );
+        assert_eq!(got["repo"], json!("krepo"), "{got}");
+        assert_eq!(got["operation"], json!("search"), "{got}");
+        assert!(got["generation"].as_u64().is_some(), "{got}");
+    }
+    writer.join().unwrap();
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
+    assert_eq!(user_version(&db), 2);
+    assert_eq!(schema_dump(&db), schema_v2, "v2 schema must be untouched");
+
+    // Missing store: the empty success and both refusals create nothing.
+    let hm = home("cp5-readonly-missing");
+    let rm = home("cp5-readonly-missing-repo");
+    init_repo(&hm, &rm, "krepo");
+    let before = listing(&hm);
+    let mut s = ready(&hm);
+    let got = kjson(
+        &mut s,
+        2,
+        "riltra_knowledge_search",
+        &json!({"repo": "krepo", "query": "x"}),
+    );
+    assert_eq!(got["generation"], json!(0));
+    assert!(is_error(&call_tool(
+        &mut s,
+        3,
+        "riltra_knowledge_show",
+        &json!({"repo": "krepo", "id": "d1"})
+    )));
+    assert!(is_error(&call_tool(
+        &mut s,
+        4,
+        "riltra_knowledge_related",
+        &json!({"repo": "krepo", "id": "d1"})
+    )));
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
+    assert_eq!(listing(&hm), before, "nothing may be created");
+    assert!(!knowledge_db(&hm, "krepo").exists());
+}
+
+#[test]
+fn t5_knowledge_hostile_or_corrupt_store_fails_closed() {
+    let h = home("cp5-hostile");
+    let r = home("cp5-hostile-repo");
+    init_repo(&h, &r, "krepo");
+    let db = knowledge_db(&h, "krepo");
+    std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+
+    // Directory at the store path: refuse, never read as empty.
+    std::fs::create_dir_all(&db).unwrap();
+    let mut s = ready(&h);
+    let d = kerr(
+        &h,
+        &mut s,
+        2,
+        "riltra_knowledge_search",
+        &json!({"repo": "krepo", "query": "x"}),
+        &["knowledge", "search", "--repo", "krepo", "--query", "x"],
+    );
+    assert_eq!(d["kind"], "store_error", "{d}");
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
+    std::fs::remove_dir_all(&db).unwrap();
+
+    // Corrupt bytes: every tool refuses as store_error, bytes stay put.
+    std::fs::write(&db, b"not a knowledge store").unwrap();
+    let before = std::fs::read(&db).unwrap();
+    let mut s = ready(&h);
+    for (id, tool, mcp, cli) in [
+        (
+            2,
+            "riltra_knowledge_search",
+            json!({"repo": "krepo", "query": "x"}),
+            vec!["knowledge", "search", "--repo", "krepo", "--query", "x"],
+        ),
+        (
+            3,
+            "riltra_knowledge_show",
+            json!({"repo": "krepo", "id": "d1"}),
+            vec!["knowledge", "show", "--repo", "krepo", "--id", "d1"],
+        ),
+        (
+            4,
+            "riltra_knowledge_related",
+            json!({"repo": "krepo", "id": "d1"}),
+            vec!["knowledge", "related", "--repo", "krepo", "--id", "d1"],
+        ),
+    ] {
+        let d = kerr(&h, &mut s, id, tool, &mcp, &cli);
+        assert_eq!(d["kind"], "store_error", "{tool}: {d}");
+    }
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
+    assert_eq!(
+        std::fs::read(&db).unwrap(),
+        before,
+        "corrupt store must be byte-untouched"
+    );
+    std::fs::remove_file(&db).unwrap();
+
+    // Symlinked store path: fail closed through the link guard.
+    let elsewhere = h.join("elsewhere.db");
+    std::fs::write(&elsewhere, b"not a store").unwrap();
+    if !try_file_symlink(&elsewhere, &db) {
+        return; // OS refused symlinks here; nothing to prove.
+    }
+    let mut s = ready(&h);
+    for (id, tool, mcp, cli) in [
+        (
+            2,
+            "riltra_knowledge_search",
+            json!({"repo": "krepo", "query": "x"}),
+            vec!["knowledge", "search", "--repo", "krepo", "--query", "x"],
+        ),
+        (
+            3,
+            "riltra_knowledge_show",
+            json!({"repo": "krepo", "id": "d1"}),
+            vec!["knowledge", "show", "--repo", "krepo", "--id", "d1"],
+        ),
+        (
+            4,
+            "riltra_knowledge_related",
+            json!({"repo": "krepo", "id": "d1"}),
+            vec!["knowledge", "related", "--repo", "krepo", "--id", "d1"],
+        ),
+    ] {
+        let d = kerr(&h, &mut s, id, tool, &mcp, &cli);
+        assert_eq!(d["kind"], "store_error", "{tool}: {d}");
+    }
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
+    assert!(
+        std::fs::symlink_metadata(&db)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the link must survive the refusal"
+    );
+    assert_eq!(std::fs::read(&elsewhere).unwrap(), b"not a store");
 }

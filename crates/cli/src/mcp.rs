@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
-//! M8 CP1/CP3/CP4: MCP stdio server. CP1 serves initialize; CP3 registers the
-//! first read-only tools; CP4 adds the graph tools (callers, callees, trace,
-//! impact) — seven tools total (design gate §3) through the rmcp tool macros.
-//! Tool calls reuse the CLI's response formatters byte-for-byte, and the
-//! index read path (`store::open_read`) never creates, migrates, or replaces
-//! a database. stdout stays protocol-only; blocking work runs on the tokio
-//! blocking pool.
+//! M8 CP1/CP3/CP4/CP5: MCP stdio server. CP1 serves initialize; CP3 registers
+//! the first read-only tools; CP4 adds the graph tools (callers, callees,
+//! trace, impact); CP5 adds the knowledge tools (search, show, related) —
+//! ten tools total (design gate §3) through the rmcp tool macros. Tool calls
+//! reuse the CLI's response formatters byte-for-byte, and the index read path
+//! (`store::open_read`) and the knowledge read path
+//! (`knowledge_store::open_knowledge(…, false)`) never create, migrate, or
+//! replace a database. stdout stays protocol-only; blocking work runs on the
+//! tokio blocking pool.
 
 use std::path::{Path, PathBuf};
 
@@ -15,7 +17,8 @@ use rmcp::schemars::JsonSchema;
 use rmcp::{serve_server, tool, tool_handler, tool_router, ServerHandler};
 use serde::Deserialize;
 
-use crate::{git, ignore, index, paths, registry, response, store};
+use crate::knowledge_store_absent;
+use crate::{git, ignore, index, knowledge, knowledge_store, paths, registry, response, store};
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
@@ -102,6 +105,68 @@ struct ImpactInput {
     limit: Option<usize>,
     /// Paths to skip before returning results (default 0).
     offset: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(crate = "rmcp::schemars")]
+struct KnowledgeSearchInput {
+    /// Registered repository name.
+    repo: String,
+    /// Literal text searched in titles and bodies (CLI
+    /// `knowledge search --query`).
+    query: String,
+    /// Optional record kind filter (CLI `--kind`).
+    kind: Option<String>,
+    /// Include archived records (CLI `--include-archived`; default false).
+    include_archived: Option<bool>,
+    /// Include superseded records (CLI `--include-superseded`; default false).
+    include_superseded: Option<bool>,
+    /// Include retracted records (CLI `--include-retracted`; default false).
+    include_retracted: Option<bool>,
+    /// Maximum hits to return (CLI default 50, maximum 1000).
+    limit: Option<usize>,
+    /// Hits to skip before returning results (default 0).
+    offset: Option<usize>,
+    /// Expected store generation; a stale value conflicts instead of serving
+    /// a shifted page.
+    generation: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(crate = "rmcp::schemars")]
+struct KnowledgeShowInput {
+    /// Registered repository name.
+    repo: String,
+    /// Record id to read.
+    id: String,
+    /// Exact revision to read (CLI `--revision`; default is the current head).
+    revision: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(crate = "rmcp::schemars")]
+struct KnowledgeRelatedInput {
+    /// Registered repository name.
+    repo: String,
+    /// Record id whose relations are read.
+    id: String,
+    /// Exact revision whose bindings are read (default is the current head).
+    revision: Option<u64>,
+    /// `outbound` (authored links, the default) or `inbound` (links pointing
+    /// at the record).
+    direction: Option<String>,
+    /// Include retracted relations (CLI `--include-retracted`; default false).
+    include_retracted: Option<bool>,
+    /// Maximum relations to return (CLI default 50, maximum 1000).
+    limit: Option<usize>,
+    /// Relations to skip before returning results (default 0).
+    offset: Option<usize>,
+    /// Expected store generation; a stale value conflicts instead of serving
+    /// a shifted page.
+    generation: Option<u64>,
 }
 
 struct RiltraMcp;
@@ -223,6 +288,57 @@ impl RiltraMcp {
         Parameters(input): Parameters<ImpactInput>,
     ) -> CallToolResult {
         blocking(move || impact_doc(&input)).await
+    }
+
+    #[tool(
+        name = "riltra_knowledge_search",
+        description = "Search knowledge records by literal text (same document as CLI `knowledge search`). A missing store answers with an empty result and creates nothing.",
+        annotations(
+            title = "Search knowledge records",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn riltra_knowledge_search(
+        &self,
+        Parameters(input): Parameters<KnowledgeSearchInput>,
+    ) -> CallToolResult {
+        blocking(move || knowledge_search_doc(&input)).await
+    }
+
+    #[tool(
+        name = "riltra_knowledge_show",
+        description = "Read one knowledge revision with its evidence freshness (same document as CLI `knowledge show`). Confirmation is reported as stored provenance, never as promotion.",
+        annotations(
+            title = "Read a knowledge revision",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn riltra_knowledge_show(
+        &self,
+        Parameters(input): Parameters<KnowledgeShowInput>,
+    ) -> CallToolResult {
+        blocking(move || knowledge_show_doc(&input)).await
+    }
+
+    #[tool(
+        name = "riltra_knowledge_related",
+        description = "One-hop knowledge relations in either direction (same document as CLI `knowledge related`); retracted relations are hidden unless requested.",
+        annotations(
+            title = "Read knowledge relations",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn riltra_knowledge_related(
+        &self,
+        Parameters(input): Parameters<KnowledgeRelatedInput>,
+    ) -> CallToolResult {
+        blocking(move || knowledge_related_doc(&input)).await
     }
 }
 
@@ -600,9 +716,9 @@ fn missing_index() -> CallToolResult {
     tool_error("no_index", "no snapshot: index the repository first")
 }
 
-/// Registry + recorded-root resolution for the graph tools: the same checks
-/// and messages as `repo_status` and the CLI's root resolution.
-fn graph_repo_root(repo: &str) -> Result<(PathBuf, PathBuf), CallToolResult> {
+/// Registry + recorded-root resolution for the graph and knowledge tools: the
+/// same checks and messages as `repo_status` and the CLI's root resolution.
+fn repo_root(repo: &str) -> Result<(PathBuf, PathBuf), CallToolResult> {
     let home = paths::config_dir();
     let reg = match registry::load(&paths::registry_path()) {
         Ok(reg) => reg,
@@ -706,7 +822,7 @@ fn graph_doc(
         Ok(d) => d,
         Err(e) => return e,
     };
-    let (home, canon) = match graph_repo_root(repo) {
+    let (home, canon) = match repo_root(repo) {
         Ok(v) => v,
         Err(e) => return e,
     };
@@ -842,6 +958,234 @@ fn impact_doc(input: &ImpactInput) -> CallToolResult {
         input.offset,
         GraphMode::Impact,
     )
+}
+
+// --- CP5: knowledge tools ----------------------------------------------------
+
+/// CLI-parity page-range check for the knowledge tools (`--limit` default 50,
+/// maximum 1000). The CLI has no extra exit-2 offset bound here, so the
+/// store's own range check stays the guard.
+fn knowledge_page(
+    limit: Option<usize>,
+    offset: Option<usize>,
+) -> Result<(usize, usize), CallToolResult> {
+    let limit = limit.unwrap_or(knowledge::SEARCH_LIMIT_DEFAULT);
+    if !(1..=knowledge::SEARCH_LIMIT_MAX).contains(&limit) {
+        return Err(tool_error(
+            "invalid_input",
+            &format!(
+                "--limit must be between 1 and {}",
+                knowledge::SEARCH_LIMIT_MAX
+            ),
+        ));
+    }
+    Ok((limit, offset.unwrap_or(0)))
+}
+
+/// Classify a knowledge-query refusal by its CLI text (design gate §3): a
+/// missing store is `store_missing`; the generation guard is `conflict`;
+/// record/kind/query refusals are `invalid_input`; everything else fails
+/// closed as `store_error`, message preserved.
+fn knowledge_query_error(message: String) -> CallToolResult {
+    let kind = if message.starts_with("no knowledge store") {
+        "store_missing"
+    } else if message.starts_with("knowledge generation conflict:") {
+        "conflict"
+    } else if message.starts_with("unknown record id:")
+        || message.starts_with("unknown record revision:")
+        || message.starts_with("record revision out of range:")
+        || message.starts_with("invalid ")
+        || message.starts_with("search query is ")
+        || message.starts_with("search limit")
+        || message.starts_with("related limit")
+    {
+        "invalid_input"
+    } else {
+        "store_error"
+    };
+    tool_error(kind, &message)
+}
+
+/// The CLI's `RepoEntry` for the knowledge store, built from the recorded
+/// root exactly like `main.rs::knowledge_repo`.
+fn knowledge_entry(repo: &str, root: &str) -> registry::RepoEntry {
+    registry::RepoEntry {
+        name: repo.to_string(),
+        root: root.to_string(),
+        added_unix: 0,
+    }
+}
+
+fn knowledge_search_doc(input: &KnowledgeSearchInput) -> CallToolResult {
+    // Validation order and texts mirror `main.rs::knowledge_search`.
+    if let Some(kind) = input.kind.as_deref() {
+        if let Err(e) = knowledge::validate_kind(kind) {
+            return tool_error("invalid_input", &e);
+        }
+    }
+    if input.query.len() > knowledge::MAX_QUERY_TEXT_BYTES {
+        return tool_error(
+            "invalid_input",
+            &format!(
+                "search query is {} bytes, at most {} allowed",
+                input.query.len(),
+                knowledge::MAX_QUERY_TEXT_BYTES
+            ),
+        );
+    }
+    let (limit, offset) = match knowledge_page(input.limit, input.offset) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let (home, canon) = match repo_root(&input.repo) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let root = canon.to_string_lossy().to_string();
+    let db = knowledge_store::knowledge_db_path(&home, &input.repo);
+    match knowledge_store_absent(&db) {
+        // Genuinely absent store: empty success, and no database is created.
+        Ok(true) => {
+            return doc(&response::knowledge_envelope(
+                &input.repo,
+                0,
+                "search",
+                &response::knowledge_search_result_json(
+                    &input.query,
+                    input.kind.as_deref(),
+                    input.include_archived.unwrap_or(false),
+                    &[],
+                    &canon,
+                ),
+                Some(response::pagination_json(limit, offset, 0, false, None)),
+            ))
+        }
+        Ok(false) => {}
+        Err(e) => return tool_error("store_error", &e),
+    }
+    let entry = knowledge_entry(&input.repo, &root);
+    let conn = match knowledge_store::open_knowledge(&entry, false) {
+        Ok(conn) => conn,
+        Err(e) => return knowledge_query_error(e),
+    };
+    let page = match knowledge_store::search(
+        &conn,
+        &input.query,
+        input.kind.as_deref(),
+        input.include_archived.unwrap_or(false),
+        input.include_superseded.unwrap_or(false),
+        input.include_retracted.unwrap_or(false),
+        limit,
+        offset,
+        input.generation,
+    ) {
+        Ok(page) => page,
+        Err(e) => return knowledge_query_error(e),
+    };
+    doc(&response::knowledge_envelope(
+        &input.repo,
+        page.generation,
+        "search",
+        &response::knowledge_search_result_json(
+            &input.query,
+            input.kind.as_deref(),
+            input.include_archived.unwrap_or(false),
+            &page.hits,
+            &canon,
+        ),
+        Some(response::pagination_json(
+            limit,
+            offset,
+            page.total,
+            page.truncated,
+            page.next_offset,
+        )),
+    ))
+}
+
+fn knowledge_show_doc(input: &KnowledgeShowInput) -> CallToolResult {
+    let (_home, canon) = match repo_root(&input.repo) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let entry = knowledge_entry(&input.repo, &canon.to_string_lossy());
+    let conn = match knowledge_store::open_knowledge(&entry, false) {
+        Ok(conn) => conn,
+        Err(e) => return knowledge_query_error(e),
+    };
+    let record = match knowledge_store::show_record(&conn, &input.id, input.revision) {
+        Ok(record) => record,
+        Err(e) => return knowledge_query_error(e),
+    };
+    let generation = match knowledge_store::read_generation(&conn) {
+        Ok(generation) => generation,
+        Err(e) => return knowledge_query_error(e),
+    };
+    doc(&response::knowledge_envelope(
+        &input.repo,
+        generation,
+        "show",
+        &response::record_json(&record, &canon),
+        None,
+    ))
+}
+
+fn knowledge_related_doc(input: &KnowledgeRelatedInput) -> CallToolResult {
+    let (limit, offset) = match knowledge_page(input.limit, input.offset) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let direction = input.direction.as_deref().unwrap_or("outbound");
+    let dir = match direction {
+        "outbound" => knowledge_store::RelationDirection::Outbound,
+        "inbound" => knowledge_store::RelationDirection::Inbound,
+        other => {
+            return tool_error(
+                "invalid_input",
+                &format!("invalid --direction value: '{other}' (expected inbound or outbound)"),
+            )
+        }
+    };
+    let (_home, canon) = match repo_root(&input.repo) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let entry = knowledge_entry(&input.repo, &canon.to_string_lossy());
+    let conn = match knowledge_store::open_knowledge(&entry, false) {
+        Ok(conn) => conn,
+        Err(e) => return knowledge_query_error(e),
+    };
+    let page = match knowledge_store::related(
+        &conn,
+        &input.id,
+        input.revision,
+        dir,
+        input.include_retracted.unwrap_or(false),
+        limit,
+        offset,
+        input.generation,
+    ) {
+        Ok(page) => page,
+        Err(e) => return knowledge_query_error(e),
+    };
+    doc(&response::knowledge_envelope(
+        &input.repo,
+        page.generation,
+        "related",
+        &response::knowledge_related_result_json(
+            &input.id,
+            input.revision,
+            direction,
+            &page.relations,
+        ),
+        Some(response::pagination_json(
+            limit,
+            offset,
+            page.total,
+            page.truncated,
+            page.next_offset,
+        )),
+    ))
 }
 
 /// Run the MCP stdio server to completion. Exit codes follow the CLI:

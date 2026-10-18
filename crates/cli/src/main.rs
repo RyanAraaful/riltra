@@ -1176,7 +1176,7 @@ fn knowledge_open(
 /// result and no file creation. Any other state — symlink (dangling or live,
 /// both an escape), directory, fifo, or an uninspectable path — is an error so
 /// a hostile or corrupt path fails closed instead of reading as empty.
-fn knowledge_store_absent(db: &Path) -> Result<bool, String> {
+pub(crate) fn knowledge_store_absent(db: &Path) -> Result<bool, String> {
     match std::fs::symlink_metadata(db) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(true),
         Err(e) => Err(format!(
