@@ -21,6 +21,7 @@ mod lsp;
 mod mcp;
 mod paths;
 mod registry;
+mod response;
 mod scan;
 mod scip;
 mod scip_proto;
@@ -272,25 +273,6 @@ fn cmd_index(name: &str, full: bool, out: &mut String, err: &mut String) -> i32 
     }
 }
 
-fn snapshot_json(snapshot: &store::Snapshot) -> String {
-    format!(
-        "{{\"id\":{},\"created_unix\":{},\"head\":{},\"branch\":{},\"dirty\":{},\"status_at_write\":\"{}\",\"nonce\":\"{}\"}}",
-        snapshot.id,
-        snapshot.created_unix,
-        match &snapshot.head {
-            Some(h) => format!("\"{}\"", json::escape(h)),
-            None => "null".to_string(),
-        },
-        match &snapshot.branch {
-            Some(b) => format!("\"{}\"", json::escape(b)),
-            None => "null".to_string(),
-        },
-        snapshot.dirty,
-        snapshot.status_at_write,
-        snapshot.nonce
-    )
-}
-
 fn cmd_index_status(name: &str, out: &mut String, err: &mut String) -> i32 {
     let home = paths::config_dir();
     let reg = match registry::load(&paths::registry_path()) {
@@ -327,7 +309,7 @@ fn cmd_index_status(name: &str, out: &mut String, err: &mut String) -> i32 {
         reasons.join(","),
         fts,
         match &freshness.snapshot {
-            Some(snapshot) => snapshot_json(snapshot),
+            Some(snapshot) => response::snapshot_json(snapshot),
             None => "null".to_string(),
         }
     ) + "\n";
@@ -390,14 +372,18 @@ fn cmd_search(
     let recorded = entry.root.clone();
     let db = store::db_path(&home, name);
     if !db.exists() {
-        *out = format!(
-            "{{\"repo\":\"{}\",\"root\":\"{}\",\"snapshot\":null,\"freshness\":\"unknown\",\"reasons\":[\"no-index\"],\"query\":{{\"symbol\":\"{}\",\"limit\":{},\"offset\":{}}},\"total\":0,\"results\":[],\"truncated\":false}}\n",
-            json::escape(name),
-            json::escape(&recorded),
-            json::escape(symbol),
+        *out = response::search_response_json(&response::SearchResponse {
+            repo: name,
+            root: &recorded,
+            snapshot: None,
+            freshness: "unknown",
+            reasons: &["no-index".to_string()],
+            symbol,
             limit,
-            offset
-        );
+            offset,
+            total: 0,
+            hits: &[],
+        }) + "\n";
         return 0;
     }
     // One read transaction across snapshot read, verdict, and fact rows:
@@ -427,15 +413,18 @@ fn cmd_search(
         Ok(c) => c,
         Err(_) => {
             let _ = tx.commit();
-            *out = format!(
-                "{{\"repo\":\"{}\",\"root\":\"{}\",\"snapshot\":{},\"freshness\":\"unknown\",\"reasons\":[\"root-unreadable\"],\"query\":{{\"symbol\":\"{}\",\"limit\":{},\"offset\":{}}},\"total\":0,\"results\":[],\"truncated\":false}}\n",
-                json::escape(name),
-                json::escape(&recorded),
-                snapshot_json(&snapshot),
-                json::escape(symbol),
+            *out = response::search_response_json(&response::SearchResponse {
+                repo: name,
+                root: &recorded,
+                snapshot: Some(&snapshot),
+                freshness: "unknown",
+                reasons: &["root-unreadable".to_string()],
+                symbol,
                 limit,
-                offset
-            );
+                offset,
+                total: 0,
+                hits: &[],
+            }) + "\n";
             return 0;
         }
     };
@@ -448,45 +437,18 @@ fn cmd_search(
         }
     };
     let _ = tx.commit();
-    let results: Vec<String> = hits
-        .iter()
-        .map(|hit| {
-            format!(
-                "{{\"path\":\"{}\",\"kind\":\"{}\",\"name\":{},\"span\":{{\"start_line\":{},\"start_col\":{},\"end_line\":{},\"end_col\":{}}},\"bytes\":[{},{}],\"provenance\":{{\"provider\":\"{}\",\"grammar\":\"{}\",\"language\":\"{}\"}},\"snapshot\":{}}}",
-                json::escape(&hit.path),
-                hit.kind,
-                match &hit.name {
-                    Some(n) => format!("\"{}\"", json::escape(n)),
-                    None => "null".to_string(),
-                },
-                hit.start_line,
-                hit.start_col,
-                hit.end_line,
-                hit.end_col,
-                hit.byte_start,
-                hit.byte_end,
-                hit.provider,
-                hit.grammar,
-                hit.language,
-                hit.snapshot_id
-            )
-        })
-        .collect();
-    let truncated = offset + results.len() < total;
-    *out = format!(
-        "{{\"repo\":\"{}\",\"root\":\"{}\",\"snapshot\":{},\"freshness\":\"{}\",\"reasons\":[{}],\"query\":{{\"symbol\":\"{}\",\"limit\":{},\"offset\":{}}},\"total\":{},\"results\":[{}],\"truncated\":{}}}",
-        json::escape(name),
-        json::escape(&snapshot.root),
-        snapshot_json(&snapshot),
-        status,
-        reasons.iter().map(|r| format!("\"{r}\"")).collect::<Vec<_>>().join(","),
-        json::escape(symbol),
+    *out = response::search_response_json(&response::SearchResponse {
+        repo: name,
+        root: &snapshot.root,
+        snapshot: Some(&snapshot),
+        freshness: &status,
+        reasons: &reasons,
+        symbol,
         limit,
         offset,
         total,
-        results.join(","),
-        truncated
-    ) + "\n";
+        hits: &hits,
+    }) + "\n";
     0
 }
 
@@ -817,7 +779,7 @@ fn cmd_edge(op: args::EdgeOp, out: &mut String, err: &mut String) -> i32 {
     };
     match index::edge_query(&home, &repo, Path::new(&root), &request) {
         Ok(o) => {
-            *out = edge_query_json(&o) + "\n";
+            *out = response::edge_query_json(&o) + "\n";
             0
         }
         Err(e) => {
@@ -825,76 +787,6 @@ fn cmd_edge(op: args::EdgeOp, out: &mut String, err: &mut String) -> i32 {
             3
         }
     }
-}
-
-fn edge_string(value: &str) -> String {
-    format!("\"{}\"", json::escape(value))
-}
-fn edge_optional(value: Option<&str>) -> String {
-    value.map(edge_string).unwrap_or_else(|| "null".to_string())
-}
-fn edge_number<T: std::fmt::Display>(value: Option<T>) -> String {
-    value
-        .map(|n| n.to_string())
-        .unwrap_or_else(|| "null".to_string())
-}
-fn edge_span(value: Option<(usize, usize)>) -> String {
-    value
-        .map(|(a, b)| format!("[{a},{b}]"))
-        .unwrap_or_else(|| "null".to_string())
-}
-fn edge_strings(values: &[String]) -> String {
-    format!(
-        "[{}]",
-        values
-            .iter()
-            .map(|s| edge_string(s))
-            .collect::<Vec<_>>()
-            .join(",")
-    )
-}
-
-fn edge_endpoint_json(endpoint: &Option<store::EdgeEndpoint>) -> String {
-    match endpoint {
-        Some(store::EdgeEndpoint::Scip { import_id, symbol_uri, doc }) => format!("{{\"type\":\"scip\",\"import_id\":{import_id},\"symbol_uri\":{},\"doc\":{},\"path\":null,\"byte_start\":null,\"byte_end\":null}}", edge_string(symbol_uri), edge_optional(doc.as_deref())),
-        Some(store::EdgeEndpoint::SyntaxDef { path, byte_start, byte_end }) => format!("{{\"type\":\"syntax_def\",\"import_id\":null,\"symbol_uri\":null,\"doc\":null,\"path\":{},\"byte_start\":{byte_start},\"byte_end\":{byte_end}}}", edge_string(path)),
-        None => "null".to_string(),
-    }
-}
-
-fn edge_hit_json(hit: &index::EdgeHitOut) -> String {
-    let e = &hit.edge;
-    let imports = hit.evidence.imports.iter().map(|(id, i)| format!("{{\"id\":{id},\"provider\":{},\"version\":{},\"artifact_id\":{},\"source_revision\":{},\"content_identity\":{}}}", edge_string(&i.provider_name), edge_string(&i.provider_version), edge_string(&i.artifact_id), edge_string(&i.source_revision), edge_string(&i.content_identity))).collect::<Vec<_>>().join(",");
-    // Legacy convenience fields retain only a UNIQUE proven import, never an
-    // arbitrary first overlap. Complete provenance is in evidence.imports.
-    let unique = if hit.evidence.imports.len() == 1 {
-        hit.evidence.imports.first()
-    } else {
-        None
-    };
-    format!("{{\"kind\":{},\"precision\":{},\"caller\":{},\"callee\":{},\"caller_path\":{},\"caller_span\":{},\"callee_name\":{},\"provider\":{},\"import_id\":{},\"tool\":{},\"verification\":{},\"unresolved\":{},\"evidence\":{{\"path\":{},\"span\":{},\"callee_span\":{},\"terminal_span\":{},\"reference_span\":{},\"digest\":{},\"provider\":{},\"imports\":[{imports}]}}}}",
-        edge_string(&e.edge_kind), edge_string(&e.precision), edge_endpoint_json(&e.caller), edge_endpoint_json(&e.callee), edge_string(&e.caller_path), edge_span(Some(e.caller_span_bytes)), edge_string(&e.callee_name), edge_string(&e.provider), edge_number(unique.map(|(id,_)| id)), edge_optional(unique.map(|(_,i)| i.provider_name.as_str())), edge_string(&hit.verification), edge_optional(e.unresolved.as_deref()),
-        edge_string(&e.caller_path), edge_span(Some(e.caller_span_bytes)), edge_span(hit.evidence.callee_span), edge_span(hit.evidence.terminal_span), edge_span(hit.evidence.reference_span), edge_string(&hit.evidence.digest), edge_string(&e.provider))
-}
-
-fn edge_query_json(o: &index::EdgeQueryOut) -> String {
-    let a = &o.anchor;
-    let edges = o
-        .edges
-        .iter()
-        .map(edge_hit_json)
-        .collect::<Vec<_>>()
-        .join(",");
-    let denominator = o
-        .completeness
-        .denominator
-        .iter()
-        .map(|(k, v)| format!("{}:{v}", edge_string(k)))
-        .collect::<Vec<_>>()
-        .join(",");
-    format!("{{\"schema_version\":1,\"repo\":{},\"snapshot\":{{\"id\":{},\"nonce\":{},\"revision\":{}}},\"direction\":{},\"anchor\":{{\"kind\":{},\"path\":{},\"line\":{},\"col\":{},\"symbol_uri\":{},\"import_id\":{},\"precision\":{},\"anchor_uncertainty\":{},\"span\":{},\"endpoint\":{}}},\"freshness\":{{\"status\":{},\"reasons\":{}}},\"verification\":{},\"completeness\":{{\"status\":{},\"covered\":{},\"total\":{},\"denominator\":{{{denominator}}},\"unresolved\":{}}},\"edges\":[{edges}],\"truncated\":{},\"limits\":{{\"limit\":{},\"offset\":{},\"next_offset\":{}}}}}",
-        edge_string(&o.repo), o.snapshot.id, edge_string(&o.snapshot.nonce), edge_string(&o.revision), edge_string(o.direction.as_str()), edge_string(a.kind.as_str()), edge_string(&a.path), a.line1, a.col1, edge_optional(a.symbol_uri.as_deref()), edge_number(a.import_id), edge_string(&a.precision), edge_optional(a.uncertainty.as_deref()), edge_span(a.span_bytes), edge_endpoint_json(&index::anchor_endpoint(a)),
-        edge_string(&o.freshness), edge_strings(&o.freshness_reasons), edge_string(&o.verification), edge_string(&o.completeness.status), o.completeness.covered, o.completeness.total, edge_strings(&o.completeness.unresolved), o.truncated, o.limit, o.offset, edge_number(o.next_offset))
 }
 
 fn trace_position(value: &str, flag: &str) -> Result<u32, String> {
@@ -979,7 +871,7 @@ fn cmd_graph(args: args::TraceArgs, out: &mut String, err: &mut String, impact: 
     };
     match query(&paths::config_dir(), &args.repo, Path::new(&root), &request) {
         Ok(result) => {
-            *out = trace_query_json(&result) + "\n";
+            *out = response::trace_query_json(&result) + "\n";
             0
         }
         Err(e) => {
@@ -987,57 +879,6 @@ fn cmd_graph(args: args::TraceArgs, out: &mut String, err: &mut String, impact: 
             3
         }
     }
-}
-
-fn trace_anchor_json(anchor: &index::EdgeAnchor) -> String {
-    format!("{{\"kind\":{},\"path\":{},\"line\":{},\"col\":{},\"symbol_uri\":{},\"import_id\":{},\"precision\":{},\"anchor_uncertainty\":{},\"span\":{},\"endpoint\":{}}}",edge_string(anchor.kind.as_str()),edge_string(&anchor.path),anchor.line1,anchor.col1,edge_optional(anchor.symbol_uri.as_deref()),edge_number(anchor.import_id),edge_string(&anchor.precision),edge_optional(anchor.uncertainty.as_deref()),edge_span(anchor.span_bytes),edge_endpoint_json(&index::anchor_endpoint(anchor)))
-}
-
-fn trace_query_json(o: &index::TraceQueryOut) -> String {
-    let direction = if o.impact_verdict.is_some() {
-        "impact"
-    } else {
-        "trace"
-    };
-    let disclaimer = if o.impact_verdict.is_some() {
-        "plausible-impact-not-execution"
-    } else {
-        "plausible-path-not-execution"
-    };
-    let verdict = o
-        .impact_verdict
-        .map(|v| format!("\"verdict\":{},", edge_string(v)))
-        .unwrap_or_default();
-    let paths = o.paths.iter().map(|p| {
-        let edges=p.edges.iter().map(edge_hit_json).collect::<Vec<_>>().join(",");
-        let distance = p.edges.len();
-        let scope = if distance == 1 { "direct" } else { "transitive" };
-        let impact = if o.impact_verdict.is_some() { format!("\"distance\":{distance},\"scope\":\"{scope}\",") } else { String::new() };
-        format!("{{{impact}\"edges\":[{edges}],\"cycle\":{},\"truncated\":{},\"verification\":{},\"unresolved\":{}}}",p.cycle,p.truncated,edge_string(&p.verification),edge_strings(&p.unresolved))
-    }).collect::<Vec<_>>().join(",");
-    let bridges = o
-        .bridges
-        .iter()
-        .map(|b| {
-            format!(
-                "{{\"semantic\":{},\"syntax\":{},\"definition_span\":{},\"digest\":{}}}",
-                edge_endpoint_json(&Some(b.semantic.clone())),
-                edge_endpoint_json(&Some(b.syntax.clone())),
-                edge_span(Some(b.definition_span)),
-                edge_string(&b.digest)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(",");
-    let denominator = o
-        .completeness
-        .denominator
-        .iter()
-        .map(|(k, v)| format!("{}:{v}", edge_string(k)))
-        .collect::<Vec<_>>()
-        .join(",");
-    format!("{{{verdict}\"schema_version\":1,\"repo\":{},\"snapshot\":{{\"id\":{},\"nonce\":{},\"revision\":{}}},\"direction\":\"{direction}\",\"anchor\":{},\"destination\":{},\"freshness\":{{\"status\":{},\"reasons\":{}}},\"verification\":{},\"completeness\":{{\"status\":{},\"covered\":{},\"total\":{},\"total_exact\":{},\"denominator\":{{{denominator}}},\"unresolved\":{}}},\"paths\":[{paths}],\"bridges\":[{bridges}],\"visits\":{{\"nodes\":{},\"edges\":{}}},\"budgets\":{{\"depth\":{},\"max_depth\":6,\"nodes\":500,\"edges\":3000,\"paths\":1000,\"mappings\":500,\"time_ms\":2000}},\"limits\":{{\"limit\":{},\"offset\":{},\"next_offset\":{}}},\"cycle\":{},\"truncated\":{},\"unresolved\":{},\"disclaimer\":\"{disclaimer}\"}}",
-        edge_string(&o.repo),o.snapshot.id,edge_string(&o.snapshot.nonce),edge_string(&o.revision),trace_anchor_json(&o.anchor),o.destination.as_ref().map(trace_anchor_json).unwrap_or_else(||"null".to_string()),edge_string(&o.freshness),edge_strings(&o.freshness_reasons),edge_string(&o.verification),edge_string(&o.completeness.status),o.completeness.covered,o.completeness.total,o.total_exact,edge_strings(&o.completeness.unresolved),o.nodes,o.edge_visits,o.depth,o.limit,o.offset,edge_number(o.next_offset),o.cycle,o.truncated,edge_strings(&o.unresolved))
 }
 
 fn cmd_semantic_import(
@@ -1656,183 +1497,6 @@ fn parse_unlink_input(bytes: &[u8]) -> Result<UnlinkInput, String> {
     Ok(input)
 }
 
-// --- deterministic JSON emission -------------------------------------------
-
-fn opt_str(value: &Option<String>) -> String {
-    match value {
-        Some(s) => format!("\"{}\"", json::escape(s)),
-        None => "null".to_string(),
-    }
-}
-
-fn opt_i64(value: Option<i64>) -> String {
-    match value {
-        Some(n) => n.to_string(),
-        None => "null".to_string(),
-    }
-}
-
-fn opt_u64(value: Option<u64>) -> String {
-    match value {
-        Some(n) => n.to_string(),
-        None => "null".to_string(),
-    }
-}
-
-fn opt_usize(value: Option<usize>) -> String {
-    match value {
-        Some(n) => n.to_string(),
-        None => "null".to_string(),
-    }
-}
-
-fn measurement_json(m: &knowledge::BenchmarkData) -> String {
-    let metrics: Vec<String> = m
-        .metrics
-        .iter()
-        .map(|x| {
-            format!(
-                "{{\"name\":\"{}\",\"value\":{},\"unit\":\"{}\"}}",
-                json::escape(&x.name),
-                x.value,
-                json::escape(&x.unit)
-            )
-        })
-        .collect();
-    format!(
-        "{{\"method\":\"{}\",\"environment\":\"{}\",\"sample_count\":{},\"metrics\":[{}]}}",
-        json::escape(&m.method),
-        json::escape(&m.environment),
-        m.sample_count,
-        metrics.join(",")
-    )
-}
-
-fn freshness_json(f: &knowledge::EvidenceFreshness) -> String {
-    match f {
-        knowledge::EvidenceFreshness::Fresh => "{\"status\":\"fresh\"}".to_string(),
-        knowledge::EvidenceFreshness::Stale { observed_digest } => format!(
-            "{{\"status\":\"stale\",\"observed_digest\":\"{}\"}}",
-            json::escape(observed_digest)
-        ),
-        knowledge::EvidenceFreshness::Unresolved { reason } => {
-            format!(
-                "{{\"status\":\"unresolved\",\"reason\":\"{}\"}}",
-                json::escape(reason)
-            )
-        }
-    }
-}
-
-fn evidence_json(item: &knowledge::CapturedEvidence, root: &Path) -> String {
-    let freshness = freshness_json(&knowledge_store::evidence_freshness(item, root));
-    format!(
-        "{{\"path\":\"{}\",\"byte_start\":{},\"byte_end\":{},\"digest\":\"{}\",\"git_head\":{},\"git_branch\":{},\"freshness\":{}}}",
-        json::escape(&item.path),
-        opt_i64(item.byte_start),
-        opt_i64(item.byte_end),
-        json::escape(&item.digest),
-        opt_str(&item.git_head),
-        opt_str(&item.git_branch),
-        freshness
-    )
-}
-
-/// One revision as JSON. Evidence is sampled against `root`; freshness is
-/// reported, never used to promote the claim above `Unverified`.
-fn record_json(record: &knowledge::RecordVersion, root: &Path) -> String {
-    let evidence: Vec<String> = record
-        .evidence
-        .iter()
-        .map(|item| evidence_json(item, root))
-        .collect();
-    let measurement = match &record.measurement {
-        Some(m) => measurement_json(m),
-        None => "null".to_string(),
-    };
-    // Full-stage lifecycle fields appear only when the revision actually
-    // carries them, so Foundation output on v1 stores stays byte-identical.
-    let mut lifecycle = String::new();
-    if let Some(target) = &record.superseded_by {
-        lifecycle.push_str(&format!(
-            ",\"superseded_by\":{{\"id\":\"{}\",\"revision\":{}}}",
-            json::escape(&target.id),
-            target.revision
-        ));
-    }
-    if let Some(reason) = &record.retracted_reason {
-        lifecycle.push_str(&format!(
-            ",\"retracted_reason\":\"{}\"",
-            json::escape(reason)
-        ));
-    }
-    if let Some(author) = &record.retracted_author {
-        lifecycle.push_str(&format!(
-            ",\"retracted_author\":\"{}\"",
-            json::escape(author)
-        ));
-    }
-    if let Some(state) = &record.confirm_state {
-        lifecycle.push_str(&format!(",\"confirm_state\":\"{}\"", json::escape(state)));
-    }
-    format!(
-        "{{\"id\":\"{}\",\"revision\":{},\"kind\":\"{}\",\"title\":\"{}\",\"body\":\"{}\",\"status\":\"{}\",\"author\":\"{}\",\"created_unix\":{},\"measurement\":{},\"evidence\":[{}],\"verification\":\"{}\",\"support\":\"{}\"{lifecycle}}}",
-        json::escape(&record.id),
-        record.revision,
-        json::escape(&record.kind),
-        json::escape(&record.title),
-        json::escape(&record.body),
-        json::escape(&record.status),
-        json::escape(&record.author),
-        record.created_unix,
-        measurement,
-        evidence.join(","),
-        knowledge::VERIFICATION_UNVERIFIED,
-        knowledge::evidence_support(record.evidence.len())
-    )
-}
-
-fn relation_json(r: &knowledge_store::RelationView) -> String {
-    // The confirmation state appears only once Full-stage data exists (v2
-    // stores); v1 output stays byte-identical.
-    let mut confirm = String::new();
-    if let Some(state) = &r.confirm_state {
-        confirm.push_str(&format!(",\"confirm_state\":\"{}\"", json::escape(state)));
-    }
-    format!(
-        "{{\"relation_id\":\"{}\",\"src_id\":\"{}\",\"src_revision\":{},\"dst_id\":\"{}\",\"dst_revision\":{},\"kind\":\"{}\",\"author\":\"{}\",\"rationale\":\"{}\",\"created_unix\":{},\"retracted\":{},\"retraction_author\":{},\"retraction_reason\":{}{confirm}}}",
-        json::escape(&r.relation_id),
-        json::escape(&r.src_id),
-        r.src_revision,
-        json::escape(&r.dst_id),
-        r.dst_revision,
-        json::escape(&r.kind),
-        json::escape(&r.author),
-        json::escape(&r.rationale),
-        r.created_unix,
-        r.retracted,
-        opt_str(&r.retraction_author),
-        opt_str(&r.retraction_reason)
-    )
-}
-
-fn pagination_json(
-    limit: usize,
-    offset: usize,
-    total: usize,
-    truncated: bool,
-    next_offset: Option<usize>,
-) -> String {
-    format!(
-        "{{\"limit\":{},\"offset\":{},\"total\":{},\"truncated\":{},\"next_offset\":{}}}",
-        limit,
-        offset,
-        total,
-        truncated,
-        opt_usize(next_offset)
-    )
-}
-
 /// `knowledge export`: canonical JSONL straight to stdout, or a Markdown
 /// wrapper; with `--out` the file is written and the envelope reports it. A
 /// genuinely absent store exports an empty metadata-only payload and creates
@@ -1907,7 +1571,7 @@ fn knowledge_export(
         doc.relations,
         doc.text.len()
     );
-    *out = knowledge_envelope(&entry.name, generation, "export", &result, None);
+    *out = response::knowledge_envelope(&entry.name, generation, "export", &result, None);
     0
 }
 
@@ -1956,7 +1620,7 @@ fn knowledge_import(repo: &str, file: &str, out: &mut String, err: &mut String) 
         report.records_unchanged,
         report.relations_unchanged
     );
-    *out = knowledge_envelope(repo, report.generation, "import", &result, None);
+    *out = response::knowledge_envelope(repo, report.generation, "import", &result, None);
     0
 }
 
@@ -2011,7 +1675,7 @@ fn knowledge_backup(repo: &str, out_path: &str, out: &mut String, err: &mut Stri
         manifest.records,
         manifest.relations
     );
-    *out = knowledge_envelope(&entry.name, generation, "backup", &result, None);
+    *out = response::knowledge_envelope(&entry.name, generation, "backup", &result, None);
     0
 }
 
@@ -2040,7 +1704,7 @@ fn knowledge_verify(repo: &str, out: &mut String, err: &mut String) -> i32 {
         "{{\"status\":\"ok\",\"schema_version\":{},\"records\":{},\"relations\":{}}}",
         check.schema_version, check.records, check.relations
     );
-    *out = knowledge_envelope(&entry.name, generation, "verify", &result, None);
+    *out = response::knowledge_envelope(&entry.name, generation, "verify", &result, None);
     0
 }
 
@@ -2074,7 +1738,13 @@ fn knowledge_restore(
                 report.relations,
                 report.overwrote
             );
-            *out = knowledge_envelope(&entry.name, report.generation, "restore", &result, None);
+            *out = response::knowledge_envelope(
+                &entry.name,
+                report.generation,
+                "restore",
+                &result,
+                None,
+            );
             0
         }
         Err(e) => {
@@ -2126,41 +1796,6 @@ fn read_import_file(file: &str) -> Result<String, String> {
         .map_err(|_| format!("invalid import payload: import file is not valid UTF-8: '{file}'"))
 }
 
-fn knowledge_envelope(
-    repo: &str,
-    generation: u64,
-    operation: &str,
-    result: &str,
-    pagination: Option<String>,
-) -> String {
-    match pagination {
-        Some(p) => format!(
-            "{{\"schema_version\":1,\"repo\":\"{}\",\"generation\":{},\"operation\":\"{}\",\"result\":{},\"pagination\":{}}}\n",
-            json::escape(repo),
-            generation,
-            operation,
-            result,
-            p
-        ),
-        None => format!(
-            "{{\"schema_version\":1,\"repo\":\"{}\",\"generation\":{},\"operation\":\"{}\",\"result\":{}}}\n",
-            json::escape(repo),
-            generation,
-            operation,
-            result
-        ),
-    }
-}
-
-fn knowledge_query_json(query: &str, kind: Option<&str>, include_archived: bool) -> String {
-    format!(
-        "{{\"query\":\"{}\",\"kind\":{},\"include_archived\":{}}}",
-        json::escape(query),
-        opt_str(&kind.map(str::to_string)),
-        include_archived
-    )
-}
-
 // --- subcommands -----------------------------------------------------------
 
 fn knowledge_create(repo: &str, input: &str, out: &mut String, err: &mut String) -> i32 {
@@ -2197,11 +1832,11 @@ fn knowledge_create(repo: &str, input: &str, out: &mut String, err: &mut String)
             return 3;
         }
     };
-    *out = knowledge_envelope(
+    *out = response::knowledge_envelope(
         repo,
         generation,
         "create",
-        &record_json(&record, Path::new(&root)),
+        &response::record_json(&record, Path::new(&root)),
         None,
     );
     0
@@ -2236,11 +1871,11 @@ fn knowledge_show(
             return 3;
         }
     };
-    *out = knowledge_envelope(
+    *out = response::knowledge_envelope(
         repo,
         generation,
         "show",
-        &record_json(&record, Path::new(&root)),
+        &response::record_json(&record, Path::new(&root)),
         None,
     );
     0
@@ -2308,11 +1943,11 @@ fn knowledge_update(
             return 3;
         }
     };
-    *out = knowledge_envelope(
+    *out = response::knowledge_envelope(
         repo,
         generation,
         "update",
-        &record_json(&record, Path::new(&root)),
+        &response::record_json(&record, Path::new(&root)),
         None,
     );
     0
@@ -2345,7 +1980,7 @@ fn knowledge_history(
     let revisions: Vec<String> = page
         .revisions
         .iter()
-        .map(|r| record_json(r, Path::new(&root)))
+        .map(|r| response::record_json(r, Path::new(&root)))
         .collect();
     let result = format!(
         "{{\"id\":\"{}\",\"revisions\":[{}]}}",
@@ -2354,8 +1989,10 @@ fn knowledge_history(
     );
     let end = offset.saturating_add(page.revisions.len());
     let next_offset = if end < page.total { Some(end) } else { None };
-    let pagination = pagination_json(limit, offset, page.total, page.truncated, next_offset);
-    *out = knowledge_envelope(repo, page.generation, "history", &result, Some(pagination));
+    let pagination =
+        response::pagination_json(limit, offset, page.total, page.truncated, next_offset);
+    *out =
+        response::knowledge_envelope(repo, page.generation, "history", &result, Some(pagination));
     0
 }
 
@@ -2402,16 +2039,19 @@ fn knowledge_search(
     match knowledge_store_absent(&db) {
         // Genuinely absent store: empty success, and no database is created.
         Ok(true) => {
-            let result = format!(
-                "{},\"hits\":[]}}",
-                knowledge_query_json(query, kind, include_archived)
+            let result = response::knowledge_search_result_json(
+                query,
+                kind,
+                include_archived,
+                &[],
+                Path::new(&root),
             );
-            *out = knowledge_envelope(
+            *out = response::knowledge_envelope(
                 repo,
                 0,
                 "search",
                 &result,
-                Some(pagination_json(limit, offset, 0, false, None)),
+                Some(response::pagination_json(limit, offset, 0, false, None)),
             );
             return 0;
         }
@@ -2445,18 +2085,16 @@ fn knowledge_search(
             return 3;
         }
     };
-    let hits: Vec<String> = page
-        .hits
-        .iter()
-        .map(|r| record_json(r, Path::new(&root)))
-        .collect();
-    let result = format!(
-        "{},\"hits\":[{}]}}",
-        knowledge_query_json(query, kind, include_archived),
-        hits.join(",")
+    let result = response::knowledge_search_result_json(
+        query,
+        kind,
+        include_archived,
+        &page.hits,
+        Path::new(&root),
     );
-    let pagination = pagination_json(limit, offset, page.total, page.truncated, page.next_offset);
-    *out = knowledge_envelope(repo, page.generation, "search", &result, Some(pagination));
+    let pagination =
+        response::pagination_json(limit, offset, page.total, page.truncated, page.next_offset);
+    *out = response::knowledge_envelope(repo, page.generation, "search", &result, Some(pagination));
     0
 }
 
@@ -2504,7 +2142,13 @@ fn knowledge_link(repo: &str, input: &str, out: &mut String, err: &mut String) -
             return 3;
         }
     };
-    *out = knowledge_envelope(repo, generation, "link", &relation_json(&relation), None);
+    *out = response::knowledge_envelope(
+        repo,
+        generation,
+        "link",
+        &response::relation_json(&relation),
+        None,
+    );
     0
 }
 
@@ -2553,7 +2197,7 @@ fn knowledge_unlink(
         json::escape(&unlink.author),
         json::escape(&unlink.reason)
     );
-    *out = knowledge_envelope(repo, generation, "unlink", &result, None);
+    *out = response::knowledge_envelope(repo, generation, "unlink", &result, None);
     0
 }
 
@@ -2608,16 +2252,11 @@ fn knowledge_related(
             return 3;
         }
     };
-    let relations: Vec<String> = page.relations.iter().map(relation_json).collect();
-    let result = format!(
-        "{{\"id\":\"{}\",\"revision\":{},\"direction\":\"{}\",\"relations\":[{}]}}",
-        json::escape(id),
-        opt_u64(revision),
-        direction,
-        relations.join(",")
-    );
-    let pagination = pagination_json(limit, offset, page.total, page.truncated, page.next_offset);
-    *out = knowledge_envelope(repo, page.generation, "related", &result, Some(pagination));
+    let result = response::knowledge_related_result_json(id, revision, direction, &page.relations);
+    let pagination =
+        response::pagination_json(limit, offset, page.total, page.truncated, page.next_offset);
+    *out =
+        response::knowledge_envelope(repo, page.generation, "related", &result, Some(pagination));
     0
 }
 
