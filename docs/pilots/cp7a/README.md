@@ -6,6 +6,12 @@ interop subtest (CP7-B) is externally blocked, so M8 acceptance is not claimed
 and this branch must not be merged, tagged, or released on the strength of this
 report.
 
+> **Post-review addendum (not part of the frozen archive):** the reviewer's
+> adjudication is recorded in
+> [`reviewer-adjudication.md`](reviewer-adjudication.md) — a G1
+> false-negative adjudication and a G3 protocol deviation. No archive file,
+> score, or result was changed.
+
 ## Result summary
 
 | Gate | Verdict | Evidence |
