@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use crate::{index, json, knowledge, knowledge_store, store};
+use crate::{git, ignore, index, json, knowledge, knowledge_store, store};
 
 /// One snapshot identity block, shared by search and index-status output.
 pub(crate) fn snapshot_json(snapshot: &store::Snapshot) -> String {
@@ -87,6 +87,52 @@ pub(crate) fn search_response_json(response: &SearchResponse<'_>) -> String {
         response.total,
         results.join(","),
         truncated
+    )
+}
+
+// --- repository status and index status ------------------------------------
+
+/// One `repo status` document. Shared by the CLI and MCP.
+pub(crate) fn repo_status_json(
+    name: &str,
+    root: &str,
+    g: &git::GitInfo,
+    ig: &ignore::IgnoreInfo,
+) -> String {
+    format!(
+        "{{\"name\":\"{}\",\"root\":\"{}\",\"git\":{},\"ignore\":{}}}",
+        json::escape(name),
+        json::escape(root),
+        git::git_json(g),
+        ignore::ignore_json(ig)
+    )
+}
+
+/// One `index status` document. The CLI fills `freshness` through its
+/// migrating open; MCP fills it through the read-only path (`open_read` +
+/// `evaluate_tx`). `reasons` are quoted raw, exactly the historical bytes.
+pub(crate) fn index_status_json(
+    repo: &str,
+    root: &str,
+    freshness: &index::Freshness,
+    fts: bool,
+) -> String {
+    let reasons: Vec<String> = freshness
+        .reasons
+        .iter()
+        .map(|r| format!("\"{r}\""))
+        .collect();
+    format!(
+        "{{\"repo\":\"{}\",\"root\":\"{}\",\"freshness\":\"{}\",\"reasons\":[{}],\"fts\":{},\"snapshot\":{}}}",
+        json::escape(repo),
+        json::escape(root),
+        freshness.status,
+        reasons.join(","),
+        fts,
+        match &freshness.snapshot {
+            Some(snapshot) => snapshot_json(snapshot),
+            None => "null".to_string(),
+        }
     )
 }
 
@@ -978,6 +1024,54 @@ mod tests {
         assert_eq!(
             knowledge_related_result_json("d1", Some(2), "inbound", &[relation]),
             r#"{"id":"d1","revision":2,"direction":"inbound","relations":[{"relation_id":"r1","src_id":"d1","src_revision":1,"dst_id":"d2","dst_revision":1,"kind":"supports","author":"a","rationale":"because","created_unix":100,"retracted":false,"retraction_author":null,"retraction_reason":null}]}"#
+        );
+    }
+
+    #[test]
+    fn index_status_no_index_shape_is_byte_stable() {
+        let freshness = index::Freshness {
+            status: "unknown".to_string(),
+            reasons: vec!["no-index".to_string()],
+            snapshot: None,
+        };
+        assert_eq!(
+            index_status_json("demo", "C:\\repo", &freshness, false),
+            r#"{"repo":"demo","root":"C:\\repo","freshness":"unknown","reasons":["no-index"],"fts":false,"snapshot":null}"#
+        );
+    }
+
+    #[test]
+    fn index_status_stale_shape_with_snapshot_is_byte_stable() {
+        let freshness = index::Freshness {
+            status: "stale".to_string(),
+            reasons: vec!["root-moved".to_string(), "content-changed".to_string()],
+            snapshot: Some(snapshot()),
+        };
+        assert_eq!(
+            index_status_json("demo", "C:\\repo", &freshness, true),
+            r#"{"repo":"demo","root":"C:\\repo","freshness":"stale","reasons":["root-moved","content-changed"],"fts":true,"snapshot":{"id":7,"created_unix":100,"head":"abc","branch":null,"dirty":false,"status_at_write":"fresh","nonce":"n"}}"#
+        );
+    }
+
+    #[test]
+    fn repo_status_shape_is_byte_stable() {
+        let g = git::GitInfo {
+            present: true,
+            valid: false,
+            head: None,
+            branch: Some("main".to_string()),
+            dirty: true,
+            untracked: 3,
+            toplevel: None,
+            worktree: true,
+        };
+        let ig = ignore::IgnoreInfo {
+            file_present: false,
+            rules: 0,
+        };
+        assert_eq!(
+            repo_status_json("de\"mo", "C:\\repo", &g, &ig),
+            r#"{"name":"de\"mo","root":"C:\\repo","git":{"present":true,"valid":false,"head":null,"branch":"main","dirty":true,"untracked":3,"toplevel":null,"worktree":true},"ignore":{"file":false,"rules":0}}"#
         );
     }
 }

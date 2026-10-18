@@ -2514,7 +2514,18 @@ pub fn evaluate(home: &Path, name: &str, root: &Path) -> Freshness {
             };
         }
     };
-    let snapshot = match store::latest_snapshot(&tx) {
+    let freshness = evaluate_tx(&tx, root);
+    let _ = tx.commit();
+    freshness
+}
+
+/// Freshness verdict read over an already-open connection, with the same
+/// outcomes as `evaluate`. The CLI calls it on its migrating open; the MCP
+/// read path calls it on a read-only connection. Callers hold one read
+/// transaction across this plus their fact reads, so verdict and results
+/// always describe one revision.
+pub fn evaluate_tx(conn: &rusqlite::Connection, root: &Path) -> Freshness {
+    let snapshot = match store::latest_snapshot(conn) {
         Ok(Some(s)) => s,
         _ => {
             return Freshness {
@@ -2534,8 +2545,7 @@ pub fn evaluate(home: &Path, name: &str, root: &Path) -> Freshness {
             };
         }
     };
-    let (status, reasons) = evaluate_snapshot(&tx, name, &canon_root, &snapshot);
-    let _ = tx.commit();
+    let (status, reasons) = evaluate_snapshot(conn, "", &canon_root, &snapshot);
     Freshness {
         status,
         reasons,
@@ -2589,7 +2599,9 @@ pub fn evaluate_snapshot(
 
 #[cfg(test)]
 mod tests {
-    use super::{build, build_full, config_fingerprint, diff_files, evaluate, input_fingerprint};
+    use super::{
+        build, build_full, config_fingerprint, diff_files, evaluate, evaluate_tx, input_fingerprint,
+    };
     use crate::store;
     use crate::testutil::{git_repo, tmpdir};
 
@@ -2634,6 +2646,27 @@ mod tests {
         assert_eq!(second.processed, first.processed);
         assert_eq!(second.status_at_write, "fresh");
         assert_eq!(second.fallback_reason, "none");
+    }
+
+    #[test]
+    fn evaluate_tx_on_readonly_connection_matches_evaluate() {
+        let home = tmpdir("idx-eval-tx-home");
+        let repo = plain_repo("idx-eval-tx");
+        build_full(&home, "r", &repo).unwrap();
+        let expected = evaluate(&home, "r", &repo);
+        let db = store::db_path(&home, "r");
+        let store::IndexRead::Ready(mut conn) = store::open_read(&db) else {
+            panic!("expected a ready read connection for the built index");
+        };
+        let tx = conn.transaction().unwrap();
+        let got = evaluate_tx(&tx, &repo);
+        let _ = tx.commit();
+        assert_eq!(got.status, expected.status);
+        assert_eq!(got.reasons, expected.reasons);
+        assert_eq!(
+            got.snapshot.as_ref().map(|s| s.id),
+            expected.snapshot.as_ref().map(|s| s.id)
+        );
     }
 
     #[test]

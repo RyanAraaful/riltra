@@ -73,7 +73,8 @@ Notes:
 - At M2, `proc-macro2`/`quote`/`syn`/`serde`/`serde_derive` appeared in the
   resolve graph but were not compiled into that feature set (absent from the
   build cache). Since M7, `serde` is a direct dependency and is compiled into
-  the binary (see the M7 addition below); the others remain uncompiled.
+  the binary (see the M7 addition below); since M8 CP3 the proc-macro trio is
+  compiled via `rmcp-macros` (see the CP3 addition below).
 
 ## M3 addition: durable SQLite index (pinned versions, verified 2026-10-14)
 
@@ -149,3 +150,32 @@ Notes:
   runtime.
 - Redistributable: permissive only (MIT / Apache-2.0 alternatives), no
   copyleft, no noncommercial code.
+
+## M8 CP3 addition: rmcp macro-based tool registration (pinned versions, verified 2026-10-18)
+
+Enabling the `macros` feature of the already-audited `rmcp 3.5.1` dependency
+(design gate §2: `#[tool_router]`/`#[tool]`/`#[tool_handler]` with
+schemars-derived input schemas; no new transports, no base64/auth features).
+`Cargo.lock` diff: 6 new entries, none removed; `serde`'s `derive` feature is
+now declared explicitly (serde_derive was already compiled since CP1; no new
+package).
+
+| Package | Version | License | Origin |
+|---|---|---|---|
+| rmcp-macros | 3.5.1 | Apache-2.0 (declared in package metadata) | https://github.com/modelcontextprotocol/rust-sdk |
+| darling / darling_core / darling_macro | 0.24.1 | MIT (declared) | https://github.com/TedDriggs/darling |
+| ident_case | 1.0.1 | MIT/Apache-2.0 (declared) | https://github.com/TedDriggs/ident_case |
+| strsim | 0.11.1 | MIT (declared) | https://github.com/rapidfuzz/strsim-rs |
+
+Build-time transitive dependencies now compiled (previously resolve-graph
+only, as pinned in `Cargo.lock`): `proc-macro2` 1.0.107, `quote` 1.0.47,
+`syn` 2.0.119 + 3.0.9, `unicode-ident` 1.0.27 — all MIT OR Apache-2.0
+(unicode-ident adds Unicode-3.0).
+
+Notes:
+
+- `rmcp-macros` is the proc-macro half of the same `rmcp` package family
+  (same repository and license); it is compiled into the build, not shipped
+  as a runtime library.
+- Redistributable: permissive only; no copyleft, no noncommercial code,
+  nothing vendored.

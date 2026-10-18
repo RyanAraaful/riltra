@@ -137,16 +137,6 @@ fn cmd_repo_list(out: &mut String, err: &mut String) -> i32 {
     }
 }
 
-fn repo_status_json(name: &str, root: &str, g: &git::GitInfo, ig: &ignore::IgnoreInfo) -> String {
-    format!(
-        "{{\"name\":\"{}\",\"root\":\"{}\",\"git\":{},\"ignore\":{}}}",
-        json::escape(name),
-        json::escape(root),
-        git::git_json(g),
-        ignore::ignore_json(ig)
-    )
-}
-
 fn cmd_repo_status(name: &str, out: &mut String, err: &mut String) -> i32 {
     let reg = match registry::load(&paths::registry_path()) {
         Ok(r) => r,
@@ -183,7 +173,7 @@ fn cmd_repo_status(name: &str, out: &mut String, err: &mut String) -> i32 {
     }
     let info = git::fingerprint(&canon);
     let (_, ignore) = ignore::load_rules(&canon);
-    *out = repo_status_json(name, &root, &info, &ignore) + "\n";
+    *out = response::repo_status_json(name, &root, &info, &ignore) + "\n";
     if info.present && !info.valid {
         3
     } else {
@@ -296,23 +286,7 @@ fn cmd_index_status(name: &str, out: &mut String, err: &mut String) -> i32 {
     let fts = store::open_live(&store::db_path(&home, name))
         .map(|conn| store::fts_available(&conn))
         .unwrap_or(false);
-    let reasons: Vec<String> = freshness
-        .reasons
-        .iter()
-        .map(|r| format!("\"{r}\""))
-        .collect();
-    *out = format!(
-        "{{\"repo\":\"{}\",\"root\":\"{}\",\"freshness\":\"{}\",\"reasons\":[{}],\"fts\":{},\"snapshot\":{}}}",
-        json::escape(name),
-        json::escape(&recorded),
-        freshness.status,
-        reasons.join(","),
-        fts,
-        match &freshness.snapshot {
-            Some(snapshot) => response::snapshot_json(snapshot),
-            None => "null".to_string(),
-        }
-    ) + "\n";
+    *out = response::index_status_json(name, &recorded, &freshness, fts) + "\n";
     0
 }
 
