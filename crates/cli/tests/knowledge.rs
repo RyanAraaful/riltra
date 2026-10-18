@@ -2397,6 +2397,99 @@ fn provenance_confirm_round_trip_via_cli() {
 }
 
 #[test]
+fn provenance_import_preserves_confirm_events_as_historical_claims() {
+    let h1 = home("prov-import-1");
+    let dir = mkrepo(&h1, "krepo");
+    init(&h1, &dir, "krepo");
+    assert_eq!(create(&h1, "krepo", "d1", "First", "alpha body").0, 0);
+    // An explicit confirmation writes the confirm event with its own author
+    // and timestamp.
+    assert_eq!(
+        update(&h1, "krepo", "d1", 1, &confirm_input("First", "alpha body")).0,
+        0
+    );
+    let x1 = h1.join("x1.jsonl");
+    assert_eq!(export(&h1, "krepo", &["--out", x1.to_str().unwrap()]).0, 0);
+    let x1_text = read_text(&x1);
+    // The confirm event carries an author and the original timestamp.
+    assert!(
+        x1_text.contains("\"event\":\"confirm\",\"author\":\"a\",\"created_unix\":"),
+        "{x1_text}"
+    );
+
+    // Importing the payload into a fresh store preserves the confirm event
+    // verbatim: the confirmation is historical data, not a fresh verification
+    // by Riltra. The re-export is byte-identical, so no new confirmation was
+    // written and the original author and timestamp survive.
+    let h2 = home("prov-import-2");
+    let dir2 = mkrepo(&h2, "krepo");
+    init(&h2, &dir2, "krepo");
+    assert_eq!(import(&h2, "krepo", &x1).0, 0);
+    let x2 = h2.join("x2.jsonl");
+    assert_eq!(export(&h2, "krepo", &["--out", x2.to_str().unwrap()]).0, 0);
+    assert_eq!(
+        read_text(&x2),
+        x1_text,
+        "import must preserve the historical confirm event losslessly"
+    );
+    // The restored store derives confirmed from the preserved event, without
+    // claiming a new verification.
+    let (code, out, err) = run(&h2, &["knowledge", "show", "--repo", "krepo", "--id", "d1"]);
+    assert_eq!(code, 0, "show: {err}");
+    assert!(out.contains("\"confirm_state\":\"confirmed\""), "{out}");
+    assert!(out.contains("\"verification\":\"Unverified\""), "{out}");
+}
+
+#[test]
+fn provenance_no_auto_promotion_from_evidence_or_search() {
+    let h = home("prov-noauto");
+    let dir = mkrepo(&h, "krepo");
+    init(&h, &dir, "krepo");
+    std::fs::write(dir.join("a.py"), "alpha beta gamma").unwrap();
+    let (code, _, err) = run_stdin(
+        &h,
+        &["knowledge", "create", "--repo", "krepo", "--input", "-"],
+        br#"{"id":"d1","kind":"decision","title":"First","body":"alpha body","status":"active","author":"a","evidence":[{"path":"a.py","byte_start":0,"byte_end":5}]}"#,
+    );
+    assert_eq!(code, 0, "create: {err}");
+    assert_eq!(create(&h, "krepo", "d2", "Second", "beta body").0, 0);
+    // A supersede migrates the store to v2; the superseding revision is a
+    // candidate.
+    assert_eq!(
+        update(
+            &h,
+            "krepo",
+            "d1",
+            1,
+            &supersede_input("First v2", "d2", 1, "replaced")
+        )
+        .0,
+        0
+    );
+    assert_eq!(user_version(&h, "krepo"), 2);
+    // Evidence and search report the candidate state; neither promotes it.
+    let (code, out, err) = run(&h, &["knowledge", "show", "--repo", "krepo", "--id", "d1"]);
+    assert_eq!(code, 0, "show: {err}");
+    assert!(out.contains("\"confirm_state\":\"candidate\""), "{out}");
+    assert!(out.contains("\"verification\":\"Unverified\""), "{out}");
+    let (code, out, err) = run(
+        &h,
+        &[
+            "knowledge",
+            "search",
+            "--repo",
+            "krepo",
+            "--query",
+            "zqxbody",
+            "--include-superseded",
+        ],
+    );
+    assert_eq!(code, 0, "search: {err}");
+    assert!(out.contains("\"id\":\"d1\""), "{out}");
+    assert!(out.contains("\"confirm_state\":\"candidate\""), "{out}");
+}
+
+#[test]
 fn provenance_confirm_requests_are_strict() {
     let h = home("provenance-strict");
     let dir = mkrepo(&h, "krepo");
@@ -2703,12 +2796,17 @@ fn port_jsonl_round_trip_is_byte_identical_and_preserves_audit_events() {
     // draft fields never appear.
     assert!(x_text.contains("\"event\":\"supersede\""), "{x_text}");
     assert!(
-        x_text.contains("\"target_id\":\"d2\",\"target_revision\":1,\"reason\":\"replaced by d2\""),
+        x_text.contains(
+            "\"target_id\":\"d2\",\"target_revision\":1,\"reason\":\"replaced by d2\",\"author\":\"a\",\"created_unix\":"
+        ),
         "{x_text}"
     );
-    assert!(x_text.contains("\"event\":\"confirm\""), "{x_text}");
     assert!(
-        x_text.contains("\"event\":\"retract\",\"reason\":\"was wrong\""),
+        x_text.contains("\"event\":\"confirm\",\"author\":\"a\",\"created_unix\":"),
+        "{x_text}"
+    );
+    assert!(
+        x_text.contains("\"event\":\"retract\",\"reason\":\"was wrong\",\"author\":\"a\""),
         "{x_text}"
     );
     assert!(x_text.contains("\"reason\":\"mistake\""), "{x_text}");

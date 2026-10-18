@@ -1,9 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 //! M7 knowledge records: typed model and input validation. Storage lives in
-//! `knowledge_store.rs`; JSON emission and CLI wiring arrive in Task 7.
-//! Statuses are `active`/`archived` plus the Full-stage lifecycle statuses
-//! `superseded`/`retracted`; a create may only use the Foundation statuses,
-//! because a new record has no history to supersede or retract.
+//! `knowledge_store.rs`. Statuses are `active`/`archived` plus the
+//! Full-stage lifecycle statuses `superseded`/`retracted`; a create may only
+//! use the Foundation statuses, because a new record has no history to
+//! supersede or retract.
+//!
+//! Provenance trust boundary (G-PROV): `confirmed` is an explicit confirmation
+//! claim, not an authenticated human identity; `candidate` is the default.
+//! Confirmation never implies evidence verification, and evidence freshness
+//! is orthogonal to `confirm_state`.
 
 // Task 3 leaves the JSON entry points unwired (CLI dispatch is Task 7).
 // Revisit this allow when the CLI is wired.
@@ -38,7 +43,10 @@ pub struct RecordVersion {
     /// stores (`"candidate"` by default, `"confirmed"` after an explicit
     /// confirmation), `None` on v1 stores. The JSON output omits the field
     /// when it is `None`, so Foundation stores stay byte-identical and the
-    /// field appears only once Full-stage data exists.
+    /// field appears only once Full-stage data exists. `confirmed` is an
+    /// explicit confirmation claim, not an authenticated human identity, and
+    /// is never promoted automatically from evidence, freshness, search, or
+    /// indexing.
     pub confirm_state: Option<String>,
     /// Present exactly when the revision carries benchmark measurement.
     pub measurement: Option<BenchmarkData>,

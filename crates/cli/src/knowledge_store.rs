@@ -1,8 +1,27 @@
 // SPDX-License-Identifier: Apache-2.0
 //! M7 knowledge store: separate authoritative SQLite database per registered
-//! repository (`$RILTRA_HOME/knowledge/<name>.db`, schema v1). Task 1 covers
-//! open, schema creation, metadata binding and location-security checks only;
-//! record writes arrive in later tasks. Never touches the M6 code index.
+//! repository (`$RILTRA_HOME/knowledge/<name>.db`). Schema v2 with guarded,
+//! lazy migration from v1 on the first Full-stage write; Foundation (v1)
+//! stores stay readable. Never touches the M6 code index.
+//!
+//! Contracts implemented here (ratified by the M7 spec delta):
+//!
+//! - **Canonical JSONL port (G-PORT):** lifecycle audit metadata rides as
+//!   small structured event objects (`events` arrays mirroring the
+//!   append-only `record_lifecycle`/`relation_lifecycle`/`retractions` tables),
+//!   never as derived export fields. Events carry their original author,
+//!   reason, timestamp and target/revision binding, and round-trip
+//!   byte-exactly through export/import.
+//! - **Provenance trust boundary (G-PROV):** every record revision and
+//!   relation carries `confirm_state` ∈ {`candidate`, `confirmed`}.
+//!   `candidate` is the default; `confirmed` is an explicit confirmation
+//!   claim, not an authenticated human identity. `confirm_state` is derived
+//!   from stored `confirm` lifecycle events — never promoted automatically
+//!   from evidence, freshness, search, or indexing. Import preserves
+//!   historical `confirm` events from a valid payload for a lossless
+//!   round-trip; a confirmation restored that way is historical data, not a
+//!   fresh verification by Riltra. Evidence freshness and verification are
+//!   independent of `confirm_state`.
 
 // Task 1 leaves this module unwired (CLI dispatch is Task 7); Tasks 2-7
 // consume these items. Revisit this allow when the CLI is wired.
