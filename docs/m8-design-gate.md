@@ -1,15 +1,20 @@
 # M8 design gate — unified CLI + MCP read interface
 
-**Status: PROPOSED — NOT APPROVED.** This document authorizes nothing. It is a
-design-only checkpoint on branch `m8-unified-cli-mcp`, created directly from
-`master` at `cb40aea1581683857dd55eff7ea304c311313f31` (M7 closed, merged, CI
-green). Implementation starts only after reviewer audit and owner GO, with the
-open decisions in §8 resolved.
+**Status: APPROVED — owner GO on 2026-10-18 (D1–D7 resolved). Implementation
+authorized for CP1 only; CP2–CP7 each still need their checkpoint evidence and
+a fresh owner GO.** Design checkpoint on branch `m8-unified-cli-mcp`, created
+directly from `master` at `cb40aea1581683857dd55eff7ea304c311313f31` (M7
+closed, merged, CI green). M8 is not closed; no unimplemented gate is PASS.
 
 **Revision 2 (2026-10-18):** bounded correction for review findings F1–F4
 (storage read contract, missing-store semantics, tool inputs and parity,
 benchmark fairness). Option 1, the 11 tools, and the seven checkpoints are
 unchanged.
+
+**Owner resolution (2026-10-18):** D1–D7 approved as recorded in §8; overall
+M8 design accepted; CP1 implementation authorized (dependencies + `riltra mcp`
+skeleton only). The §3 F1 no-implicit-migration guard remains mandatory for
+CP3.
 
 ## 1. Current-state evidence
 
@@ -366,8 +371,9 @@ detailed checkpoint sketches stay in the private, ignored planning location.
   read-only export) out of the M8 MVP? (Recommended: defer. Reviewer
   recommendation: defer history/export tools.)
 
-Reviewer recommendations are recorded for the owner but are **not** an owner
-GO: CP1 stays blocked until the owner resolves D1–D7 and approves this gate.
+**Resolution (2026-10-18):** the owner approved D1–D7 and accepted the
+overall M8 design, authorizing CP1 implementation only. CP2–CP7 stay blocked
+until their own checkpoint evidence and a fresh owner GO.
 
 **Out of scope for M8 (fixed):** MCP write tools, HTTP/daemon, embeddings/
 vector stores, UI, new semantic engines, SQLite schema changes, M0–M7
