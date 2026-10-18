@@ -464,22 +464,9 @@ pub(crate) fn knowledge_envelope(
     }
 }
 
-pub(crate) fn knowledge_query_json(
-    query: &str,
-    kind: Option<&str>,
-    include_archived: bool,
-) -> String {
-    format!(
-        "{{\"query\":\"{}\",\"kind\":{},\"include_archived\":{}}}",
-        json::escape(query),
-        opt_str(&kind.map(str::to_string)),
-        include_archived
-    )
-}
-
-/// Search result assembly in the historical byte shape: the query object is
-/// already closed, `,"hits":[...]}` follows, and the envelope adds the final
-/// closing brace. Preserved verbatim by CP2.
+/// Search result assembly: the echoed query, the visibility flags and the
+/// hits form one object. KJSON-01: until CP5 this closed the query object
+/// before `,"hits"`, so every successful search emitted invalid JSON.
 pub(crate) fn knowledge_search_result_json(
     query: &str,
     kind: Option<&str>,
@@ -489,8 +476,10 @@ pub(crate) fn knowledge_search_result_json(
 ) -> String {
     let hits: Vec<String> = hits.iter().map(|r| record_json(r, root)).collect();
     format!(
-        "{},\"hits\":[{}]}}",
-        knowledge_query_json(query, kind, include_archived),
+        "{{\"query\":\"{}\",\"kind\":{},\"include_archived\":{},\"hits\":[{}]}}",
+        json::escape(query),
+        opt_str(&kind.map(str::to_string)),
+        include_archived,
         hits.join(",")
     )
 }
@@ -964,13 +953,12 @@ mod tests {
 
     #[test]
     fn knowledge_search_result_shape_is_byte_stable() {
-        // Historical shape: the query object closes before `,"hits"` and the
-        // result closes after the array, so the envelope around it ends
-        // `,"pagination":...}}`. This is the bytes the CLI has always
-        // produced; CP2 preserves them (see M8 CP2 report residual).
+        // KJSON-01: the query echo and the hits live in one object. Before the
+        // CP5 correction the query object was closed before `,"hits"`, which
+        // made every successful search output invalid JSON.
         assert_eq!(
             knowledge_search_result_json("alpha", None, false, &[], Path::new(".")),
-            r#"{"query":"alpha","kind":null,"include_archived":false},"hits":[]}"#
+            r#"{"query":"alpha","kind":null,"include_archived":false,"hits":[]}"#
         );
         let record = knowledge::RecordVersion {
             id: "d1".to_string(),
@@ -996,7 +984,7 @@ mod tests {
                 &[record],
                 Path::new(".")
             ),
-            r#"{"query":"alpha","kind":"benchmark","include_archived":true},"hits":[{"id":"d1","revision":1,"kind":"decision","title":"First","body":"alpha","status":"active","author":"a","created_unix":100,"measurement":null,"evidence":[],"verification":"Unverified","support":"unknown"}]}"#
+            r#"{"query":"alpha","kind":"benchmark","include_archived":true,"hits":[{"id":"d1","revision":1,"kind":"decision","title":"First","body":"alpha","status":"active","author":"a","created_unix":100,"measurement":null,"evidence":[],"verification":"Unverified","support":"unknown"}]}"#
         );
     }
 
