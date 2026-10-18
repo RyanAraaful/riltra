@@ -6,9 +6,10 @@
 //! canonical root. Verification is structural only (`PRAGMA integrity_check`,
 //! version stamps, required tables, manifest counts): no digest, no
 //! authenticity claim. Restore stages and verifies the snapshot next to the
-//! target, clears the replaced store's companions by renaming them aside,
-//! and then replaces the target with a single rename, so a failed restore
-//! never deletes the original and a stale companion is never adoptable.
+//! target, fails closed if the target's companions exist (their committed
+//! transactions cannot be proven safe to discard), and then replaces the
+//! target with a single rename, so a failed restore never deletes the
+//! original.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -201,13 +202,12 @@ pub struct RestoreReport {
 /// this repository name and canonical root, manifest schema version accepted,
 /// and the target either absent or `overwrite` set. The snapshot is then
 /// staged next to the target and fully verified (integrity, version stamps,
-/// tables, binding, manifest counts) before anything changes; a single rename
-/// replaces the target last, so every failure path leaves the original
-/// untouched. Stale WAL/SHM/journal companions of the replaced store are
-/// renamed aside before that promotion (a rename covers whatever squats on
-/// the path, and is undone if the promotion does not happen) and removed
-/// best-effort afterwards: the snapshot is standalone and must not adopt
-/// them.
+/// tables, binding, manifest counts) before anything changes. Restore fails
+/// closed if the target's WAL/SHM/journal companions exist: a stale companion
+/// may hold committed transactions of the store being replaced, and their
+/// safety cannot be proven, so the restore refuses without modifying the
+/// store or its companions. Otherwise a single rename replaces the target, so
+/// every failure path leaves the original untouched.
 pub fn restore_from(
     home: &Path,
     repo: &RepoEntry,
@@ -293,48 +293,27 @@ pub fn restore_from(
             return Err(e);
         }
     };
-    // Companions of the store being replaced move aside first: a stale
-    // WAL/SHM/journal left next to the promoted snapshot would be silently
-    // adopted by SQLite. Rename-aside covers whatever squats on the path (a
-    // directory included) and failing it refuses the restore before the store
-    // changes at all.
-    let mut cleared: Vec<(PathBuf, PathBuf)> = Vec::new();
+    // Fail-closed: refuse if any companion of the target store exists. A
+    // stale WAL/SHM/journal may hold committed transactions of the store
+    // being replaced; their safety cannot be proven, so the restore must
+    // not proceed. Nothing is moved, deleted, or modified.
     for p in companions.iter() {
-        if std::fs::symlink_metadata(p).is_err() {
-            continue;
-        }
-        let aside = with_suffix(p, &format!(".restore-old-{}", std::process::id()));
-        match std::fs::rename(p, &aside) {
-            Ok(()) => cleared.push((p.clone(), aside)),
-            Err(e) => {
-                for (p, aside) in cleared.iter().rev() {
-                    let _ = std::fs::rename(aside, p);
-                }
-                let _ = std::fs::remove_file(&staged);
-                return Err(format!(
-                    "cannot clear stale companion '{}' before restoring: {e}",
-                    p.display()
-                ));
-            }
+        if std::fs::symlink_metadata(p).is_ok() {
+            let _ = std::fs::remove_file(&staged);
+            return Err(format!(
+                "knowledge store has live companion '{}': its committed \
+                 transactions cannot be proven safe to discard; refusing \
+                 to restore without modifying the store or companion",
+                p.display()
+            ));
         }
     }
     if let Err(e) = std::fs::rename(&staged, &db) {
-        for (p, aside) in cleared.iter().rev() {
-            let _ = std::fs::rename(aside, p);
-        }
         let _ = std::fs::remove_file(&staged);
         return Err(format!(
             "cannot replace knowledge store '{}': {e}",
             db.display()
         ));
-    }
-    // The snapshot owns the store path now; the asides are inert leftovers.
-    // Removing a non-empty directory aside could destroy unrelated data, so
-    // only empty directories are reclaimed.
-    for (_, aside) in cleared.iter() {
-        if std::fs::remove_file(aside).is_err() {
-            let _ = std::fs::remove_dir(aside);
-        }
     }
     Ok(RestoreReport {
         schema_version: check.schema_version,
