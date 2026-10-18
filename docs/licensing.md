@@ -70,8 +70,10 @@ Notes:
   self-authored node-kind matching in `crates/cli/src/syntax.rs`.
 - No grammar, parser source, or query file is copied into this repository;
   everything arrives via crates.io with pinned versions.
-- `proc-macro2`/`quote`/`syn`/`serde`/`serde_derive` appear in the resolve graph
-  but are not compiled into this feature set (absent from the build cache).
+- At M2, `proc-macro2`/`quote`/`syn`/`serde`/`serde_derive` appeared in the
+  resolve graph but were not compiled into that feature set (absent from the
+  build cache). Since M7, `serde` is a direct dependency and is compiled into
+  the binary (see the M7 addition below); the others remain uncompiled.
 
 ## M3 addition: durable SQLite index (pinned versions, verified 2026-10-14)
 
@@ -92,3 +94,20 @@ Notes:
   FTS5 availability is pinned by test (`fts5_is_available_in_bundled_sqlite`)
   on every platform.
 - No graph database, vector store, or second database engine is used.
+
+## M7 addition: structured knowledge store (pinned versions, verified 2026-10-18)
+
+| Package | Version | License | Origin |
+|---|---|---|---|
+| serde | 1.0.229 | MIT OR Apache-2.0 (declared in package metadata) | https://github.com/serde-rs/serde |
+
+Notes:
+
+- `serde` became a **direct dependency** in M7 (`serde = "1"` in
+  `crates/cli/Cargo.toml`), used for strict JSON validation of knowledge
+  records (`crates/cli/src/knowledge.rs`, `crates/cli/src/main.rs`). It is
+  compiled and linked into the binary.
+- Arrives via crates.io and is pinned in `Cargo.lock`; nothing is vendored.
+  Redistributable: MIT OR Apache-2.0, permissive, no copyleft.
+- Only the base `serde` feature set is enabled (the `derive` feature is off),
+  so `serde_derive` is not compiled and remains listed in `Cargo.lock` only.
