@@ -34,14 +34,19 @@ struct Session {
 }
 
 fn spawn(home: &Path) -> Session {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_riltra"))
+    spawn_with(home, |_| {})
+}
+
+fn spawn_with<F: FnOnce(&mut Command)>(home: &Path, configure: F) -> Session {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_riltra"));
+    child
         .arg("mcp")
         .env("RILTRA_HOME", home)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn riltra mcp");
+        .stderr(Stdio::piped());
+    configure(&mut child);
+    let mut child = child.spawn().expect("spawn riltra mcp");
     let stdin = child.stdin.take().expect("stdin");
     let stdout = child.stdout.take().expect("stdout");
     let (tx, rx) = mpsc::channel();
@@ -132,7 +137,11 @@ fn initialize_request() -> &'static str {
 
 /// Spawn a session and complete the initialize handshake.
 fn ready(cfg: &Path) -> Session {
-    let mut s = spawn(cfg);
+    ready_with(cfg, |_| {})
+}
+
+fn ready_with<F: FnOnce(&mut Command)>(cfg: &Path, configure: F) -> Session {
+    let mut s = spawn_with(cfg, configure);
     s.send(initialize_request());
     let v = s.recv();
     assert_eq!(v["id"], 1, "initialize response: {v}");
@@ -163,7 +172,7 @@ fn mcp_initialize_handshake_reports_identity() {
 }
 
 #[test]
-fn mcp_tools_list_advertises_exactly_ten_readonly_tools() {
+fn mcp_tools_list_advertises_exactly_eleven_readonly_tools() {
     let h = home("tools");
     let mut s = ready(&h);
     s.send(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#);
@@ -183,19 +192,23 @@ fn mcp_tools_list_advertises_exactly_ten_readonly_tools() {
             "riltra_code_impact",
             "riltra_code_search",
             "riltra_code_trace",
+            "riltra_health",
             "riltra_knowledge_related",
             "riltra_knowledge_search",
             "riltra_knowledge_show",
             "riltra_repo_list",
             "riltra_repo_status"
         ],
-        "CP5 advertises exactly the ten read-only tools"
+        "CP6 advertises exactly the eleven read-only tools"
     );
     assert!(
-        !names
-            .iter()
-            .any(|n| n.contains("health") || n.contains("write")),
-        "no health or write tool may be advertised: {names:?}"
+        !names.iter().any(|n| n.contains("write")),
+        "no write tool may be advertised: {names:?}"
+    );
+    assert_eq!(
+        names.iter().filter(|n| *n == &"riltra_health").count(),
+        1,
+        "riltra_health must exist exactly once"
     );
     for t in tools {
         let name = t["name"].as_str().unwrap();
@@ -218,6 +231,43 @@ fn mcp_tools_list_advertises_exactly_ten_readonly_tools() {
             .is_none_or(|p| p.is_empty()),
         "repo_list takes no inputs: {list_schema}"
     );
+    // CP6: riltra_health takes no arguments and rejects any custom field.
+    let health_schema = &find("riltra_health")["inputSchema"];
+    assert!(
+        health_schema["properties"]
+            .as_object()
+            .is_none_or(|p| p.is_empty()),
+        "riltra_health takes no inputs: {health_schema}"
+    );
+    assert!(
+        health_schema["required"].is_null()
+            || health_schema["required"]
+                .as_array()
+                .is_some_and(|r| r.is_empty()),
+        "riltra_health requires nothing: {health_schema}"
+    );
+    assert_eq!(
+        health_schema["additionalProperties"], false,
+        "riltra_health must reject unsupported fields: {health_schema}"
+    );
+    // Every tool with inputs rejects unsupported fields.
+    for name in [
+        "riltra_code_callees",
+        "riltra_code_callers",
+        "riltra_code_impact",
+        "riltra_code_search",
+        "riltra_code_trace",
+        "riltra_knowledge_related",
+        "riltra_knowledge_search",
+        "riltra_knowledge_show",
+        "riltra_repo_status",
+    ] {
+        let schema = &find(name)["inputSchema"];
+        assert_eq!(
+            schema["additionalProperties"], false,
+            "{name} must reject unsupported fields: {schema}"
+        );
+    }
     let status_schema = &find("riltra_repo_status")["inputSchema"];
     assert_eq!(status_schema["required"], json!(["repo"]));
     assert!(status_schema["properties"]["repo"].is_object());
@@ -370,6 +420,390 @@ fn mcp_tools_list_advertises_exactly_ten_readonly_tools() {
     let (code, _) = s.finish();
     assert_eq!(code, 0, "clean disconnect must exit 0");
     assert_home_untouched(&h);
+}
+
+// --- CP6: health composition -------------------------------------------------
+
+#[test]
+fn t1_health_composition_matches_cli_and_creates_nothing() {
+    // Multiple registered repositories: deterministic count, CLI parity for
+    // status and environment doctor, source-of-truth versions and limits.
+    let h = home("cp6-health");
+    let r1 = home("cp6-health-r1");
+    let r2 = home("cp6-health-r2");
+    init_repo(&h, &r1, "alpha");
+    init_repo(&h, &r2, "beta");
+    let before = listing(&h);
+    let mut s = ready(&h);
+    let res = call_tool(&mut s, 2, "riltra_health", &json!({}));
+    assert!(!is_error(&res), "{res}");
+    let d = doc(&res);
+    assert_eq!(d["operation"], json!("health"));
+    assert_eq!(d["status"], cli_json(&h, &["status"]));
+    assert_eq!(d["doctor"], cli_json(&h, &["doctor"]));
+    assert_eq!(d["doctor"]["scope"], json!("environment"));
+    assert_eq!(d["doctor"]["pass"], json!(true));
+    assert_eq!(d["versions"]["riltra"], json!(env!("CARGO_PKG_VERSION")));
+    assert_eq!(d["versions"]["code_index_schema"], json!(4));
+    assert_eq!(d["versions"]["knowledge_schema"], json!(2));
+    assert_eq!(d["limits"]["code_search"]["default_limit"], json!(50));
+    assert_eq!(d["limits"]["code_search"]["max_limit"], json!(1000));
+    assert_eq!(d["limits"]["knowledge_search"]["default_limit"], json!(50));
+    assert_eq!(d["limits"]["knowledge_search"]["max_limit"], json!(1000));
+    assert_eq!(d["limits"]["graph_traversal"]["depth_default"], json!(3));
+    assert_eq!(d["limits"]["graph_traversal"]["depth_max"], json!(6));
+    assert_eq!(d["limits"]["graph_traversal"]["default_limit"], json!(50));
+    assert_eq!(d["limits"]["graph_traversal"]["max_limit"], json!(1000));
+    assert_eq!(d["capabilities"]["transport"], json!("stdio"));
+    assert_eq!(d["capabilities"]["read_only"], json!(true));
+    assert_eq!(d["capabilities"]["mutations"], json!(false));
+    assert_eq!(d["capabilities"]["resources"], json!(false));
+    assert_eq!(d["capabilities"]["prompts"], json!(false));
+    assert_eq!(d["capabilities"]["network"], json!(false));
+    assert_eq!(d["capabilities"]["tools"].as_array().unwrap().len(), 11);
+    assert_eq!(d["repo_count"], json!(2));
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
+    assert_eq!(
+        listing(&h),
+        before,
+        "health must not create or modify any file"
+    );
+
+    // Missing registry: empty-registry semantics, count 0.
+    let h2 = home("cp6-health-empty");
+    let before2 = listing(&h2);
+    let mut s2 = ready(&h2);
+    let d = doc(&call_tool(&mut s2, 2, "riltra_health", &json!({})));
+    assert_eq!(d["repo_count"], json!(0));
+    assert_eq!(d["status"], cli_json(&h2, &["status"]));
+    assert_eq!(d["doctor"], cli_json(&h2, &["doctor"]));
+    let (code, _) = s2.finish();
+    assert_eq!(code, 0);
+    assert_eq!(listing(&h2), before2);
+
+    // Corrupt registry: classified store_error, never a fabricated count.
+    let h3 = home("cp6-health-corrupt");
+    init_repo(&h3, &home("cp6-health-corrupt-repo"), "r");
+    std::fs::write(h3.join("registry.json"), "{not json").unwrap();
+    let mut s3 = ready(&h3);
+    let res = call_tool(&mut s3, 2, "riltra_health", &json!({}));
+    assert!(is_error(&res), "{res}");
+    let d = doc(&res);
+    assert_eq!(d["kind"], "store_error");
+    assert!(d.get("repo_count").is_none(), "no fabricated count: {d}");
+    let res = call_tool(&mut s3, 3, "riltra_repo_list", &json!({}));
+    assert!(is_error(&res));
+    assert_eq!(doc(&res)["kind"], "store_error");
+    let (code, _) = s3.finish();
+    assert_eq!(code, 0);
+
+    // Failed doctor check stays visible: with git unavailable the environment
+    // doctor reports pass:false inside the health document (registry still
+    // readable, count still 0).
+    let h4 = home("cp6-health-nogit");
+    let empty_bin = home("cp6-health-nogit-bin");
+    let mut s4 = ready_with(&h4, |cmd| {
+        cmd.env("PATH", &empty_bin);
+    });
+    let d = doc(&call_tool(&mut s4, 2, "riltra_health", &json!({})));
+    assert_eq!(d["doctor"]["pass"], json!(false), "{d}");
+    assert!(
+        d["doctor"]["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["name"] == "git-available" && c["pass"] == json!(false)),
+        "{d}"
+    );
+    assert_eq!(d["repo_count"], json!(0));
+    let (code, _) = s4.finish();
+    assert_eq!(code, 0);
+}
+
+// --- CP6: G4 hard error paths -------------------------------------------------
+
+#[test]
+fn g4_unknown_input_fields_are_rejected_not_ignored() {
+    let h = home("cp6-schema");
+    let r = home("cp6-schema-repo");
+    write_search_fixture(&r);
+    indexed_repo(&h, &r, "r");
+    let mut s = ready(&h);
+    // Warm up the index store so WAL sidecar recreation (accepted L2
+    // read-only behavior) is not misread as a mutation below.
+    let _ = call_tool(
+        &mut s,
+        1,
+        "riltra_code_search",
+        &json!({"repo": "r", "query": "alpha"}),
+    );
+    let before = listing(&h);
+    // Unsupported properties are protocol-level schema refusals on every tool,
+    // including the older CP3 inputs that previously ignored them.
+    for (id, tool, args) in [
+        (2i64, "riltra_repo_status", json!({"repo": "r", "bogus": 1})),
+        (
+            3,
+            "riltra_code_search",
+            json!({"repo": "r", "query": "alpha", "bogus": 1}),
+        ),
+        (
+            4,
+            "riltra_code_callers",
+            json!({"repo": "r", "path": "a.py", "line": 1, "col": 6, "bogus": 1}),
+        ),
+        (
+            5,
+            "riltra_code_callees",
+            json!({"repo": "r", "path": "a.py", "line": 1, "col": 6, "bogus": 1}),
+        ),
+        (
+            6,
+            "riltra_code_trace",
+            json!({"repo": "r", "path": "a.py", "line": 1, "col": 6, "bogus": 1}),
+        ),
+        (
+            7,
+            "riltra_code_impact",
+            json!({"repo": "r", "path": "a.py", "line": 1, "col": 6, "bogus": 1}),
+        ),
+        (
+            8,
+            "riltra_knowledge_search",
+            json!({"repo": "r", "query": "x", "bogus": 1}),
+        ),
+        (
+            9,
+            "riltra_knowledge_show",
+            json!({"repo": "r", "id": "d1", "bogus": 1}),
+        ),
+        (
+            10,
+            "riltra_knowledge_related",
+            json!({"repo": "r", "id": "d1", "bogus": 1}),
+        ),
+        (11, "riltra_health", json!({"bogus": 1})),
+    ] {
+        s.send(
+            &json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "tools/call",
+                "params": {"name": tool, "arguments": args},
+            })
+            .to_string(),
+        );
+        let v = s.recv();
+        assert_eq!(v["id"], id);
+        assert!(
+            v.get("error").is_none(),
+            "{tool} schema refusal must not become a JSON-RPC error: {v}"
+        );
+        assert!(
+            v["result"]["isError"] == json!(true),
+            "{tool} must reject unknown fields at the schema layer: {v}"
+        );
+        let message = v["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            message.starts_with("failed to deserialize parameters"),
+            "{tool}: SDK-owned refusal expected: {v}"
+        );
+        assert!(
+            message.contains("bogus"),
+            "{tool}: refusal must name the offending field: {v}"
+        );
+    }
+    // Non-integer and negative numerics stay schema-level refusals.
+    for (id, tool, args) in [
+        (
+            12,
+            "riltra_code_callers",
+            json!({"repo": "r", "path": "a.py", "line": -1, "col": 6}),
+        ),
+        (
+            13,
+            "riltra_code_callers",
+            json!({"repo": "r", "path": "a.py", "line": 1.5, "col": 6}),
+        ),
+        (
+            14,
+            "riltra_code_search",
+            json!({"repo": "r", "query": "alpha", "limit": -5}),
+        ),
+        (
+            15,
+            "riltra_knowledge_search",
+            json!({"repo": "r", "query": "x", "generation": -1}),
+        ),
+    ] {
+        s.send(
+            &json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "tools/call",
+                "params": {"name": tool, "arguments": args},
+            })
+            .to_string(),
+        );
+        let v = s.recv();
+        assert_eq!(v["id"], id);
+        assert!(
+            v.get("error").is_none(),
+            "{tool} numeric refusal must not become a JSON-RPC error: {v}"
+        );
+        assert!(
+            v["result"]["isError"] == json!(true),
+            "{tool} must refuse non-domain numerics at the schema layer: {v}"
+        );
+        let message = v["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            message.starts_with("failed to deserialize parameters"),
+            "{tool}: SDK-owned refusal expected: {v}"
+        );
+    }
+    // Valid calls still work after every refusal.
+    let d = doc(&call_tool(
+        &mut s,
+        20,
+        "riltra_code_search",
+        &json!({"repo": "r", "query": "alpha"}),
+    ));
+    assert_eq!(d["total"], 3);
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
+    assert_eq!(listing(&h), before, "schema refusals must not create files");
+}
+
+#[test]
+fn g4_protocol_level_rejections_stay_protocol_level() {
+    let h = home("cp6-proto");
+    let mut s = ready(&h);
+    // Unknown tool: a JSON-RPC method error, never a domain document.
+    s.send(
+        &json!({
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "riltra_nope", "arguments": {}},
+        })
+        .to_string(),
+    );
+    let v = s.recv();
+    assert_eq!(v["id"], 2);
+    assert!(v["error"].as_object().is_some(), "{v}");
+    assert!(v.get("result").is_none(), "{v}");
+    // Unsupported tool parameters: the SDK refuses with its own deserialization
+    // error result, never a domain error invented by the tool.
+    s.send(
+        &json!({
+            "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+            "params": {"name": "riltra_health", "arguments": {"surprise": 1}},
+        })
+        .to_string(),
+    );
+    let v = s.recv();
+    assert_eq!(v["id"], 3);
+    assert!(
+        v.get("error").is_none(),
+        "schema failures stay SDK-owned, not JSON-RPC errors: {v}"
+    );
+    assert_eq!(v["result"]["isError"], json!(true), "{v}");
+    let message = v["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        message.starts_with("failed to deserialize parameters"),
+        "SDK-owned refusal expected: {v}"
+    );
+    assert!(
+        v["result"].get("structuredContent").is_none()
+            || v["result"]["structuredContent"]["kind"].is_null(),
+        "no domain error kind may be manufactured: {v}"
+    );
+    // Malformed JSON-RPC: protocol parse error, not a tool result.
+    s.send("{not json");
+    if let Ok(line) = s.lines.recv_timeout(Duration::from_secs(3)) {
+        let v: serde_json::Value = serde_json::from_str(&line).expect("stdout must stay JSON-RPC");
+        assert_eq!(v["jsonrpc"], "2.0");
+        assert!(
+            v["error"].as_object().is_some(),
+            "expected a JSON-RPC error: {v}"
+        );
+    }
+    // Valid requests still work after protocol-level refusals.
+    let res = call_tool(&mut s, 4, "riltra_health", &json!({}));
+    assert!(!is_error(&res), "{res}");
+    assert_eq!(doc(&res)["repo_count"], json!(0));
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn g4_invalid_requests_do_not_kill_the_server() {
+    let h = home("cp6-resil");
+    let r = home("cp6-resil-repo");
+    write_search_fixture(&r);
+    indexed_repo(&h, &r, "r");
+    let mut s = ready(&h);
+    // Warm up the index store so WAL sidecar recreation (accepted L2
+    // read-only behavior) is not misread as a mutation below.
+    let _ = call_tool(
+        &mut s,
+        1,
+        "riltra_code_search",
+        &json!({"repo": "r", "query": "alpha"}),
+    );
+    let before = listing(&h);
+    // Valid, invalid domain, valid again.
+    let d = doc(&call_tool(
+        &mut s,
+        2,
+        "riltra_code_search",
+        &json!({"repo": "r", "query": "alpha"}),
+    ));
+    assert_eq!(d["total"], 3);
+    let res = call_tool(
+        &mut s,
+        3,
+        "riltra_code_search",
+        &json!({"repo": "nope", "query": "x"}),
+    );
+    assert!(is_error(&res));
+    let d = doc(&call_tool(
+        &mut s,
+        4,
+        "riltra_code_search",
+        &json!({"repo": "r", "query": "alpha"}),
+    ));
+    assert_eq!(d["total"], 3);
+    // Unknown tool.
+    s.send(
+        &json!({
+            "jsonrpc": "2.0", "id": 5, "method": "tools/call",
+            "params": {"name": "riltra_nope", "arguments": {}},
+        })
+        .to_string(),
+    );
+    let v = s.recv();
+    assert!(v["error"].as_object().is_some(), "{v}");
+    // Malformed JSON-RPC.
+    s.send("{not json");
+    if let Ok(line) = s.lines.recv_timeout(Duration::from_secs(3)) {
+        let v: serde_json::Value = serde_json::from_str(&line).expect("stdout must stay JSON-RPC");
+        assert_eq!(v["jsonrpc"], "2.0");
+        assert!(
+            v["error"].as_object().is_some(),
+            "expected a JSON-RPC error: {v}"
+        );
+    }
+    // Valid after malformed: clean EOF afterwards.
+    let d = doc(&call_tool(&mut s, 6, "riltra_repo_list", &json!({})));
+    assert_eq!(d["repos"].as_array().unwrap().len(), 1);
+    let (code, err) = s.finish();
+    assert_eq!(code, 0);
+    assert!(!err.contains("panicked"), "server panicked: {err}");
+    assert_eq!(
+        listing(&h),
+        before,
+        "invalid requests must not mutate storage"
+    );
 }
 
 #[test]

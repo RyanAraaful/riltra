@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
-//! M8 CP1/CP3/CP4/CP5: MCP stdio server. CP1 serves initialize; CP3 registers
-//! the first read-only tools; CP4 adds the graph tools (callers, callees,
-//! trace, impact); CP5 adds the knowledge tools (search, show, related) —
-//! ten tools total (design gate §3) through the rmcp tool macros. Tool calls
+//! M8 CP1/CP3/CP4/CP5/CP6: MCP stdio server. CP1 serves initialize; CP3
+//! registers the first read-only tools; CP4 adds the graph tools (callers,
+//! callees, trace, impact); CP5 adds the knowledge tools (search, show,
+//! related); CP6 adds the composed `riltra_health` tool — eleven tools total
+//! (design gate §3) through the rmcp tool macros. Tool calls
 //! reuse the CLI's response formatters byte-for-byte, and the index read path
 //! (`store::open_read`) and the knowledge read path
 //! (`knowledge_store::open_knowledge(…, false)`) never create, migrate, or
@@ -18,9 +19,12 @@ use rmcp::{serve_server, tool, tool_handler, tool_router, ServerHandler};
 use serde::Deserialize;
 
 use crate::knowledge_store_absent;
-use crate::{git, ignore, index, knowledge, knowledge_store, paths, registry, response, store};
+use crate::{
+    doctor, git, ignore, index, knowledge, knowledge_store, paths, registry, response, store,
+};
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 #[schemars(crate = "rmcp::schemars")]
 struct RepoStatusInput {
     /// Registered repository name.
@@ -28,6 +32,7 @@ struct RepoStatusInput {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 #[schemars(crate = "rmcp::schemars")]
 struct CodeSearchInput {
     /// Registered repository name.
@@ -168,6 +173,12 @@ struct KnowledgeRelatedInput {
     /// a shifted page.
     generation: Option<u64>,
 }
+
+/// Health takes no arguments; any custom field is a schema-level refusal.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(crate = "rmcp::schemars")]
+struct HealthInput {}
 
 struct RiltraMcp;
 
@@ -339,6 +350,20 @@ impl RiltraMcp {
         Parameters(input): Parameters<KnowledgeRelatedInput>,
     ) -> CallToolResult {
         blocking(move || knowledge_related_doc(&input)).await
+    }
+
+    #[tool(
+        name = "riltra_health",
+        description = "Environment health: bootstrap status, environment doctor, versions, capabilities, limits, and the registered repository count. Read-only; creates and opens no storage.",
+        annotations(
+            title = "Health",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn riltra_health(&self, Parameters(_): Parameters<HealthInput>) -> CallToolResult {
+        blocking(health_doc).await
     }
 }
 
@@ -1187,6 +1212,91 @@ fn knowledge_related_doc(input: &KnowledgeRelatedInput) -> CallToolResult {
             page.next_offset,
         )),
     ))
+}
+
+// --- CP6: health -----------------------------------------------------------
+
+/// The health document: composed from the CLI's own status and environment
+/// doctor assemblies plus source-of-truth constants. The registry is only
+/// read; a corrupt registry is classified `store_error` and never yields a
+/// fabricated repository count.
+fn health_doc() -> CallToolResult {
+    let reg = match registry::load(&paths::registry_path()) {
+        Ok(reg) => reg,
+        Err(e) => return tool_error("store_error", &e),
+    };
+    let parse_json = |text: &str| -> Result<serde_json::Value, String> {
+        serde_json::from_str(text).map_err(|e| format!("internal response assembly error: {e}"))
+    };
+    let status = match parse_json(&crate::status_json()) {
+        Ok(value) => value,
+        Err(e) => return tool_error("store_error", &e),
+    };
+    let (doctor_text, _) = doctor::environment_doctor();
+    let doctor = match parse_json(&doctor_text) {
+        Ok(value) => value,
+        Err(e) => return tool_error("store_error", &e),
+    };
+    let value = serde_json::json!({
+        "operation": "health",
+        "status": status,
+        "doctor": doctor,
+        "versions": {
+            "riltra": crate::VERSION,
+            "code_index_schema": store::SCHEMA_VERSION,
+            "knowledge_schema": knowledge_store::KNOWLEDGE_SCHEMA_VERSION,
+        },
+        "capabilities": {
+            "transport": "stdio",
+            "operations": ["tools"],
+            "read_only": true,
+            "mutations": false,
+            "resources": false,
+            "prompts": false,
+            "network": false,
+            "knowledge_schema_v1_readable": true,
+            "tools": [
+                "riltra_code_callees",
+                "riltra_code_callers",
+                "riltra_code_impact",
+                "riltra_code_search",
+                "riltra_code_trace",
+                "riltra_health",
+                "riltra_knowledge_related",
+                "riltra_knowledge_search",
+                "riltra_knowledge_show",
+                "riltra_repo_list",
+                "riltra_repo_status",
+            ],
+        },
+        "limits": {
+            "code_search": {
+                "default_limit": index::DEFAULT_SEARCH_LIMIT,
+                "max_limit": index::MAX_SEARCH_LIMIT,
+            },
+            "knowledge_search": {
+                "default_limit": knowledge::SEARCH_LIMIT_DEFAULT,
+                "max_limit": knowledge::SEARCH_LIMIT_MAX,
+            },
+            "graph_traversal": {
+                "depth_default": 3,
+                "depth_max": crate::edges::TRACE_MAX_DEPTH,
+                "default_limit": index::DEFAULT_SEARCH_LIMIT,
+                "max_limit": index::MAX_SEARCH_LIMIT,
+            },
+        },
+        "repo_count": reg.repos.len(),
+    });
+    let text = match serde_json::to_string(&value) {
+        Ok(text) => text,
+        Err(e) => {
+            return tool_error(
+                "store_error",
+                &format!("internal response assembly error: {e}"),
+            )
+        }
+    };
+    doc(&text)
 }
 
 /// Run the MCP stdio server to completion. Exit codes follow the CLI:

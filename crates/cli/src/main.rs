@@ -39,9 +39,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use args::Command;
 use serde::de::{Deserialize, Deserializer, MapAccess, Visitor};
 
-const NAME: &str = "riltra";
-const VERSION: &str = env!("CARGO_PKG_VERSION");
-const SCOPE: &str = "m1-registry";
+pub(crate) const NAME: &str = "riltra";
+pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");
+pub(crate) const SCOPE: &str = "m1-registry";
 
 pub(crate) fn usage() -> String {
     format!(
@@ -60,7 +60,7 @@ fn version_line() -> String {
 }
 
 // Single-line JSON with fixed key order so output is stable.
-fn status_json() -> String {
+pub(crate) fn status_json() -> String {
     format!(
         "{{\"name\":\"{NAME}\",\"version\":\"{VERSION}\",\"scope\":\"{SCOPE}\",\"networking\":\"disabled\"}}"
     )
@@ -482,45 +482,8 @@ fn cmd_scan(
 fn cmd_doctor(repo: Option<&str>, out: &mut String, err: &mut String) -> i32 {
     match repo {
         None => {
-            let reg_ok = registry::load(&paths::registry_path()).is_ok();
-            let git_ok = git::git_available();
-            let checks = [
-                doctor::Check {
-                    name: "registry-readable".to_string(),
-                    pass: reg_ok,
-                    detail: if reg_ok {
-                        "registry file loads".to_string()
-                    } else {
-                        "registry file unreadable".to_string()
-                    },
-                },
-                doctor::Check {
-                    name: "git-available".to_string(),
-                    pass: git_ok,
-                    detail: if git_ok {
-                        "git executable found".to_string()
-                    } else {
-                        "git executable not found".to_string()
-                    },
-                },
-            ];
-            let pass = checks.iter().all(|c| c.pass);
-            let inner: Vec<String> = checks
-                .iter()
-                .map(|c| {
-                    format!(
-                        "{{\"name\":\"{}\",\"pass\":{},\"detail\":\"{}\"}}",
-                        json::escape(&c.name),
-                        c.pass,
-                        json::escape(&c.detail)
-                    )
-                })
-                .collect();
-            *out = format!(
-                "{{\"scope\":\"environment\",\"pass\":{},\"checks\":[{}]}}\n",
-                pass,
-                inner.join(",")
-            );
+            let (text, pass) = doctor::environment_doctor();
+            *out = format!("{text}\n");
             if pass {
                 0
             } else {
