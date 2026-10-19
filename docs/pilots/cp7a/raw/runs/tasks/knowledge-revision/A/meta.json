@@ -9,9 +9,9 @@
     "id": "deepseek-v4.1-flash-free",
     "providerID": "opencode"
   },
-  "location": "C:\\Users\\ryan\\AppData\\Local\\Temp\\opencode\\cp7a\\arm-a",
+  "location": "<CP7A_ARM_ROOT>\\arm-a",
   "session": "ses_eafbea3e2ffeYLy7NyTU4zTkd4",
-  "prompt": "Show record `cp7a-decision-health` in `riltra` at revision 1 and at its current revision. What is the title at each revision, and what is the current revision number?\n\nAccess: use only the shell tool, running the read-only wrapper E:\\dev\\Riltra\\.cp7a\\bin\\riltra-ro.cmd. Run that wrapper with --help once if you need CLI syntax. Do not use read or any other tool. Answer the question with the requested values and the evidence you observed.",
+  "prompt": "Show record `cp7a-decision-health` in `riltra` at revision 1 and at its current revision. What is the title at each revision, and what is the current revision number?\n\nAccess: use only the shell tool, running the read-only wrapper <CP7A_ROOT>\\bin\\riltra-ro.cmd. Run that wrapper with --help once if you need CLI syntax. Do not use read or any other tool. Answer the question with the requested values and the evidence you observed.",
   "started_utc": "2026-10-18T18:23:42.9071177Z",
   "finished_utc": "2026-10-18T18:23:52.3274164Z",
   "status": "ok",

@@ -9,7 +9,7 @@
     "id": "deepseek-v4.1-flash-free",
     "providerID": "opencode"
   },
-  "location": "C:\\Users\\ryan\\AppData\\Local\\Temp\\opencode\\cp7a\\arm-b",
+  "location": "<CP7A_ARM_ROOT>\\arm-b",
   "session": "ses_eafbe4320ffewzFem79LX4YtHE",
   "prompt": "Show record `cp7a-constraint-readonly` in `riltra`. What is its title, verification state, and evidence freshness status?\n\nAccess: use only the direct Riltra MCP tools named riltra_riltra_*. Their input schemas describe the arguments. Do not use read, shell, or any other tool. Answer the question with the requested values and the evidence you observed.",
   "started_utc": "2026-10-18T18:24:07.6782255Z",

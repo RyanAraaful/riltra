@@ -7,9 +7,23 @@ const path = require("node:path");
 const crypto = require("node:crypto");
 const { execSync } = require("node:child_process");
 
-const REPO = "E:/dev/Riltra";
+const REPO = path.resolve(__dirname, "..", "..", "..", "..");
 const CP = path.join(REPO, ".cp7a");
 const DOCS = path.join(REPO, "docs", "pilots", "cp7a");
+// Privacy remediation (2026-10-19): files whose committed content was sanitized
+// (local machine paths replaced by placeholders) no longer match the frozen
+// pre-redaction hashes. Both the frozen and derivative values are recorded in
+// docs/pilots/cp7a/SANITIZATION.md; the checks below accept the derivative hash
+// for exactly these paths and the frozen hash everywhere else.
+const DERIVATIVE = {
+  "corpus/corpus.json": "4FB9A77E49F10340E6804A6ACFBD966302E4E1C126868A18F9216D2999FF7A56",
+  "method/global-opencode.cp7a.jsonc": "D4D892E6CB7F0731543C0B5826CDA60E0990A662D7F00CC382A9F3DF4AA17C96",
+  "harness/configs/arm-a/opencode.jsonc": "88AFCBC8D74CDB89AC04B6E7F19F2ACB08D87CB085E0E427DD25D4D3F4AABC69",
+  "harness/configs/arm-b/opencode.jsonc": "88AFCBC8D74CDB89AC04B6E7F19F2ACB08D87CB085E0E427DD25D4D3F4AABC69",
+  "harness/configs/arm-a/plugin.ts": "9403FDEC64E86F5E66B6542D86DE5BA9E0F3DCC28D7AE5E475E99EE6216499F4",
+  "harness/configs/arm-b/plugin.ts": "297380442E6B8865F2E8331E7469B6B843E06AE19A8A905BE5C4C596E958F550",
+  "harness/bin/riltra-ro.cjs": "62AD3D772DF096E8698C99980FB6D5CDFC08833113939FC3682E566572E58A7B"
+};
 const checks = [];
 function check(name, ok, detail) {
   checks.push({ name, ok: Boolean(ok), detail: detail === undefined ? "" : String(detail) });
@@ -29,6 +43,13 @@ function walk(dir, out) {
   }
   return out;
 }
+// Compare a committed evidence copy against its frozen (or sanitized derivative) hash.
+function checkDocs(rel, frozenWant) {
+  const got = sha256File(path.join(DOCS, rel));
+  const redacted = Object.prototype.hasOwnProperty.call(DERIVATIVE, rel);
+  const want = redacted ? DERIVATIVE[rel] : frozenWant;
+  check(`docs ${rel} == ${redacted ? "sanitized derivative" : "frozen"}`, got === want, want);
+}
 
 const env = readJson(path.join(CP, "frozen", "environment.json"));
 const summary = readJson(path.join(CP, "summary.json"));
@@ -38,7 +59,7 @@ const corpusHash = sha256File(path.join(CP, "corpus", "corpus.json"));
 check("corpus.sha256 file hash", corpusHash === "D9F33A765A98723B0ACFD314865C976FB8BD58A680C911932B64C83E8530C824", corpusHash);
 check("summary.corpus_sha256", summary.corpus_sha256 === corpusHash, summary.corpus_sha256);
 check("environment.corpus_sha256", env.corpus_sha256 === corpusHash, env.corpus_sha256);
-check("docs corpus copy hash", sha256File(path.join(DOCS, "corpus", "corpus.json")) === corpusHash, "docs/pilots/cp7a/corpus/corpus.json");
+checkDocs("corpus/corpus.json", corpusHash);
 
 const tokenRuleHash = sha256File(path.join(CP, "frozen", "token-rules.md"));
 check("summary.token_rule_sha256", summary.token_rule_sha256 === tokenRuleHash, summary.token_rule_sha256);
@@ -54,15 +75,14 @@ check("source worktree clean", sourceStatus === "", sourceStatus || "(clean)");
 // ---------- 3. binary + configs used for measurement ----------
 const binHash = sha256File(path.join(REPO, "target", "debug", "riltra.exe"));
 check("binary sha256", binHash === env.binary_sha256, binHash);
-check("docs global config == frozen global config", sha256File(path.join(DOCS, "method", "global-opencode.cp7a.jsonc")) === env.global_config_sha256, env.global_config_sha256);
+checkDocs("method/global-opencode.cp7a.jsonc", env.global_config_sha256);
 for (const arm of ["a", "b"]) {
-  const dir = path.join(DOCS, "harness", "configs", `arm-${arm}`);
-  check(`docs arm-${arm} opencode.jsonc == frozen arm config`, sha256File(path.join(dir, "opencode.jsonc")) === env.arm_config_sha256[arm.toUpperCase()], env.arm_config_sha256[arm.toUpperCase()]);
+  checkDocs(`harness/configs/arm-${arm}/opencode.jsonc`, env.arm_config_sha256[arm.toUpperCase()]);
 }
-check("docs arm-a plugin == frozen", sha256File(path.join(DOCS, "harness", "configs", "arm-a", "plugin.ts")) === env.plugins.A, env.plugins.A);
-check("docs arm-b plugin == frozen", sha256File(path.join(DOCS, "harness", "configs", "arm-b", "plugin.ts")) === env.plugins.B, env.plugins.B);
+checkDocs("harness/configs/arm-a/plugin.ts", env.plugins.A);
+checkDocs("harness/configs/arm-b/plugin.ts", env.plugins.B);
 check("docs wrapper cmd == frozen", sha256File(path.join(DOCS, "harness", "bin", "riltra-ro.cmd")) === env.wrapper.cmd, env.wrapper.cmd);
-check("docs wrapper cjs == frozen", sha256File(path.join(DOCS, "harness", "bin", "riltra-ro.cjs")) === env.wrapper.cjs, env.wrapper.cjs);
+checkDocs("harness/bin/riltra-ro.cjs", env.wrapper.cjs);
 
 // ---------- 4. home pristine + no empty store ----------
 for (const [rel, want] of Object.entries(env.home_pristine)) {

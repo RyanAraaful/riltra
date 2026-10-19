@@ -49,7 +49,8 @@ const answers = {
   "health": "Version 0.1.0; 3 registered repositories; the environment doctor passes."
 };
 
-const cli = (args) => `E:\\dev\\Riltra\\.cp7a\\bin\\riltra-ro.cmd ${args}`;
+const CP7A_ROOT = process.env.RILTRA_CP7A_ROOT || "<CP7A_ROOT>";
+const cli = (args) => `${CP7A_ROOT}\\bin\\riltra-ro.cmd ${args}`;
 const commands = {
   "repo-list": ["repo list"],
   "repo-status": ["repo status --repo riltra", "index status --repo riltra"],

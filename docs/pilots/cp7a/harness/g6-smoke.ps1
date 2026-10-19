@@ -3,12 +3,15 @@
 # model without killing the server. This is a separate smoke session; it is not a
 # corpus task and is excluded from the paired token totals.
 param(
-  [string]$Root = "E:\dev\Riltra\.cp7a",
-  [string]$Out = "E:\dev\Riltra\.cp7a\g6-smoke",
+  [string]$Root = "",
+  [string]$Out = "",
   [int]$TimeoutSec = 180
 )
 $ErrorActionPreference = "Stop"
-$ArmDir = "C:\Users\ryan\AppData\Local\Temp\opencode\cp7a\arm-b"
+$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..\..\..")).Path
+if (-not $Root) { $Root = Join-Path $RepoRoot ".cp7a" }
+if (-not $Out) { $Out = Join-Path $Root "g6-smoke" }
+$ArmDir = Join-Path ([System.IO.Path]::GetTempPath()) "opencode\cp7a\arm-b"
 $PluginLog = Join-Path $Root "plugin-events.jsonl"
 $HomeLive = Join-Path $Root "home-template"
 $HomePristine = Join-Path $Root "home-pristine"

@@ -9,9 +9,9 @@
     "id": "deepseek-v4.1-flash-free",
     "providerID": "opencode"
   },
-  "location": "C:\\Users\\ryan\\AppData\\Local\\Temp\\opencode\\cp7a\\arm-a",
+  "location": "<CP7A_ARM_ROOT>\\arm-a",
   "session": "ses_eafc2145fffeybIDYjMFVbHPKk",
-  "prompt": "For repository `riltra`, report the git HEAD, whether the worktree is dirty, and the code-index freshness.\n\nAccess: use only the shell tool, running the read-only wrapper E:\\dev\\Riltra\\.cp7a\\bin\\riltra-ro.cmd. Run that wrapper with --help once if you need CLI syntax. Do not use read or any other tool. Answer the question with the requested values and the evidence you observed.",
+  "prompt": "For repository `riltra`, report the git HEAD, whether the worktree is dirty, and the code-index freshness.\n\nAccess: use only the shell tool, running the read-only wrapper <CP7A_ROOT>\\bin\\riltra-ro.cmd. Run that wrapper with --help once if you need CLI syntax. Do not use read or any other tool. Answer the question with the requested values and the evidence you observed.",
   "started_utc": "2026-10-18T18:19:57.4870754Z",
   "finished_utc": "2026-10-18T18:20:16.9683527Z",
   "status": "ok",

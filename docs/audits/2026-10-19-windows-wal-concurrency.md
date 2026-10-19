@@ -348,7 +348,7 @@ concurrency test as the end-to-end scenario; and a Windows CI run of the full `m
 - CI evidence (Observed): run 39201873049; jobs 117896351953 / 117896352103 / 117896352121
   (attempt 1) and 117897894583 (attempt 2, rerun of failed jobs); attempt-1 logs retrieved with
   `gh run view 39201873049 --attempt 1 --log`.
-- Local evidence (Observed; temp directory `C:\Users\ryan\AppData\Local\Temp\opencode\m8-wal-audit`,
+- Local evidence (Observed; temp directory `<USER_HOME>\AppData\Local\Temp\opencode\m8-wal-audit`,
   not committed): `attempt1-run-attempt1.log` (full attempt-1 logs, 562,581 bytes);
   sequential run logs `attempt-1..20.log` and `results.csv`; amplification logs
   `par-*.out.log` and `full-*.out.log`; `environment.log`; probe sources/scripts `walprobe.rs`

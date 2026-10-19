@@ -12,7 +12,7 @@
   "cli": {
     "commands": 19,
     "home_changed": false,
-    "wrapper": "E:\\dev\\Riltra\\.cp7a\\bin\\riltra-ro.cjs"
+    "wrapper": "<CP7A_ROOT>\\bin\\riltra-ro.cjs"
   },
   "comparisons": [
     {

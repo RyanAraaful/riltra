@@ -83,8 +83,8 @@ npm --version
 scip-typescript --version
 rust-analyzer --version
 node docs/pilots/m6-real-providers.cjs `
-  C:/Users/ryan/AppData/Roaming/npm/node_modules/@sourcegraph/scip-typescript/dist/src/main.js `
-  C:/Users/ryan/.rustup/toolchains/stable-x86_64-pc-windows-msvc/bin/rust-analyzer.exe
+  <USER_HOME>/AppData/Roaming/npm/node_modules/@sourcegraph/scip-typescript/dist/src/main.js `
+  <USER_HOME>/.rustup/toolchains/stable-x86_64-pc-windows-msvc/bin/rust-analyzer.exe
 # Use the directory printed by the preceding command:
 node docs/pilots/m6-profile.cjs target/m6-pilot-An19ih
 ```

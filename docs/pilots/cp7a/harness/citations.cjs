@@ -5,14 +5,17 @@
 const fs = require("node:fs");
 const path = require("node:path");
 
-const SOURCE_ROOT = "E:\\dev\\Riltra\\.cp7a\\source";
-const MAIN_ROOT = "E:\\dev\\Riltra";
-const OTHER_ROOT = "E:\\dev\\Riltra\\.cp7a\\other-repo";
-const EMPTY_ROOT = "E:\\dev\\Riltra\\.cp7a\\empty-repo";
-const BIN_ROOT = "E:\\dev\\Riltra\\.cp7a\\bin";
-const ARM_A = "C:\\Users\\ryan\\AppData\\Local\\Temp\\opencode\\cp7a\\arm-a";
-const ARM_B = "C:\\Users\\ryan\\AppData\\Local\\Temp\\opencode\\cp7a\\arm-b";
-const TARGET_DEBUG = "E:\\dev\\Riltra\\target\\debug";
+const os = require("node:os");
+const REPO_ROOT = path.resolve(__dirname, "..", "..", "..", "..");
+const CP7A_ROOT = path.join(REPO_ROOT, ".cp7a");
+const SOURCE_ROOT = path.join(CP7A_ROOT, "source");
+const MAIN_ROOT = REPO_ROOT;
+const OTHER_ROOT = path.join(CP7A_ROOT, "other-repo");
+const EMPTY_ROOT = path.join(CP7A_ROOT, "empty-repo");
+const BIN_ROOT = path.join(CP7A_ROOT, "bin");
+const ARM_A = path.join(os.tmpdir(), "opencode", "cp7a", "arm-a");
+const ARM_B = path.join(os.tmpdir(), "opencode", "cp7a", "arm-b");
+const TARGET_DEBUG = path.join(REPO_ROOT, "target", "debug");
 
 const KNOWN_RECORDS = new Set([
   "cp7a-decision-health",

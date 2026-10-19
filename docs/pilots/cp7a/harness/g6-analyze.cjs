@@ -5,7 +5,8 @@
 "use strict";
 const fs = require("node:fs");
 const path = require("node:path");
-const OUT = "E:\\dev\\Riltra\\.cp7a\\g6-smoke";
+const REPO_ROOT = path.resolve(__dirname, "..", "..", "..", "..");
+const OUT = path.join(REPO_ROOT, ".cp7a", "g6-smoke");
 const api = JSON.parse(fs.readFileSync(path.join(OUT, "messages.json"), "utf8"));
 const meta = JSON.parse(fs.readFileSync(path.join(OUT, "meta.json"), "utf8"));
 const tools = [];

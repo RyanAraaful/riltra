@@ -8,7 +8,8 @@ const path = require("node:path");
 const crypto = require("node:crypto");
 const { spawnSync } = require("node:child_process");
 
-const ROOT = "E:\\dev\\Riltra\\.cp7a";
+const REPO_ROOT = path.resolve(__dirname, "..", "..", "..", "..", "..");
+const ROOT = path.join(REPO_ROOT, ".cp7a");
 const HOME = path.join(ROOT, "home-template");
 const PRISTINE = path.join(ROOT, "home-pristine");
 const OUT = path.join(ROOT, "reference");
@@ -75,7 +76,7 @@ const results = [];
 for (const c of commands) {
   const t0 = Number(process.hrtime.bigint() / 1000000n);
   const r = spawnSync(process.execPath, [WRAPPER, ...c.args], {
-    cwd: "E:\\dev\\Riltra",
+    cwd: REPO_ROOT,
     env: { ...process.env, RILTRA_HOME: HOME },
     encoding: "utf8",
     windowsHide: true,

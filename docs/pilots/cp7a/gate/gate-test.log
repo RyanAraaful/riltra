@@ -49,21 +49,21 @@ test ignore::tests::loads_file_skipping_comments_and_blanks ... ok
 test ignore::tests::matches_exact_and_dir_prefix_only ... ok
 test ignore::tests::missing_file_reports_absent_with_zero_rules ... ok
 test edges::tests::edges_lifecycle_rebuild_rederives_after_target_change ... ok
-Initialized empty Git repository in C:/Users/ryan/AppData/Local/Temp/riltra-git-clean-13984-22/.git/
-Initialized empty Git repository in C:/Users/ryan/AppData/Local/Temp/riltra-git-status-fail-13984-26/.git/
+Initialized empty Git repository in <USER_HOME>/AppData/Local/Temp/riltra-git-clean-13984-22/.git/
+Initialized empty Git repository in <USER_HOME>/AppData/Local/Temp/riltra-git-status-fail-13984-26/.git/
 test git::tests::non_git_dir_is_not_present_and_corrupt_is_invalid ... ok
 test index::tests::add_remove_rename_yield_exact_facts ... ok
-Initialized empty Git repository in C:/Users/ryan/AppData/Local/Temp/riltra-git-dirty-13984-24/.git/
+Initialized empty Git repository in <USER_HOME>/AppData/Local/Temp/riltra-git-dirty-13984-24/.git/
 test index::tests::case_only_rename_has_no_duplicates ... ok
 test index::tests::changed_during_index_is_recorded_stale ... ok
-Initialized empty Git repository in C:/Users/ryan/AppData/Local/Temp/riltra-git-fsmonitor-13984-23/.git/
-Initialized empty Git repository in C:/Users/ryan/AppData/Local/Temp/riltra-git-wt-13984-32/.git/
+Initialized empty Git repository in <USER_HOME>/AppData/Local/Temp/riltra-git-fsmonitor-13984-23/.git/
+Initialized empty Git repository in <USER_HOME>/AppData/Local/Temp/riltra-git-wt-13984-32/.git/
 test index::tests::corrupt_staging_leftover_does_not_block_rebuild ... ok
 test index::tests::edge_anchor_ambiguous_distinct_uris ... ok
 test index::tests::edge_anchor_semantic_picks_narrowest ... ok
 test index::tests::edge_anchor_symbol_mismatch_errors ... ok
-Initialized empty Git repository in C:/Users/ryan/AppData/Local/Temp/riltra-idx-gitdirty-13984-37/.git/
-Initialized empty Git repository in C:/Users/ryan/AppData/Local/Temp/riltra-idx-dirty-13984-38/.git/
+Initialized empty Git repository in <USER_HOME>/AppData/Local/Temp/riltra-idx-gitdirty-13984-37/.git/
+Initialized empty Git repository in <USER_HOME>/AppData/Local/Temp/riltra-idx-dirty-13984-38/.git/
 test index::tests::edge_anchor_syntax_fallback_with_uncertainty ... ok
 test index::tests::edge_query_sees_single_snapshot_during_promotion ... ok
 test index::tests::empty_repo_stays_fresh_and_empty_file_is_eligible ... ok
@@ -106,7 +106,7 @@ test index::tests::noop_refresh_reparses_zero_files ... ok
 test index::tests::parser_version_mismatch_is_stale ... ok
 test index::tests::one_file_delta_reparses_only_that_file ... ok
 test git::tests::status_never_runs_repo_configured_fsmonitor ... ok
-Initialized empty Git repository in C:/Users/ryan/AppData/Local/Temp/riltra-idx-head-13984-72/.git/
+Initialized empty Git repository in <USER_HOME>/AppData/Local/Temp/riltra-idx-head-13984-72/.git/
 test index::tests::incremental_matches_independent_full_rebuild ... ok
 test index::tests::reuse_reads_see_single_revision ... ok
 test index::tests::rename_delete_and_new_files_are_stale ... ok
@@ -389,7 +389,7 @@ test init_rejects_missing_path_and_bad_name ... ok
 test init_and_list_round_trip ... ok
 test status_ignores_symlinked_ignore_outside_root ... ok
 test name_clash_across_roots_is_rejected ... ok
-Initialized empty Git repository in C:/Users/ryan/AppData/Local/Temp/riltra-cli-fsmonitor-1984-8/code/.git/
+Initialized empty Git repository in <USER_HOME>/AppData/Local/Temp/riltra-cli-fsmonitor-1984-8/code/.git/
 test status_corrupt_git_reports_invalid_with_exit_3 ... ok
 test repos_are_isolated_by_name ... ok
 test doctor_healthy_dir_passes_and_env_doctor_reports_scope ... ok
@@ -399,7 +399,7 @@ test status_rejects_symlink_retarget_outside_root ... ok
 test status_corrupt_gitfile_reports_invalid_with_exit_3 ... ok
 test status_unknown_repo_exits_3_without_stdout ... ok
 test status_rejects_windows_junction_retarget ... ok
-Initialized empty Git repository in C:/Users/ryan/AppData/Local/Temp/riltra-cli-gitrep-1984-13/code/.git/
+Initialized empty Git repository in <USER_HOME>/AppData/Local/Temp/riltra-cli-gitrep-1984-13/code/.git/
 [main (root-commit) 3393ab4] init
  1 file changed, 1 insertion(+)
  create mode 100644 a.txt
@@ -560,13 +560,13 @@ test result: ok. 137 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fi
 running 21 tests
 test cli_cold_start_reports_cold_start ... ok
 test cli_noop_reports_zero_reparsed ... ok
-Initialized empty Git repository in C:/Users/ryan/AppData/Local/Temp/riltra-idx-branch-10036-2/code/.git/
+Initialized empty Git repository in <USER_HOME>/AppData/Local/Temp/riltra-idx-branch-10036-2/code/.git/
 test cli_full_flag_forces_full ... ok
 test build_reopen_search_is_consistent ... ok
 test corrupt_staging_leftover_does_not_block_rebuild ... ok
 test corrupt_live_db_reports_unknown_and_recovers ... ok
 test incremental_recovers_corrupt_live_as_fallback ... ok
-Initialized empty Git repository in C:/Users/ryan/AppData/Local/Temp/riltra-idx-dirty-10036-12/code/.git/
+Initialized empty Git repository in <USER_HOME>/AppData/Local/Temp/riltra-idx-dirty-10036-12/code/.git/
 test cli_search_parity_full_vs_incremental ... ok
 test index_output_contract_and_unknown_repo ... ok
 test incremental_recovers_partial_staging ... ok
@@ -704,7 +704,7 @@ test result: ok. 44 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fin
 
 running 15 tests
 test cli_lsp_live_query_gated ... ok
-Initialized empty Git repository in C:/Users/ryan/AppData/Local/Temp/riltra-sem-dirtygit-8112-10007/sem/.git/
+Initialized empty Git repository in <USER_HOME>/AppData/Local/Temp/riltra-sem-dirtygit-8112-10007/sem/.git/
 test cli_local_symbols_stay_document_scoped ... ok
 test cli_null_doc_turned_escape_symlink_drops_safely ... ok
 test cli_imports_with_same_uri_do_not_merge ... ok

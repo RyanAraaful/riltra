@@ -4,9 +4,13 @@
 "use strict";
 
 const { spawnSync } = require("node:child_process");
+const path = require("node:path");
 
-const RILTRA = "E:\\dev\\Riltra\\target\\debug\\riltra.exe";
-const HOME = "E:\\dev\\Riltra\\.cp7a\\home-template";
+// Repository root derived from the wrapper location; keeps the harness runnable
+// from any checkout (sanitized derivative of the CP7-A measurement host layout).
+const REPO_ROOT = path.resolve(__dirname, "..", "..", "..", "..", "..");
+const RILTRA = path.join(REPO_ROOT, "target", "debug", "riltra.exe");
+const HOME = path.join(REPO_ROOT, ".cp7a", "home-template");
 const REPOS = new Set(["riltra", "other", "empty"]);
 
 function fail(message) {
