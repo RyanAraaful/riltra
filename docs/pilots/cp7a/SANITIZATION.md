@@ -6,14 +6,65 @@
   `docs/audits/2026-10-19-windows-wal-concurrency.md`.
 - Reason: the tracked evidence contained local machine paths (Windows user
   profile, repository checkout root, pilot home, per-arm temp directories).
-  They were replaced before publication; no scores, counters, verdicts,
-  timings, token totals, task texts or gate logs changed.
+  They were replaced before publication.
 - Method: deterministic literal replacement of four path prefixes (all
   slash/backslash/JSON-escaped variants) over tracked text files, plus manual
   refactors of harness scripts. The pre-sanitization bytes were backed up
   outside Git with a SHA-256 manifest before modification. This directory and
   the three files above are therefore a **sanitized derivative**, not a
   byte-identical snapshot, of the measurement host state.
+
+## Evidence states
+
+### Historical frozen evidence (not published)
+
+The pre-sanitization bytes are retained privately, outside Git: the 167
+automatically replaced files and the 13 manually refactored harness files are
+backed up with per-file before/after SHA-256 values. The manifest SHA-256 is
+`39167218...` (full value under "Rollback" below). The frozen hashes quoted in
+`summary.json`, `measurements.json`, `method/environment.json`,
+`method/fixtures-manifest.json`, `raw/run.log`, `summary.md` and the
+historical `gate/verify.*` logs continue to describe those pre-redaction
+bytes; this remediation did not edit them.
+
+### Public sanitized derivative (this tree)
+
+Local path prefixes were replaced by the placeholders below in 180
+path-bearing files (167 automatic replacements, 13 manually refactored
+harness files). `corpus/corpus.sha256` was updated separately to the
+derivative corpus hash; the frozen value remains recorded in the evidence.
+
+Textual fields that embedded a path did change at the string level. The
+structured comparison found 874 changed string fields in JSON/JSONL evidence,
+including 16 task `prompt` fields, 48 `answer` fields, and command/log output
+fields that quoted paths. Every such change is exactly the recorded
+placeholder substitution; no other wording, score, verdict, count, timing or
+token total was edited.
+
+### Post-sanitization verification (2026-10-19)
+
+A structured comparison of the private backup against this tree checked every
+changed file. It is local-only because it requires the backup; the method and
+results are recorded here.
+
+- 167/167 recorded before-hashes matched the backup files.
+- 126 JSON and 17 JSONL evidence files parsed and compared field by field:
+  874 changed string fields, all placeholder substitutions; zero changes to
+  numbers, booleans, nulls, types, array lengths, or key sets.
+- 24 text files: numeric-token sequences are identical after placeholder
+  normalization. The only residual line differences are the reviewed harness
+  refactors and derivative-hash documentation described below (README and
+  `harness/verify-global-config.cjs`); no evidence log line changed except by
+  placeholder substitution.
+- `harness/verify.cjs`: 56/57 checks pass; the sole failure is
+  `binary sha256`, explained below.
+- `harness/verify-global-config.cjs`: PASS; reconstruction matches the
+  recorded derivative `D4D892...`, while the frozen `1E9671...` stays in the
+  record.
+
+The comparison was configured to stop on any numeric or structural change;
+none occurred. If an invariant metric had changed, this remediation would
+have stopped instead of publishing the result.
 
 ## Placeholder scheme
 
@@ -24,10 +75,11 @@
 | `<CP7A_ROOT>` | pilot home directory (`.cp7a` inside the checkout root) |
 | `<CP7A_ARM_ROOT>` | temporary OpenCode working directories of the two arms |
 
-Occurrences: 1025 automatic replacements across 167 tracked files, plus 31
-handled by script refactors in 13 files (1056 path occurrences in 180 files).
-The CI-runner profile path (`C:\Users\runneradmin`, `D:\a\...`) appears once in
-the M8 WAL audit log; it is runner-generated, not personal, and was kept.
+Occurrences: 1025 automatic replacements across 167 tracked files, plus 52
+path occurrences replaced by manual harness refactors in 13 files, for 1077
+path occurrences in 180 path-bearing files. The CI-runner profile path
+(`C:\Users\runneradmin`, `D:\a\...`) appears once in the M8 WAL audit log; it
+is runner-generated, not personal, and was kept.
 
 ## Harness changes (functional, not placeholder-redacted)
 
@@ -44,6 +96,10 @@ The arm-A location plugin now matches the wrapper by its final path segments
 `harness/configs/arm-b/opencode.jsonc`) keep placeholders: substitute locally
 to replay.
 
+These edits were reviewed in the structured comparison: they change code and
+documentation only, and leave every numeric token (scores, counters, timings,
+token totals) unchanged.
+
 ## Frozen vs derivative hashes (hash-checked files)
 
 | File | Frozen (pre-redaction) | Published derivative |
@@ -57,22 +113,21 @@ to replay.
 | `harness/bin/riltra-ro.cjs` | `BECF06E9643342A917F5A42DEF0865FF7B9829181B65B520A293F436B8E73158` | `62AD3D772DF096E8698C99980FB6D5CDFC08833113939FC3682E566572E58A7B` |
 
 `harness/verify.cjs` accepts the derivative hash for exactly these seven paths
-and still asserts the frozen values everywhere else.
-`harness/verify-global-config.cjs` re-derives the archived global config from
+and still asserts the frozen values everywhere else. `harness/verify-global-config.cjs`
+re-derives the archived global config from
 `method/global-opencode.original-backup.jsonc` plus the two recorded edits and
-reports both hashes (it now expects the derivative). Re-run on the measurement
-host after sanitization: 56/57 checks pass; the only failure is `binary
-sha256`, because the local `target/debug/riltra.exe` was rebuilt after the
-measurement and the measured binary is not part of the tree. Every hash,
-aggregate, isolation and credential check passes.
+reports both hashes (it now expects the derivative).
 
-`corpus/corpus.sha256` now carries the derivative hash. The frozen values
-referenced in `summary.json`, `measurements.json`, `method/environment.json`,
-`method/fixtures-manifest.json`, `method/token-rules.md`, `raw/run.log`,
-`summary.md`, the `README.md` metadata table (which points here) and the
-historical `gate/verify.*` logs describe the pre-redaction bytes as recorded
-on 2026-10-18. CP7-A files are committed with `-text` in `.gitattributes`, so
-committed blob bytes equal the hashed bytes.
+## Binary-hash status
+
+`harness/verify.cjs` reports 56/57. The only failure is `binary sha256`: it
+compares the locally rebuilt `target/debug/riltra.exe` against the frozen
+`environment.binary_sha256` recorded when the measurements were taken. The
+measured binary was never committed and the local build was rebuilt later, so
+the hashes differ. No score, verdict, aggregate, token total or hash check of
+the published evidence depends on that rebuilt binary, and no historical
+result was changed. This is a replay-environment note, not a sanitization
+defect.
 
 ## Reproducibility impact
 
