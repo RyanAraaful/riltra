@@ -186,21 +186,53 @@ fn companion_paths(db: &Path) -> [PathBuf; 3] {
     ]
 }
 
+/// Total metadata inspections allowed at a store-controlled path. Windows
+/// retries a transient `PermissionDenied` (os error 5) that antivirus or
+/// filter drivers can raise while holding `-wal`/`-shm` during SQLite cleanup
+/// (see `docs/audits/2026-10-19-windows-wal-concurrency.md`); every other
+/// platform keeps the original single inspection.
+const INSPECT_ATTEMPTS: u32 = if cfg!(windows) { 3 } else { 1 };
+
+/// Fixed pause between retried inspections, mirroring SQLite's documented
+/// 25 ms Windows antivirus-retry interval.
+const INSPECT_RETRY_DELAY: Duration = Duration::from_millis(25);
+
 /// Any symlink at a store-controlled path is an escape, including dangling
 /// links (`symlink_metadata` succeeds on those). A missing path is absent;
 /// any other I/O error fails closed instead of being treated as absent.
 fn reject_link(p: &Path) -> Result<(), String> {
-    match std::fs::symlink_metadata(p) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(format!(
-            "cannot inspect knowledge store path '{}': {e}",
-            p.display()
-        )),
-        Ok(md) if md.file_type().is_symlink() => Err(format!(
-            "knowledge store path escapes via link: '{}'",
-            p.display()
-        )),
-        Ok(_) => Ok(()),
+    reject_link_with(p, |q| std::fs::symlink_metadata(q))
+}
+
+/// Testable form of [`reject_link`]: `inspect` is the raw metadata call
+/// (production passes `std::fs::symlink_metadata`), so tests can script
+/// inspection outcomes without changing the retry or classification rules.
+fn reject_link_with<F>(p: &Path, inspect: F) -> Result<(), String>
+where
+    F: Fn(&Path) -> std::io::Result<std::fs::Metadata>,
+{
+    let mut attempts = INSPECT_ATTEMPTS;
+    loop {
+        match inspect(p) {
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied && attempts > 1 => {
+                attempts -= 1;
+                std::thread::sleep(INSPECT_RETRY_DELAY);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => {
+                return Err(format!(
+                    "cannot inspect knowledge store path '{}': {e}",
+                    p.display()
+                ))
+            }
+            Ok(md) if md.file_type().is_symlink() => {
+                return Err(format!(
+                    "knowledge store path escapes via link: '{}'",
+                    p.display()
+                ))
+            }
+            Ok(_) => return Ok(()),
+        }
     }
 }
 
@@ -660,6 +692,17 @@ fn now_unix() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+/// Generation guard for a genuinely absent store: the empty store is
+/// generation 0, so only an omitted or zero expectation may succeed.
+pub fn check_missing_store_generation(generation: Option<u64>) -> Result<(), String> {
+    match generation {
+        Some(expected) if expected != 0 => Err(format!(
+            "knowledge generation conflict: expected {expected} but store is at 0"
+        )),
+        _ => Ok(()),
+    }
 }
 
 /// Current monotonic knowledge generation (bumped by every mutation).
@@ -1504,6 +1547,61 @@ pub fn show_record(
     record.evidence = read_evidence(conn, id, rev_i64)?;
     load_record_lifecycle(conn, lifecycle_present(conn)?, &mut record)?;
     Ok(record)
+}
+
+/// Read one revision and the store generation from one SQLite read
+/// transaction: both describe the same committed snapshot even while another
+/// connection commits. `probe` is a test-only seam between the two reads;
+/// production callers use [`show_snapshot`], which passes none.
+fn show_snapshot_inner(
+    conn: &Connection,
+    id: &str,
+    revision: Option<u64>,
+    probe: Option<&dyn Fn()>,
+) -> Result<(RecordVersion, u64), String> {
+    conn.execute_batch("BEGIN")
+        .map_err(|e| format!("cannot begin knowledge read: {e}"))?;
+    let pair = (|| {
+        let record = show_record(conn, id, revision)?;
+        if let Some(run) = probe {
+            run();
+        }
+        let generation = read_generation(conn)?;
+        Ok((record, generation))
+    })();
+    match pair {
+        Ok(pair) => {
+            conn.execute_batch("COMMIT")
+                .map_err(|e| format!("cannot commit knowledge read: {e}"))?;
+            Ok(pair)
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(e)
+        }
+    }
+}
+
+/// Read one revision (`None` = current head) and the current generation from
+/// one read snapshot. Never creates or mutates anything.
+pub fn show_snapshot(
+    conn: &Connection,
+    id: &str,
+    revision: Option<u64>,
+) -> Result<(RecordVersion, u64), String> {
+    show_snapshot_inner(conn, id, revision, None)
+}
+
+/// Test-only probe invoked between the record read and the generation read,
+/// so a test can commit from another connection exactly on that boundary.
+#[cfg(test)]
+pub(crate) fn show_snapshot_with_probe(
+    conn: &Connection,
+    id: &str,
+    revision: Option<u64>,
+    probe: Option<&dyn Fn()>,
+) -> Result<(RecordVersion, u64), String> {
+    show_snapshot_inner(conn, id, revision, probe)
 }
 
 /// Whether this store carries the v2 lifecycle tables. Reads check the table
@@ -5330,6 +5428,168 @@ mod tests {
         );
     }
 
+    /// Scripted outcomes for the `reject_link_with` seam: replaces only the
+    /// sequence of raw metadata results, never the classification rules.
+    enum ScriptedInspect {
+        Denied,
+        Invalid,
+        Delegate,
+    }
+
+    fn scripted_inspector(
+        script: Vec<ScriptedInspect>,
+    ) -> (
+        impl Fn(&Path) -> std::io::Result<std::fs::Metadata>,
+        std::rc::Rc<std::cell::Cell<u32>>,
+    ) {
+        let queue = std::cell::RefCell::new(script.into_iter());
+        let calls = std::rc::Rc::new(std::cell::Cell::new(0u32));
+        let counted = std::rc::Rc::clone(&calls);
+        let inspect = move |p: &Path| {
+            counted.set(counted.get() + 1);
+            match queue.borrow_mut().next() {
+                Some(ScriptedInspect::Denied) => Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "scripted permission denied",
+                )),
+                Some(ScriptedInspect::Invalid) => Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "scripted other error",
+                )),
+                Some(ScriptedInspect::Delegate) | None => std::fs::symlink_metadata(p),
+            }
+        };
+        (inspect, calls)
+    }
+
+    #[test]
+    fn reject_link_immediate_success_inspects_once() {
+        let dir = tmpdir("m8-retry-ok");
+        let file = dir.join("krepo.db");
+        std::fs::write(&file, b"db").unwrap();
+        let (inspect, calls) = scripted_inspector(vec![ScriptedInspect::Delegate]);
+        reject_link_with(&file, inspect).unwrap();
+        assert_eq!(calls.get(), 1, "immediate success must not re-inspect");
+    }
+
+    #[test]
+    fn reject_link_other_errors_fail_closed_without_retry() {
+        let dir = tmpdir("m8-retry-other");
+        let file = dir.join("krepo.db");
+        std::fs::write(&file, b"db").unwrap();
+        let (inspect, calls) = scripted_inspector(vec![ScriptedInspect::Invalid]);
+        let err = reject_link_with(&file, inspect).unwrap_err();
+        assert!(
+            err.starts_with("cannot inspect knowledge store path"),
+            "unexpected: {err}"
+        );
+        assert!(err.contains("scripted other error"), "unexpected: {err}");
+        assert_eq!(calls.get(), 1, "non-permission errors must not retry");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn reject_link_retries_transient_permission_denied() {
+        let dir = tmpdir("m8-retry-transient");
+        let file = dir.join("krepo.db");
+        std::fs::write(&file, b"db").unwrap();
+        let (inspect, calls) =
+            scripted_inspector(vec![ScriptedInspect::Denied, ScriptedInspect::Delegate]);
+        reject_link_with(&file, inspect).unwrap();
+        assert_eq!(calls.get(), 2, "transient denial must be re-inspected");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn reject_link_retry_budget_is_three_inspections() {
+        let dir = tmpdir("m8-retry-budget");
+        let file = dir.join("krepo.db");
+        std::fs::write(&file, b"db").unwrap();
+        let (inspect, calls) = scripted_inspector(vec![
+            ScriptedInspect::Denied,
+            ScriptedInspect::Denied,
+            ScriptedInspect::Delegate,
+        ]);
+        reject_link_with(&file, inspect).unwrap();
+        assert_eq!(calls.get(), INSPECT_ATTEMPTS);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn reject_link_transient_denied_then_missing_path_is_absent() {
+        let dir = tmpdir("m8-retry-missing");
+        let missing = dir.join("krepo.db-wal");
+        let (inspect, calls) =
+            scripted_inspector(vec![ScriptedInspect::Denied, ScriptedInspect::Delegate]);
+        reject_link_with(&missing, inspect).unwrap();
+        assert_eq!(calls.get(), 2);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn reject_link_persistent_denial_fails_closed_after_budget() {
+        let dir = tmpdir("m8-retry-persistent");
+        let file = dir.join("krepo.db");
+        std::fs::write(&file, b"db").unwrap();
+        let (inspect, calls) = scripted_inspector(vec![
+            ScriptedInspect::Denied,
+            ScriptedInspect::Denied,
+            ScriptedInspect::Denied,
+            ScriptedInspect::Delegate, // must never be reached
+        ]);
+        let err = reject_link_with(&file, inspect).unwrap_err();
+        assert!(
+            err.starts_with("cannot inspect knowledge store path"),
+            "unexpected: {err}"
+        );
+        assert!(
+            err.contains("scripted permission denied"),
+            "unexpected: {err}"
+        );
+        assert_eq!(calls.get(), INSPECT_ATTEMPTS, "budget must be exact");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn reject_link_transient_denied_then_link_still_rejected() {
+        let dir = tmpdir("m8-retry-link");
+        let target = tmpdir("m8-retry-link-target").join("evil.db");
+        std::fs::write(&target, b"SENTINEL").unwrap();
+        let link = dir.join("krepo.db");
+        match plant_link(&link, &target) {
+            Some(mech) => eprintln!("hostile link planted via {mech}"),
+            None => {
+                eprintln!("NOT TESTED: cannot plant links in this environment");
+                return;
+            }
+        }
+        let (inspect, calls) =
+            scripted_inspector(vec![ScriptedInspect::Denied, ScriptedInspect::Delegate]);
+        let err = reject_link_with(&link, inspect).unwrap_err();
+        assert!(
+            err.starts_with("knowledge store path escapes via link"),
+            "unexpected: {err}"
+        );
+        assert_eq!(calls.get(), 2);
+        assert_eq!(std::fs::read(&target).unwrap(), b"SENTINEL");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn reject_link_permission_denied_not_retried_off_windows() {
+        let dir = tmpdir("m8-retry-unix");
+        let file = dir.join("krepo.db");
+        std::fs::write(&file, b"db").unwrap();
+        let (inspect, calls) =
+            scripted_inspector(vec![ScriptedInspect::Denied, ScriptedInspect::Delegate]);
+        let err = reject_link_with(&file, inspect).unwrap_err();
+        assert!(
+            err.starts_with("cannot inspect knowledge store path"),
+            "unexpected: {err}"
+        );
+        assert_eq!(calls.get(), 1, "unix behavior must stay single-inspection");
+    }
+
     use crate::knowledge::{
         validate_create_json, validate_update_json, NewRecord, SupersededRef, UpdateRecord,
     };
@@ -5714,6 +5974,88 @@ mod tests {
         );
         // The concurrent commit itself is intact afterwards.
         assert_eq!(show_record(&conn, "d1", None).unwrap().revision, 2);
+        conn.close().unwrap();
+    }
+
+    #[test]
+    fn knowledge_show_snapshot_reads_record_and_generation_together() {
+        use std::sync::{Arc, Barrier};
+        let (home, repo) = setup("show-snapshot");
+        let mut conn = open_rw(&home, &repo);
+        create_record(&mut conn, &new_record("d1", "snap show")).unwrap();
+        conn.close().unwrap();
+
+        // Why the helper exists: two separate implicit reads can straddle a
+        // commit, pairing revision 1 with generation 2.
+        let conn = open_knowledge_at(&home, &repo, false).unwrap();
+        let record = show_record(&conn, "d1", None).unwrap();
+        let mut writer_conn = open_knowledge_at(&home, &repo, true).unwrap();
+        update_record(
+            &mut writer_conn,
+            "d1",
+            1,
+            &update_to("writer one", "active"),
+        )
+        .unwrap();
+        let generation = read_generation(&conn).unwrap();
+        assert_eq!(
+            (record.revision, generation),
+            (1, 2),
+            "separate reads can describe different commits"
+        );
+
+        // The helper: a writer commits exactly between the record read and the
+        // generation read; both still come from the pre-commit snapshot.
+        // Barriers order the threads deterministically, no sleeps.
+        let barrier = Arc::new(Barrier::new(2));
+        let mut writer_conn = open_knowledge_at(&home, &repo, true).unwrap();
+        let parked = barrier.clone();
+        let released = barrier.clone();
+        let writer = std::thread::spawn(move || {
+            parked.wait();
+            update_record(
+                &mut writer_conn,
+                "d1",
+                2,
+                &update_to("writer two", "active"),
+            )
+            .unwrap();
+            writer_conn.close().unwrap();
+            released.wait();
+        });
+        let (snapshot_record, snapshot_generation) = show_snapshot_with_probe(
+            &conn,
+            "d1",
+            None,
+            Some(&|| {
+                barrier.wait();
+                barrier.wait();
+            }),
+        )
+        .unwrap();
+        writer.join().unwrap();
+
+        assert_eq!(snapshot_record.revision, 2);
+        assert_eq!(
+            snapshot_generation, 2,
+            "record and envelope must describe one snapshot"
+        );
+        // The concurrent commit landed intact after the read transaction.
+        assert_eq!(show_record(&conn, "d1", None).unwrap().revision, 3);
+        assert_eq!(read_generation(&conn).unwrap(), 3);
+
+        // Historical selection still works, and quiescent reads change nothing.
+        let version: u32 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        let (old, generation) = show_snapshot(&conn, "d1", Some(1)).unwrap();
+        assert_eq!((old.revision, generation), (1, 3));
+        let after_version: u32 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(after_version, version);
+        assert_eq!(read_generation(&conn).unwrap(), 3);
+
         conn.close().unwrap();
     }
 

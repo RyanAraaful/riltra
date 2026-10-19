@@ -1,0 +1,4 @@
+# CP7-A evidence is archived byte-for-byte: disable end-of-line conversion so the
+# committed blobs match the working files (and their frozen SHA-256 hashes) on
+# every platform, including Windows CRLF captures.
+* -text

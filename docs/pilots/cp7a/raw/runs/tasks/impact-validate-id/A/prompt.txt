@@ -1,0 +1,3 @@
+For `validate_id` at `crates/cli/src/knowledge.rs:89:1` in `riltra`, what is the impact verdict, does it prove execution, and what is the verification status?
+
+Access: use only the shell tool, running the read-only wrapper E:\dev\Riltra\.cp7a\bin\riltra-ro.cmd. Run that wrapper with --help once if you need CLI syntax. Do not use read or any other tool. Answer the question with the requested values and the evidence you observed.

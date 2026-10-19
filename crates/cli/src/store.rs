@@ -86,6 +86,69 @@ pub fn is_readable_db(path: &Path) -> bool {
     .is_ok()
 }
 
+/// Classification of a code-index open through the MCP read path.
+#[derive(Debug)]
+pub enum IndexRead {
+    /// No database file exists (per-tool `no-index` behavior; no creation).
+    Missing,
+    /// Existing database at the current schema, open read-only.
+    Ready(Connection),
+    /// Existing database older than `SCHEMA_VERSION` (must not migrate here).
+    Outdated(u32),
+    /// Existing database newer than `SCHEMA_VERSION` (refused, never guessed).
+    Ahead(u32),
+    /// Corrupt, unreadable, or unsafe (symlink/non-file) database path.
+    Error(String),
+}
+
+/// Open an existing code-index database read-only for the MCP tools. Never
+/// creates, never migrates: a missing file is `Missing`, and `user_version`
+/// is validated on the same connection the caller reads through, so a
+/// version check cannot race a check-then-open gap into a writable reopen.
+/// `immutable=1` is deliberately not used: live databases may change.
+/// `SQLITE_OPEN_NOFOLLOW` is deliberately not used either: SQLite rejects any
+/// path whose resolved chain contains a symlinked component (macOS `/var` is
+/// a symlink), so it would fail every macOS read; the `symlink_metadata`
+/// gate above is the fail-closed control for the database path itself.
+pub fn open_read(path: &Path) -> IndexRead {
+    match std::fs::symlink_metadata(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return IndexRead::Missing,
+        Err(e) => return IndexRead::Error(format!("cannot stat database: {e}")),
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return IndexRead::Error(format!("database path is a symlink: {}", path.display()))
+        }
+        Ok(meta) if !meta.is_file() => {
+            return IndexRead::Error(format!(
+                "database path is not a regular file: {}",
+                path.display()
+            ))
+        }
+        Ok(_) => {}
+    }
+    let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY;
+    let conn = match Connection::open_with_flags(path, flags) {
+        Ok(conn) => conn,
+        Err(e) => return IndexRead::Error(format!("cannot open database read-only: {e}")),
+    };
+    // Bounded wait while a concurrent rebuild's promotion finishes.
+    let _ = conn.execute_batch("PRAGMA busy_timeout = 3000;");
+    // Read probe: rejects garbage files here, not at first query.
+    if let Err(e) = conn.query_row("SELECT count(*) FROM sqlite_master", [], |row| {
+        row.get::<_, i64>(0)
+    }) {
+        return IndexRead::Error(format!("not a readable database: {e}"));
+    }
+    let version: u32 = match conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)) {
+        Ok(v) => v.max(0) as u32,
+        Err(e) => return IndexRead::Error(format!("cannot read schema version: {e}")),
+    };
+    match version {
+        v if v == SCHEMA_VERSION => IndexRead::Ready(conn),
+        v if v < SCHEMA_VERSION => IndexRead::Outdated(v),
+        v => IndexRead::Ahead(v),
+    }
+}
+
 #[cfg(test)]
 pub fn open_memory() -> Result<Connection, String> {
     open_inner(None)
@@ -2002,8 +2065,8 @@ mod tests {
         files_of, finish_snapshot, fts_available, grammar_versions, insert_call, insert_file,
         insert_import, insert_semantic_facts, insert_semantic_import, insert_snapshot,
         insert_symbol, is_readable_db, latest_snapshot, live_base, meta_get, meta_set, migrate,
-        open_live, open_memory, promote_staging, search_symbols, semantic_facts_for,
-        semantic_generation, semantic_imports_for, staging_path, FileRow, SemanticFact,
+        open_live, open_memory, open_read, promote_staging, search_symbols, semantic_facts_for,
+        semantic_generation, semantic_imports_for, staging_path, FileRow, IndexRead, SemanticFact,
         SemanticImport, Snapshot, SymbolRow, SCHEMA_VERSION,
     };
     use crate::testutil::tmpdir;
@@ -3254,5 +3317,81 @@ mod tests {
         assert_eq!(db.file_name().unwrap().to_str().unwrap(), "myrepo.db");
         assert!(staging.to_string_lossy().ends_with("myrepo.db.staging"));
         assert_eq!(db.parent().unwrap(), staging.parent().unwrap());
+    }
+
+    #[test]
+    fn read_open_classifies_missing_and_v4_and_never_creates() {
+        let dir = tmpdir("store-read-open");
+        let path = dir.join("x.db");
+        assert!(
+            matches!(open_read(&path), IndexRead::Missing),
+            "missing database must classify as Missing"
+        );
+        assert!(!path.exists(), "open_read must never create the database");
+        {
+            let conn = open_live(&path).unwrap();
+            insert_snapshot(&conn, &sample_snapshot()).unwrap();
+        }
+        match open_read(&path) {
+            IndexRead::Ready(conn) => {
+                assert_eq!(
+                    latest_snapshot(&conn).unwrap().unwrap().nonce,
+                    "test-nonce-1"
+                );
+            }
+            other => panic!("expected Ready, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_open_refuses_old_and_new_versions_without_migrating() {
+        let dir = tmpdir("store-read-open-ver");
+        for version in [1u32, 2, 3, 99] {
+            let path = dir.join(format!("v{version}.db"));
+            {
+                let conn = open_live(&path).unwrap();
+                insert_snapshot(&conn, &sample_snapshot()).unwrap();
+                conn.execute(&format!("PRAGMA user_version = {version}"), [])
+                    .unwrap();
+            }
+            match (version, open_read(&path)) {
+                (v, IndexRead::Outdated(got)) if v < SCHEMA_VERSION => assert_eq!(got, v),
+                (v, IndexRead::Ahead(got)) if v > SCHEMA_VERSION => assert_eq!(got, v),
+                (v, other) => panic!("v{v}: unexpected {other:?}"),
+            }
+            // The refusal changed nothing: version marker and row survive.
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            let got: u32 = conn
+                .query_row("PRAGMA user_version", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(got, version);
+            assert_eq!(
+                latest_snapshot(&conn).unwrap().unwrap().nonce,
+                "test-nonce-1"
+            );
+        }
+    }
+
+    #[test]
+    fn read_open_refuses_garbage_and_non_regular_paths() {
+        let dir = tmpdir("store-read-open-bad");
+        let path = dir.join("garbage.db");
+        std::fs::write(&path, b"not a database at all").unwrap();
+        match open_read(&path) {
+            IndexRead::Error(message) => {
+                assert!(message.contains("not a readable database"), "{message}")
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), b"not a database at all");
+        let as_dir = dir.join("dir.db");
+        std::fs::create_dir(&as_dir).unwrap();
+        match open_read(&as_dir) {
+            IndexRead::Error(message) => {
+                assert!(message.contains("not a regular file"), "{message}")
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+        assert!(as_dir.is_dir(), "fail-closed must not replace the path");
     }
 }

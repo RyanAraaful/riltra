@@ -11,6 +11,7 @@ use std::path::Path;
 use crate::git::GitInfo;
 use crate::ignore::IgnoreInfo;
 use crate::json::escape;
+use crate::{git, paths, registry};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Check {
@@ -87,6 +88,58 @@ pub fn run_checks(
             },
         ),
     ]
+}
+
+/// Environment-level doctor checks (CLI `riltra doctor` without `--repo`).
+pub fn environment_checks() -> Vec<Check> {
+    let reg_ok = registry::load(&paths::registry_path()).is_ok();
+    let git_ok = git::git_available();
+    vec![
+        Check {
+            name: "registry-readable".to_string(),
+            pass: reg_ok,
+            detail: if reg_ok {
+                "registry file loads".to_string()
+            } else {
+                "registry file unreadable".to_string()
+            },
+        },
+        Check {
+            name: "git-available".to_string(),
+            pass: git_ok,
+            detail: if git_ok {
+                "git executable found".to_string()
+            } else {
+                "git executable not found".to_string()
+            },
+        },
+    ]
+}
+
+/// The environment doctor document and its overall pass, byte-identical to
+/// the CLI's inline assembly for `riltra doctor` without `--repo`.
+pub fn environment_doctor() -> (String, bool) {
+    let checks = environment_checks();
+    let pass = checks.iter().all(|c| c.pass);
+    let inner: Vec<String> = checks
+        .iter()
+        .map(|c| {
+            format!(
+                "{{\"name\":\"{}\",\"pass\":{},\"detail\":\"{}\"}}",
+                escape(&c.name),
+                c.pass,
+                escape(&c.detail)
+            )
+        })
+        .collect();
+    (
+        format!(
+            "{{\"scope\":\"environment\",\"pass\":{},\"checks\":[{}]}}",
+            pass,
+            inner.join(",")
+        ),
+        pass,
+    )
 }
 
 pub fn doctor_json(name: &str, root: &str, checks: &[Check]) -> String {

@@ -1,0 +1,1332 @@
+// SPDX-License-Identifier: Apache-2.0
+//! M8 CP1/CP3/CP4/CP5/CP6: MCP stdio server. CP1 serves initialize; CP3
+//! registers the first read-only tools; CP4 adds the graph tools (callers,
+//! callees, trace, impact); CP5 adds the knowledge tools (search, show,
+//! related); CP6 adds the composed `riltra_health` tool — eleven tools total
+//! (design gate §3) through the rmcp tool macros. Tool calls
+//! reuse the CLI's response formatters byte-for-byte, and the index read path
+//! (`store::open_read`) and the knowledge read path
+//! (`knowledge_store::open_knowledge(…, false)`) never create, migrate, or
+//! replace a database. stdout stays protocol-only; blocking work runs on the
+//! tokio blocking pool.
+
+use std::path::{Path, PathBuf};
+
+use rmcp::handler::server::wrapper::Parameters;
+use rmcp::model::{CallToolResult, Implementation, ServerCapabilities, ServerConfig};
+use rmcp::schemars::JsonSchema;
+use rmcp::{serve_server, tool, tool_handler, tool_router, ServerHandler};
+use serde::Deserialize;
+
+use crate::knowledge_store_absent;
+use crate::{
+    doctor, git, ignore, index, knowledge, knowledge_store, paths, registry, response, store,
+};
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(crate = "rmcp::schemars")]
+struct RepoStatusInput {
+    /// Registered repository name.
+    repo: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(crate = "rmcp::schemars")]
+struct CodeSearchInput {
+    /// Registered repository name.
+    repo: String,
+    /// Symbol text to search for (the CLI's `search <repo> <symbol>` argument).
+    query: String,
+    /// Maximum hits to return (CLI default 50, maximum 1000).
+    limit: Option<usize>,
+    /// Hits to skip before returning results (default 0).
+    offset: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(crate = "rmcp::schemars")]
+struct EdgeInput {
+    /// Registered repository name.
+    repo: String,
+    /// Repository-relative path of the anchor position.
+    path: String,
+    /// 1-based line of the anchor position.
+    line: u32,
+    /// 1-based column of the anchor position.
+    col: u32,
+    /// Optional exact SCIP symbol identity to check against the position.
+    symbol: Option<String>,
+    /// Maximum edges to return (CLI default 50, maximum 1000).
+    limit: Option<usize>,
+    /// Edges to skip before returning results (default 0).
+    offset: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(crate = "rmcp::schemars")]
+struct TraceInput {
+    /// Registered repository name.
+    repo: String,
+    /// Repository-relative path of the anchor position.
+    path: String,
+    /// 1-based line of the anchor position.
+    line: u32,
+    /// 1-based column of the anchor position.
+    col: u32,
+    /// Optional exact SCIP symbol identity to check against the position.
+    symbol: Option<String>,
+    /// Optional destination anchor `PATH:LINE:COL` (CLI `--to` grammar).
+    to: Option<String>,
+    /// Maximum traversal depth (CLI default 3, 1-6).
+    depth: Option<usize>,
+    /// Maximum paths to return (CLI default 50, maximum 1000).
+    limit: Option<usize>,
+    /// Paths to skip before returning results (default 0).
+    offset: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(crate = "rmcp::schemars")]
+struct ImpactInput {
+    /// Registered repository name.
+    repo: String,
+    /// Repository-relative path of the anchor position.
+    path: String,
+    /// 1-based line of the anchor position.
+    line: u32,
+    /// 1-based column of the anchor position.
+    col: u32,
+    /// Optional exact SCIP symbol identity to check against the position.
+    symbol: Option<String>,
+    /// Maximum traversal depth (CLI default 3, 1-6). Impact takes no
+    /// destination, and unknown parameters are rejected.
+    depth: Option<usize>,
+    /// Maximum paths to return (CLI default 50, maximum 1000).
+    limit: Option<usize>,
+    /// Paths to skip before returning results (default 0).
+    offset: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(crate = "rmcp::schemars")]
+struct KnowledgeSearchInput {
+    /// Registered repository name.
+    repo: String,
+    /// Literal text searched in titles and bodies (CLI
+    /// `knowledge search --query`).
+    query: String,
+    /// Optional record kind filter (CLI `--kind`).
+    kind: Option<String>,
+    /// Include archived records (CLI `--include-archived`; default false).
+    include_archived: Option<bool>,
+    /// Include superseded records (CLI `--include-superseded`; default false).
+    include_superseded: Option<bool>,
+    /// Include retracted records (CLI `--include-retracted`; default false).
+    include_retracted: Option<bool>,
+    /// Maximum hits to return (CLI default 50, maximum 1000).
+    limit: Option<usize>,
+    /// Hits to skip before returning results (default 0).
+    offset: Option<usize>,
+    /// Expected store generation; a stale value conflicts instead of serving
+    /// a shifted page.
+    generation: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(crate = "rmcp::schemars")]
+struct KnowledgeShowInput {
+    /// Registered repository name.
+    repo: String,
+    /// Record id to read.
+    id: String,
+    /// Exact revision to read (CLI `--revision`; default is the current head).
+    revision: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(crate = "rmcp::schemars")]
+struct KnowledgeRelatedInput {
+    /// Registered repository name.
+    repo: String,
+    /// Record id whose relations are read.
+    id: String,
+    /// Exact revision whose bindings are read (default is the current head).
+    revision: Option<u64>,
+    /// `outbound` (authored links, the default) or `inbound` (links pointing
+    /// at the record).
+    direction: Option<String>,
+    /// Include retracted relations (CLI `--include-retracted`; default false).
+    include_retracted: Option<bool>,
+    /// Maximum relations to return (CLI default 50, maximum 1000).
+    limit: Option<usize>,
+    /// Relations to skip before returning results (default 0).
+    offset: Option<usize>,
+    /// Expected store generation; a stale value conflicts instead of serving
+    /// a shifted page.
+    generation: Option<u64>,
+}
+
+/// Health takes no arguments; any custom field is a schema-level refusal.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(crate = "rmcp::schemars")]
+struct HealthInput {}
+
+struct RiltraMcp;
+
+#[tool_router]
+impl RiltraMcp {
+    #[tool(
+        name = "riltra_repo_list",
+        description = "List registered repositories (same document as CLI `repo list`).",
+        annotations(
+            title = "List registered repositories",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn riltra_repo_list(&self) -> CallToolResult {
+        blocking(|| match registry::load(&paths::registry_path()) {
+            Ok(reg) => doc(&registry::list_json(&reg)),
+            Err(e) => tool_error("store_error", &e),
+        })
+        .await
+    }
+
+    #[tool(
+        name = "riltra_repo_status",
+        description = "Repository status (same document as CLI `repo status`) plus a read-only `index_status` member (same document as CLI `index status`).",
+        annotations(
+            title = "Repository status",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn riltra_repo_status(
+        &self,
+        Parameters(input): Parameters<RepoStatusInput>,
+    ) -> CallToolResult {
+        blocking(move || repo_status_doc(&input)).await
+    }
+
+    #[tool(
+        name = "riltra_code_search",
+        description = "Search indexed symbols by name (same document as CLI `search`). A missing index reports `no-index` without creating storage.",
+        annotations(
+            title = "Search indexed symbols",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn riltra_code_search(
+        &self,
+        Parameters(input): Parameters<CodeSearchInput>,
+    ) -> CallToolResult {
+        blocking(move || code_search_doc(&input)).await
+    }
+
+    #[tool(
+        name = "riltra_code_callers",
+        description = "Call sites that reference the anchor symbol (same document as CLI `callers`); heuristic edges stay `POTENTIAL_CALL`, never promoted to `CALLS`.",
+        annotations(
+            title = "Find callers",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn riltra_code_callers(
+        &self,
+        Parameters(input): Parameters<EdgeInput>,
+    ) -> CallToolResult {
+        blocking(move || edge_doc(&input, GraphMode::Callers)).await
+    }
+
+    #[tool(
+        name = "riltra_code_callees",
+        description = "Symbols the anchor definition calls (same document as CLI `callees`).",
+        annotations(
+            title = "Find callees",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn riltra_code_callees(
+        &self,
+        Parameters(input): Parameters<EdgeInput>,
+    ) -> CallToolResult {
+        blocking(move || edge_doc(&input, GraphMode::Callees)).await
+    }
+
+    #[tool(
+        name = "riltra_code_trace",
+        description = "Transitive call paths from the anchor, optionally to a destination (same document as CLI `trace`); paths are plausible traversal, not execution.",
+        annotations(
+            title = "Trace call paths",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn riltra_code_trace(&self, Parameters(input): Parameters<TraceInput>) -> CallToolResult {
+        blocking(move || trace_doc(&input)).await
+    }
+
+    #[tool(
+        name = "riltra_code_impact",
+        description = "Reverse transitive callers of the anchor with a coverage verdict (same document as CLI `impact`); impact is plausible, not execution.",
+        annotations(
+            title = "Estimate impact",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn riltra_code_impact(
+        &self,
+        Parameters(input): Parameters<ImpactInput>,
+    ) -> CallToolResult {
+        blocking(move || impact_doc(&input)).await
+    }
+
+    #[tool(
+        name = "riltra_knowledge_search",
+        description = "Search knowledge records by literal text (same document as CLI `knowledge search`). A missing store answers with an empty result and creates nothing.",
+        annotations(
+            title = "Search knowledge records",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn riltra_knowledge_search(
+        &self,
+        Parameters(input): Parameters<KnowledgeSearchInput>,
+    ) -> CallToolResult {
+        blocking(move || knowledge_search_doc(&input)).await
+    }
+
+    #[tool(
+        name = "riltra_knowledge_show",
+        description = "Read one knowledge revision with its evidence freshness (same document as CLI `knowledge show`). Confirmation is reported as stored provenance, never as promotion.",
+        annotations(
+            title = "Read a knowledge revision",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn riltra_knowledge_show(
+        &self,
+        Parameters(input): Parameters<KnowledgeShowInput>,
+    ) -> CallToolResult {
+        blocking(move || knowledge_show_doc(&input)).await
+    }
+
+    #[tool(
+        name = "riltra_knowledge_related",
+        description = "One-hop knowledge relations in either direction (same document as CLI `knowledge related`); retracted relations are hidden unless requested.",
+        annotations(
+            title = "Read knowledge relations",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn riltra_knowledge_related(
+        &self,
+        Parameters(input): Parameters<KnowledgeRelatedInput>,
+    ) -> CallToolResult {
+        blocking(move || knowledge_related_doc(&input)).await
+    }
+
+    #[tool(
+        name = "riltra_health",
+        description = "Environment health: bootstrap status, environment doctor, versions, capabilities, limits, and the registered repository count. Read-only; creates and opens no storage.",
+        annotations(
+            title = "Health",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn riltra_health(&self, Parameters(_): Parameters<HealthInput>) -> CallToolResult {
+        blocking(health_doc).await
+    }
+}
+
+#[tool_handler]
+impl ServerHandler for RiltraMcp {
+    fn get_info(&self) -> ServerConfig {
+        // Override the SDK default (`Implementation::from_build_env` reads
+        // rmcp's own crate name) with this binary's identity.
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(Implementation::new(crate::NAME, env!("CARGO_PKG_VERSION")))
+    }
+}
+
+/// Run synchronous domain work on the blocking pool; a panicked task is a
+/// classified `store_error`, never a dropped connection.
+async fn blocking(f: impl FnOnce() -> CallToolResult + Send + 'static) -> CallToolResult {
+    match tokio::task::spawn_blocking(f).await {
+        Ok(result) => result,
+        Err(e) => tool_error("store_error", &format!("internal task failure: {e}")),
+    }
+}
+
+/// A success result: the shared formatter's bytes, parsed back to JSON.
+fn doc(json_text: &str) -> CallToolResult {
+    match serde_json::from_str(json_text) {
+        Ok(value) => CallToolResult::structured(value),
+        Err(e) => tool_error(
+            "store_error",
+            &format!("internal response assembly error: {e}"),
+        ),
+    }
+}
+
+/// A classified refusal: `{"kind": ..., "message": ...}` with CLI message text.
+fn tool_error(kind: &str, message: &str) -> CallToolResult {
+    CallToolResult::structured_error(serde_json::json!({"kind": kind, "message": message}))
+}
+
+fn repo_status_doc(input: &RepoStatusInput) -> CallToolResult {
+    let home = paths::config_dir();
+    let reg = match registry::load(&paths::registry_path()) {
+        Ok(reg) => reg,
+        Err(e) => return tool_error("store_error", &e),
+    };
+    let entry = match registry::find(&reg, &input.repo) {
+        Some(entry) => entry,
+        None => {
+            return tool_error(
+                "not_registered",
+                &format!("unknown repository: '{}'", input.repo),
+            )
+        }
+    };
+    let recorded = entry.root.clone();
+    let canon = match paths::canonical_root(Path::new(&recorded)) {
+        Ok(canon) => canon,
+        Err(_) => {
+            return tool_error(
+                "not_registered",
+                &format!("registered root is missing: '{recorded}'"),
+            )
+        }
+    };
+    let root = canon.to_string_lossy().to_string();
+    // The record must still resolve to itself: a moved root or a
+    // symlink/junction retarget is rejected instead of fingerprinted.
+    if root != recorded {
+        return tool_error(
+            "not_registered",
+            &format!("registered root moved or retargeted (record '{recorded}')"),
+        );
+    }
+    let info = git::fingerprint(&canon);
+    let (_, ignore) = ignore::load_rules(&canon);
+    let index_status = match index_status_doc(&home, &input.repo, &recorded) {
+        Ok(text) => text,
+        Err((kind, message)) => return tool_error(kind, &message),
+    };
+    let mut value: serde_json::Value = match serde_json::from_str(&response::repo_status_json(
+        &input.repo,
+        &root,
+        &info,
+        &ignore,
+    )) {
+        Ok(value) => value,
+        Err(e) => {
+            return tool_error(
+                "store_error",
+                &format!("internal response assembly error: {e}"),
+            )
+        }
+    };
+    match serde_json::from_str(&index_status) {
+        Ok(index_value) => value["index_status"] = index_value,
+        Err(e) => {
+            return tool_error(
+                "store_error",
+                &format!("internal response assembly error: {e}"),
+            )
+        }
+    }
+    CallToolResult::structured(value)
+}
+
+/// One migration pointer for outdated schemas: actionable CLI instruction,
+/// identical for both index-reading tools.
+fn outdated_message(repo: &str, version: u32) -> String {
+    format!(
+        "index schema v{version} is outdated; run `riltra index status --repo {repo}` with the CLI to migrate, then retry"
+    )
+}
+
+/// `index status` through the read-only path; `Err` carries the classified
+/// refusal so every index-reading tool reports the same guard.
+fn index_status_doc(
+    home: &Path,
+    repo: &str,
+    recorded: &str,
+) -> Result<String, (&'static str, String)> {
+    match store::open_read(&store::db_path(home, repo)) {
+        store::IndexRead::Missing => Ok(response::index_status_json(
+            repo,
+            recorded,
+            &index::Freshness {
+                status: "unknown".to_string(),
+                reasons: vec!["no-index".to_string()],
+                snapshot: None,
+            },
+            false,
+        )),
+        store::IndexRead::Outdated(version) => {
+            Err(("schema_outdated", outdated_message(repo, version)))
+        }
+        store::IndexRead::Ahead(version) => Err((
+            "schema_ahead",
+            format!(
+                "database schema v{version} is newer than supported v{}",
+                store::SCHEMA_VERSION
+            ),
+        )),
+        store::IndexRead::Error(message) => Err(("store_error", message)),
+        store::IndexRead::Ready(mut conn) => {
+            // The FTS flag reflects build capability, not revision content.
+            let fts = store::fts_available(&conn);
+            let tx = match conn.transaction() {
+                Ok(tx) => tx,
+                Err(e) => return Err(("store_error", e.to_string())),
+            };
+            let freshness = index::evaluate_tx(&tx, Path::new(recorded));
+            let _ = tx.commit();
+            Ok(response::index_status_json(repo, recorded, &freshness, fts))
+        }
+    }
+}
+
+fn code_search_doc(input: &CodeSearchInput) -> CallToolResult {
+    let limit = input.limit.unwrap_or(index::DEFAULT_SEARCH_LIMIT);
+    let offset = input.offset.unwrap_or(0);
+    if limit > index::MAX_SEARCH_LIMIT {
+        return tool_error(
+            "invalid_input",
+            &format!("--limit exceeds maximum {}", index::MAX_SEARCH_LIMIT),
+        );
+    }
+    let home = paths::config_dir();
+    let reg = match registry::load(&paths::registry_path()) {
+        Ok(reg) => reg,
+        Err(e) => return tool_error("store_error", &e),
+    };
+    let entry = match registry::find(&reg, &input.repo) {
+        Some(entry) => entry,
+        None => {
+            return tool_error(
+                "not_registered",
+                &format!("unknown repository: '{}'", input.repo),
+            )
+        }
+    };
+    let recorded = entry.root.clone();
+    match store::open_read(&store::db_path(&home, &input.repo)) {
+        store::IndexRead::Missing => search_doc(
+            &input.repo,
+            &recorded,
+            None,
+            "unknown",
+            &["no-index".to_string()],
+            input,
+            limit,
+            offset,
+            0,
+            &[],
+        ),
+        store::IndexRead::Outdated(version) => {
+            tool_error("schema_outdated", &outdated_message(&input.repo, version))
+        }
+        store::IndexRead::Ahead(version) => tool_error(
+            "schema_ahead",
+            &format!(
+                "database schema v{version} is newer than supported v{}",
+                store::SCHEMA_VERSION
+            ),
+        ),
+        store::IndexRead::Error(message) => tool_error("store_error", &message),
+        store::IndexRead::Ready(mut conn) => {
+            // One read transaction across snapshot read, verdict, and fact
+            // rows: the response can never mix two revisions.
+            let tx = match conn.transaction() {
+                Ok(tx) => tx,
+                Err(e) => return tool_error("store_error", &e.to_string()),
+            };
+            let snapshot = match store::latest_snapshot(&tx) {
+                Ok(Some(snapshot)) => snapshot,
+                _ => {
+                    return tool_error(
+                        "store_error",
+                        "index database unreadable; rebuild with `index`",
+                    )
+                }
+            };
+            let canon_root = match Path::new(&recorded).canonicalize() {
+                Ok(canon) => canon,
+                Err(_) => {
+                    let _ = tx.commit();
+                    return search_doc(
+                        &input.repo,
+                        &recorded,
+                        Some(&snapshot),
+                        "unknown",
+                        &["root-unreadable".to_string()],
+                        input,
+                        limit,
+                        offset,
+                        0,
+                        &[],
+                    );
+                }
+            };
+            let (status, reasons) =
+                index::evaluate_snapshot(&tx, &input.repo, &canon_root, &snapshot);
+            let (total, hits) =
+                match store::search_symbols(&tx, snapshot.id, &input.query, limit, offset) {
+                    Ok(found) => found,
+                    Err(e) => return tool_error("store_error", &e),
+                };
+            let _ = tx.commit();
+            search_doc(
+                &input.repo,
+                &snapshot.root,
+                Some(&snapshot),
+                &status,
+                &reasons,
+                input,
+                limit,
+                offset,
+                total,
+                &hits,
+            )
+        }
+    }
+}
+
+/// One search document through the shared CP2 formatter.
+#[allow(clippy::too_many_arguments)]
+fn search_doc(
+    repo: &str,
+    root: &str,
+    snapshot: Option<&store::Snapshot>,
+    freshness: &str,
+    reasons: &[String],
+    input: &CodeSearchInput,
+    limit: usize,
+    offset: usize,
+    total: usize,
+    hits: &[store::Hit],
+) -> CallToolResult {
+    doc(&response::search_response_json(&response::SearchResponse {
+        repo,
+        root,
+        snapshot,
+        freshness,
+        reasons,
+        symbol: &input.query,
+        limit,
+        offset,
+        total,
+        hits,
+    }))
+}
+
+// --- CP4: graph tools --------------------------------------------------------
+
+/// CLI-parity anchor check (`cmd_edge`/`cmd_graph` exit-2 texts).
+fn graph_anchor(line: u32, col: u32) -> Result<(), CallToolResult> {
+    if line == 0 {
+        return Err(tool_error(
+            "invalid_input",
+            &format!("invalid --line value: '{line}'"),
+        ));
+    }
+    if col == 0 {
+        return Err(tool_error(
+            "invalid_input",
+            &format!("invalid --col value: '{col}'"),
+        ));
+    }
+    Ok(())
+}
+
+/// CLI-parity page-range check (`--limit` default 50/max 1000, `--offset`).
+fn graph_page(
+    limit: Option<usize>,
+    offset: Option<usize>,
+) -> Result<(usize, usize), CallToolResult> {
+    let limit = limit.unwrap_or(index::DEFAULT_SEARCH_LIMIT);
+    if !(1..=index::MAX_SEARCH_LIMIT).contains(&limit) {
+        return Err(tool_error(
+            "invalid_input",
+            &format!("--limit must be between 1 and {}", index::MAX_SEARCH_LIMIT),
+        ));
+    }
+    let offset = offset.unwrap_or(0);
+    if offset > i64::MAX as usize - index::MAX_SEARCH_LIMIT {
+        return Err(tool_error(
+            "invalid_input",
+            "--offset exceeds supported range",
+        ));
+    }
+    Ok((limit, offset))
+}
+
+/// CLI-parity depth check (`--depth` default 3, 1-6).
+fn graph_depth(depth: Option<usize>) -> Result<usize, CallToolResult> {
+    let depth = depth.unwrap_or(3);
+    if !(1..=crate::edges::TRACE_MAX_DEPTH).contains(&depth) {
+        return Err(tool_error(
+            "invalid_input",
+            &format!(
+                "--depth must be between 1 and {}",
+                crate::edges::TRACE_MAX_DEPTH
+            ),
+        ));
+    }
+    Ok(depth)
+}
+
+/// Same parse as the CLI's `trace_position`: a positive 1-based number or the
+/// flag's refusal text.
+fn positional(value: &str, flag: &str) -> Result<u32, String> {
+    value
+        .parse::<u32>()
+        .ok()
+        .filter(|n| *n > 0)
+        .ok_or_else(|| format!("invalid {flag} value: '{value}'"))
+}
+
+fn bad_destination() -> CallToolResult {
+    tool_error("invalid_input", "--to must be PATH:LINE:COL")
+}
+
+/// The CLI `--to` grammar: `PATH:LINE:COL`, all positive 1-based numbers.
+fn parse_destination(to: &str) -> Result<(&str, u32, u32), CallToolResult> {
+    let (rest, col) = to.rsplit_once(':').ok_or_else(bad_destination)?;
+    let (path, line) = rest.rsplit_once(':').ok_or_else(bad_destination)?;
+    if path.is_empty() {
+        return Err(tool_error("invalid_input", "--to requires a path"));
+    }
+    let line = positional(line, "--to line").map_err(|e| tool_error("invalid_input", &e))?;
+    let col = positional(col, "--to col").map_err(|e| tool_error("invalid_input", &e))?;
+    Ok((path, line, col))
+}
+
+/// Missing index or snapshot: the CLI's no-snapshot text, classified
+/// `no_index` (the read path never creates or migrates storage).
+fn missing_index() -> CallToolResult {
+    tool_error("no_index", "no snapshot: index the repository first")
+}
+
+/// Registry + recorded-root resolution for the graph and knowledge tools: the
+/// same checks and messages as `repo_status` and the CLI's root resolution.
+fn repo_root(repo: &str) -> Result<(PathBuf, PathBuf), CallToolResult> {
+    let home = paths::config_dir();
+    let reg = match registry::load(&paths::registry_path()) {
+        Ok(reg) => reg,
+        Err(e) => return Err(tool_error("store_error", &e)),
+    };
+    let entry = match registry::find(&reg, repo) {
+        Some(entry) => entry,
+        None => {
+            return Err(tool_error(
+                "not_registered",
+                &format!("unknown repository: '{repo}'"),
+            ))
+        }
+    };
+    let recorded = entry.root.clone();
+    let canon = match paths::canonical_root(Path::new(&recorded)) {
+        Ok(canon) => canon,
+        Err(_) => {
+            return Err(tool_error(
+                "not_registered",
+                &format!("registered root is missing: '{recorded}'"),
+            ))
+        }
+    };
+    if canon.to_string_lossy() != recorded {
+        return Err(tool_error(
+            "not_registered",
+            &format!("registered root moved or retargeted (record '{recorded}')"),
+        ));
+    }
+    Ok((home, canon))
+}
+
+/// Classify a graph-query refusal by its CLI text (design gate §3): missing
+/// snapshot -> `no_index`; anchor/identity/path refusals -> `invalid_input`;
+/// everything else is `store_error` (fail-closed), message preserved.
+fn graph_query_error(message: String) -> CallToolResult {
+    let kind = if message.starts_with("no snapshot:") {
+        "no_index"
+    } else if message.starts_with("anchor")
+        || message.starts_with("occurrence has no symbol identity")
+        || message.starts_with("source has no identity")
+        || message.starts_with("no anchor here")
+        || message.contains("document path")
+        || message.starts_with("invalid edge query bounds")
+        || message.starts_with("invalid trace bounds")
+    {
+        "invalid_input"
+    } else {
+        "store_error"
+    };
+    tool_error(kind, &message)
+}
+
+/// Which graph document a call produces.
+#[derive(Clone, Copy)]
+enum GraphMode {
+    Callers,
+    Callees,
+    Trace,
+    Impact,
+}
+
+/// A validated request plus the paths the connection query needs; validation
+/// happens before the read-only open, exactly like the CLI validators.
+enum Prepared<'a> {
+    Edge(index::EdgeRequest<'a>, PathBuf, String),
+    Graph(index::TraceRequest<'a>, PathBuf, String, Option<String>),
+}
+
+#[allow(clippy::too_many_arguments)]
+fn graph_doc(
+    repo: &str,
+    path: &str,
+    line: u32,
+    col: u32,
+    symbol: Option<&str>,
+    to: Option<&str>,
+    depth: Option<usize>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+    mode: GraphMode,
+) -> CallToolResult {
+    if let Err(e) = graph_anchor(line, col) {
+        return e;
+    }
+    let is_graph = matches!(mode, GraphMode::Trace | GraphMode::Impact);
+    let depth = if is_graph {
+        match graph_depth(depth) {
+            Ok(d) => d,
+            Err(e) => return e,
+        }
+    } else {
+        3
+    };
+    let (limit, offset) = match graph_page(limit, offset) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let destination = match to.map(parse_destination).transpose() {
+        Ok(d) => d,
+        Err(e) => return e,
+    };
+    let (home, canon) = match repo_root(repo) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let prepared = match mode {
+        GraphMode::Callers | GraphMode::Callees => {
+            let request = index::EdgeRequest {
+                anchor: index::SpanQuery {
+                    rel: path,
+                    line1: line,
+                    col1: col,
+                    refs: false,
+                },
+                symbol,
+                direction: if matches!(mode, GraphMode::Callers) {
+                    index::EdgeDir::Callers
+                } else {
+                    index::EdgeDir::Callees
+                },
+                limit,
+                offset,
+            };
+            match index::validated_edge_anchor(&canon, &request) {
+                Ok((canon, validated)) => Prepared::Edge(request, canon, validated),
+                Err(e) => return tool_error("invalid_input", &e),
+            }
+        }
+        GraphMode::Trace | GraphMode::Impact => {
+            let request = index::TraceRequest {
+                source: index::SpanQuery {
+                    rel: path,
+                    line1: line,
+                    col1: col,
+                    refs: false,
+                },
+                symbol,
+                destination: destination.map(|(p, l, c)| index::SpanQuery {
+                    rel: p,
+                    line1: l,
+                    col1: c,
+                    refs: false,
+                }),
+                depth,
+                limit,
+                offset,
+            };
+            match index::validated_trace_anchor(&canon, &request) {
+                Ok((canon, rel, dest_path)) => Prepared::Graph(request, canon, rel, dest_path),
+                Err(e) => return tool_error("invalid_input", &e),
+            }
+        }
+    };
+    match store::open_read(&store::db_path(&home, repo)) {
+        store::IndexRead::Missing => missing_index(),
+        store::IndexRead::Outdated(version) => {
+            tool_error("schema_outdated", &outdated_message(repo, version))
+        }
+        store::IndexRead::Ahead(version) => tool_error(
+            "schema_ahead",
+            &format!(
+                "database schema v{version} is newer than supported v{}",
+                store::SCHEMA_VERSION
+            ),
+        ),
+        store::IndexRead::Error(message) => tool_error("store_error", &message),
+        store::IndexRead::Ready(mut conn) => match prepared {
+            Prepared::Edge(request, canon, validated) => {
+                match index::edge_query_conn(&mut conn, repo, &canon, &validated, &request, || {}) {
+                    Ok(out) => doc(&response::edge_query_json(&out)),
+                    Err(e) => graph_query_error(e),
+                }
+            }
+            Prepared::Graph(request, canon, rel, dest_path) => {
+                let started = std::time::Instant::now();
+                match index::graph_query_conn(
+                    &mut conn,
+                    repo,
+                    &canon,
+                    &rel,
+                    dest_path.as_deref(),
+                    &request,
+                    started,
+                    || {},
+                    matches!(mode, GraphMode::Impact),
+                ) {
+                    Ok(out) => doc(&response::trace_query_json(&out)),
+                    Err(e) => graph_query_error(e),
+                }
+            }
+        },
+    }
+}
+
+fn edge_doc(input: &EdgeInput, mode: GraphMode) -> CallToolResult {
+    graph_doc(
+        &input.repo,
+        &input.path,
+        input.line,
+        input.col,
+        input.symbol.as_deref(),
+        None,
+        None,
+        input.limit,
+        input.offset,
+        mode,
+    )
+}
+
+fn trace_doc(input: &TraceInput) -> CallToolResult {
+    graph_doc(
+        &input.repo,
+        &input.path,
+        input.line,
+        input.col,
+        input.symbol.as_deref(),
+        input.to.as_deref(),
+        input.depth,
+        input.limit,
+        input.offset,
+        GraphMode::Trace,
+    )
+}
+
+fn impact_doc(input: &ImpactInput) -> CallToolResult {
+    graph_doc(
+        &input.repo,
+        &input.path,
+        input.line,
+        input.col,
+        input.symbol.as_deref(),
+        None,
+        input.depth,
+        input.limit,
+        input.offset,
+        GraphMode::Impact,
+    )
+}
+
+// --- CP5: knowledge tools ----------------------------------------------------
+
+/// CLI-parity page-range check for the knowledge tools (`--limit` default 50,
+/// maximum 1000). The CLI has no extra exit-2 offset bound here, so the
+/// store's own range check stays the guard.
+fn knowledge_page(
+    limit: Option<usize>,
+    offset: Option<usize>,
+) -> Result<(usize, usize), CallToolResult> {
+    let limit = limit.unwrap_or(knowledge::SEARCH_LIMIT_DEFAULT);
+    if !(1..=knowledge::SEARCH_LIMIT_MAX).contains(&limit) {
+        return Err(tool_error(
+            "invalid_input",
+            &format!(
+                "--limit must be between 1 and {}",
+                knowledge::SEARCH_LIMIT_MAX
+            ),
+        ));
+    }
+    Ok((limit, offset.unwrap_or(0)))
+}
+
+/// Classify a knowledge-query refusal by its CLI text (design gate §3): a
+/// missing store is `store_missing`; the generation guard is `conflict`;
+/// record/kind/query refusals are `invalid_input`; everything else fails
+/// closed as `store_error`, message preserved.
+fn knowledge_query_error(message: String) -> CallToolResult {
+    let kind = if message.starts_with("no knowledge store") {
+        "store_missing"
+    } else if message.starts_with("knowledge generation conflict:") {
+        "conflict"
+    } else if message.starts_with("unknown record id:")
+        || message.starts_with("unknown record revision:")
+        || message.starts_with("record revision out of range:")
+        || message.starts_with("invalid ")
+        || message.starts_with("search query is ")
+        || message.starts_with("search limit")
+        || message.starts_with("related limit")
+    {
+        "invalid_input"
+    } else {
+        "store_error"
+    };
+    tool_error(kind, &message)
+}
+
+/// The CLI's `RepoEntry` for the knowledge store, built from the recorded
+/// root exactly like `main.rs::knowledge_repo`.
+fn knowledge_entry(repo: &str, root: &str) -> registry::RepoEntry {
+    registry::RepoEntry {
+        name: repo.to_string(),
+        root: root.to_string(),
+        added_unix: 0,
+    }
+}
+
+fn knowledge_search_doc(input: &KnowledgeSearchInput) -> CallToolResult {
+    // Validation order and texts mirror `main.rs::knowledge_search`.
+    if let Some(kind) = input.kind.as_deref() {
+        if let Err(e) = knowledge::validate_kind(kind) {
+            return tool_error("invalid_input", &e);
+        }
+    }
+    if input.query.len() > knowledge::MAX_QUERY_TEXT_BYTES {
+        return tool_error(
+            "invalid_input",
+            &format!(
+                "search query is {} bytes, at most {} allowed",
+                input.query.len(),
+                knowledge::MAX_QUERY_TEXT_BYTES
+            ),
+        );
+    }
+    let (limit, offset) = match knowledge_page(input.limit, input.offset) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let (home, canon) = match repo_root(&input.repo) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let root = canon.to_string_lossy().to_string();
+    let db = knowledge_store::knowledge_db_path(&home, &input.repo);
+    match knowledge_store_absent(&db) {
+        // Genuinely absent store: empty success, and no database is created.
+        // A nonzero generation expectation still conflicts against generation 0.
+        Ok(true) => {
+            if let Err(e) = knowledge_store::check_missing_store_generation(input.generation) {
+                return knowledge_query_error(e);
+            }
+            return doc(&response::knowledge_envelope(
+                &input.repo,
+                0,
+                "search",
+                &response::knowledge_search_result_json(
+                    &input.query,
+                    input.kind.as_deref(),
+                    input.include_archived.unwrap_or(false),
+                    &[],
+                    &canon,
+                ),
+                Some(response::pagination_json(limit, offset, 0, false, None)),
+            ));
+        }
+        Ok(false) => {}
+        Err(e) => return tool_error("store_error", &e),
+    }
+    let entry = knowledge_entry(&input.repo, &root);
+    let conn = match knowledge_store::open_knowledge(&entry, false) {
+        Ok(conn) => conn,
+        Err(e) => return knowledge_query_error(e),
+    };
+    let page = match knowledge_store::search(
+        &conn,
+        &input.query,
+        input.kind.as_deref(),
+        input.include_archived.unwrap_or(false),
+        input.include_superseded.unwrap_or(false),
+        input.include_retracted.unwrap_or(false),
+        limit,
+        offset,
+        input.generation,
+    ) {
+        Ok(page) => page,
+        Err(e) => return knowledge_query_error(e),
+    };
+    doc(&response::knowledge_envelope(
+        &input.repo,
+        page.generation,
+        "search",
+        &response::knowledge_search_result_json(
+            &input.query,
+            input.kind.as_deref(),
+            input.include_archived.unwrap_or(false),
+            &page.hits,
+            &canon,
+        ),
+        Some(response::pagination_json(
+            limit,
+            offset,
+            page.total,
+            page.truncated,
+            page.next_offset,
+        )),
+    ))
+}
+
+fn knowledge_show_doc(input: &KnowledgeShowInput) -> CallToolResult {
+    let (_home, canon) = match repo_root(&input.repo) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let entry = knowledge_entry(&input.repo, &canon.to_string_lossy());
+    let conn = match knowledge_store::open_knowledge(&entry, false) {
+        Ok(conn) => conn,
+        Err(e) => return knowledge_query_error(e),
+    };
+    let (record, generation) =
+        match knowledge_store::show_snapshot(&conn, &input.id, input.revision) {
+            Ok(pair) => pair,
+            Err(e) => return knowledge_query_error(e),
+        };
+    doc(&response::knowledge_envelope(
+        &input.repo,
+        generation,
+        "show",
+        &response::record_json(&record, &canon),
+        None,
+    ))
+}
+
+fn knowledge_related_doc(input: &KnowledgeRelatedInput) -> CallToolResult {
+    let (limit, offset) = match knowledge_page(input.limit, input.offset) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let direction = input.direction.as_deref().unwrap_or("outbound");
+    let dir = match direction {
+        "outbound" => knowledge_store::RelationDirection::Outbound,
+        "inbound" => knowledge_store::RelationDirection::Inbound,
+        other => {
+            return tool_error(
+                "invalid_input",
+                &format!("invalid --direction value: '{other}' (expected inbound or outbound)"),
+            )
+        }
+    };
+    let (_home, canon) = match repo_root(&input.repo) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let entry = knowledge_entry(&input.repo, &canon.to_string_lossy());
+    let conn = match knowledge_store::open_knowledge(&entry, false) {
+        Ok(conn) => conn,
+        Err(e) => return knowledge_query_error(e),
+    };
+    let page = match knowledge_store::related(
+        &conn,
+        &input.id,
+        input.revision,
+        dir,
+        input.include_retracted.unwrap_or(false),
+        limit,
+        offset,
+        input.generation,
+    ) {
+        Ok(page) => page,
+        Err(e) => return knowledge_query_error(e),
+    };
+    doc(&response::knowledge_envelope(
+        &input.repo,
+        page.generation,
+        "related",
+        &response::knowledge_related_result_json(
+            &input.id,
+            input.revision,
+            direction,
+            &page.relations,
+        ),
+        Some(response::pagination_json(
+            limit,
+            offset,
+            page.total,
+            page.truncated,
+            page.next_offset,
+        )),
+    ))
+}
+
+// --- CP6: health -----------------------------------------------------------
+
+/// The health document: composed from the CLI's own status and environment
+/// doctor assemblies plus source-of-truth constants. The registry is only
+/// read; a corrupt registry is classified `store_error` and never yields a
+/// fabricated repository count.
+fn health_doc() -> CallToolResult {
+    let reg = match registry::load(&paths::registry_path()) {
+        Ok(reg) => reg,
+        Err(e) => return tool_error("store_error", &e),
+    };
+    let parse_json = |text: &str| -> Result<serde_json::Value, String> {
+        serde_json::from_str(text).map_err(|e| format!("internal response assembly error: {e}"))
+    };
+    let status = match parse_json(&crate::status_json()) {
+        Ok(value) => value,
+        Err(e) => return tool_error("store_error", &e),
+    };
+    let (doctor_text, _) = doctor::environment_doctor();
+    let doctor = match parse_json(&doctor_text) {
+        Ok(value) => value,
+        Err(e) => return tool_error("store_error", &e),
+    };
+    let value = serde_json::json!({
+        "operation": "health",
+        "status": status,
+        "doctor": doctor,
+        "versions": {
+            "riltra": crate::VERSION,
+            "code_index_schema": store::SCHEMA_VERSION,
+            "knowledge_schema": knowledge_store::KNOWLEDGE_SCHEMA_VERSION,
+        },
+        "capabilities": {
+            "transport": "stdio",
+            "operations": ["tools"],
+            "read_only": true,
+            "mutations": false,
+            "resources": false,
+            "prompts": false,
+            "network": false,
+            "knowledge_schema_v1_readable": true,
+            "tools": [
+                "riltra_code_callees",
+                "riltra_code_callers",
+                "riltra_code_impact",
+                "riltra_code_search",
+                "riltra_code_trace",
+                "riltra_health",
+                "riltra_knowledge_related",
+                "riltra_knowledge_search",
+                "riltra_knowledge_show",
+                "riltra_repo_list",
+                "riltra_repo_status",
+            ],
+        },
+        "limits": {
+            "code_search": {
+                "default_limit": index::DEFAULT_SEARCH_LIMIT,
+                "max_limit": index::MAX_SEARCH_LIMIT,
+            },
+            "knowledge_search": {
+                "default_limit": knowledge::SEARCH_LIMIT_DEFAULT,
+                "max_limit": knowledge::SEARCH_LIMIT_MAX,
+            },
+            "graph_traversal": {
+                "depth_default": 3,
+                "depth_max": crate::edges::TRACE_MAX_DEPTH,
+                "default_limit": index::DEFAULT_SEARCH_LIMIT,
+                "max_limit": index::MAX_SEARCH_LIMIT,
+            },
+        },
+        "repo_count": reg.repos.len(),
+    });
+    let text = match serde_json::to_string(&value) {
+        Ok(text) => text,
+        Err(e) => {
+            return tool_error(
+                "store_error",
+                &format!("internal response assembly error: {e}"),
+            )
+        }
+    };
+    doc(&text)
+}
+
+/// Run the MCP stdio server to completion. Exit codes follow the CLI:
+/// 0 clean shutdown (client EOF/disconnect), 3 runtime failure.
+pub(crate) fn run() -> i32 {
+    let runtime = match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("error: mcp runtime: {e}");
+            return 3;
+        }
+    };
+    runtime.block_on(async {
+        let service = match serve_server(RiltraMcp, rmcp::transport::io::stdio()).await {
+            Ok(service) => service,
+            Err(e) => {
+                eprintln!("error: mcp initialize failed: {e}");
+                return 3;
+            }
+        };
+        match service.waiting().await {
+            Ok(rmcp::service::QuitReason::JoinError(e)) => {
+                eprintln!("error: mcp task failed: {e}");
+                3
+            }
+            Ok(_) => 0,
+            Err(e) => {
+                eprintln!("error: mcp task failed: {e}");
+                3
+            }
+        }
+    })
+}

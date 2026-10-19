@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use serde_json::{json, Value};
+
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn home(tag: &str) -> PathBuf {
@@ -455,6 +457,77 @@ fn missing_store_search_empty_without_creating_db() {
     assert!(out.is_empty());
     assert!(err.contains("no knowledge store"), "{err}");
     assert!(!db.exists());
+}
+
+#[test]
+fn missing_store_search_generation_guard_matches_contract() {
+    let h = home("nostore-gen");
+    let dir = mkrepo(&h, "krepo");
+    init(&h, &dir, "krepo");
+    let db = h.join("knowledge").join("krepo.db");
+
+    // Omitted or zero generation: generation-0 empty success, no store created.
+    for extra in [Vec::new(), vec!["--generation", "0"]] {
+        let mut args = vec![
+            "knowledge",
+            "search",
+            "--repo",
+            "krepo",
+            "--query",
+            "anything",
+        ];
+        args.extend(extra);
+        let (code, out, err) = run(&h, &args);
+        assert_eq!(code, 0, "{args:?}: {err}");
+        assert!(out.contains("\"generation\":0"), "{out}");
+        assert!(out.contains("\"hits\":[]"), "{out}");
+        assert!(!db.exists(), "{args:?} must not create a store");
+    }
+
+    // Any nonzero generation conflicts against the absent store's generation 0.
+    for generation in ["1", "7"] {
+        let (code, out, err) = run(
+            &h,
+            &[
+                "knowledge",
+                "search",
+                "--repo",
+                "krepo",
+                "--query",
+                "anything",
+                "--generation",
+                generation,
+            ],
+        );
+        assert_eq!(code, 3, "generation {generation}: {err}");
+        assert!(out.is_empty(), "conflict emitted a document: {out}");
+        assert_eq!(
+            err,
+            format!(
+                "error: knowledge generation conflict: expected {generation} but store is at 0\n"
+            ),
+            "generation {generation}"
+        );
+        assert!(!db.exists(), "conflict must not create a store");
+    }
+
+    // An unregistered repository is not an empty store.
+    let (code, out, err) = run(
+        &h,
+        &[
+            "knowledge",
+            "search",
+            "--repo",
+            "nope",
+            "--query",
+            "anything",
+            "--generation",
+            "5",
+        ],
+    );
+    assert_ne!(code, 0);
+    assert!(out.is_empty());
+    assert!(err.contains("unknown repository"), "{err}");
 }
 
 #[test]
@@ -4315,4 +4388,151 @@ fn backup_restore_rejects_symlink_targets() {
         "the link must survive the refusal"
     );
     assert_eq!(std::fs::read(&elsewhere).unwrap(), b"not a store");
+}
+
+/// KJSON-01 regression: every successful CLI knowledge search must emit one
+/// valid JSON object; the historical shape closed the query object before
+/// `,"hits"` and was not parseable.
+#[test]
+fn kjson01_search_output_is_valid_json() {
+    let h = home("kjson01");
+    let dir = mkrepo(&h, "krepo");
+    init(&h, &dir, "krepo");
+
+    let search = |query: &str, extra: &[&str]| -> Value {
+        let mut args = vec!["knowledge", "search", "--repo", "krepo", "--query", query];
+        args.extend_from_slice(extra);
+        let (code, out, err) = run(&h, &args);
+        assert_eq!(code, 0, "search {query} {extra:?}: {err}");
+        serde_json::from_str(&out)
+            .unwrap_or_else(|e| panic!("search {query} {extra:?} emitted invalid JSON: {e}\n{out}"))
+    };
+    let ids = |v: &Value| -> Vec<String> {
+        v["result"]["hits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|hit| hit["id"].as_str().unwrap().to_string())
+            .collect()
+    };
+
+    // Missing store: a registered repository without a database answers with
+    // an empty success that still parses, and no store file may appear.
+    let v = search("kjson", &[]);
+    assert_eq!(v["schema_version"], json!(1));
+    assert_eq!(v["repo"], json!("krepo"));
+    assert_eq!(v["generation"], json!(0));
+    assert_eq!(v["operation"], json!("search"));
+    assert_eq!(v["result"]["query"], json!("kjson"));
+    assert_eq!(v["result"]["kind"], Value::Null);
+    assert_eq!(v["result"]["include_archived"], json!(false));
+    assert_eq!(v["result"]["hits"], json!([]));
+    assert_eq!(
+        v["pagination"],
+        json!({"limit": 50, "offset": 0, "total": 0, "truncated": false, "next_offset": null})
+    );
+    assert!(!db_path(&h, "krepo").exists(), "search created a store");
+
+    // Empty store: the database exists with zero records.
+    let payload = h.join("empty.jsonl");
+    write_text(&payload, &meta_line(0, 0));
+    let (code, _, err) = import(&h, "krepo", &payload);
+    assert_eq!(code, 0, "empty import: {err}");
+    assert!(db_path(&h, "krepo").exists());
+    let v = search("kjson", &[]);
+    assert_eq!(v["generation"], json!(0));
+    assert_eq!(v["result"]["hits"], json!([]));
+    assert_eq!(v["pagination"]["total"], json!(0));
+
+    // Populated store, including a record whose title and body need JSON
+    // escaping.
+    assert_eq!(create(&h, "krepo", "d1", "One", "kjson alpha").0, 0);
+    assert_eq!(create(&h, "krepo", "d2", "Two", "kjson beta").0, 0);
+    assert_eq!(create(&h, "krepo", "d3", "Three", "kjson gamma").0, 0);
+    let tricky_title = "Quote \"Q\" back\\slash";
+    let tricky_body = "kjson line1\nline2\ttab \"quoted\"";
+    let escaped = json!({
+        "id": "e1",
+        "kind": "decision",
+        "title": tricky_title,
+        "body": tricky_body,
+        "status": "active",
+        "author": "a",
+        "evidence": []
+    })
+    .to_string();
+    let (code, _, err) = run_stdin(
+        &h,
+        &["knowledge", "create", "--repo", "krepo", "--input", "-"],
+        escaped.as_bytes(),
+    );
+    assert_eq!(code, 0, "escaped create: {err}");
+
+    let v = search("kjson", &["--limit", "3"]);
+    assert!(v["generation"].as_u64().unwrap() > 0);
+    assert_eq!(v["result"]["query"], json!("kjson"));
+    assert_eq!(
+        v["pagination"],
+        json!({"limit": 3, "offset": 0, "total": 4, "truncated": true, "next_offset": 3})
+    );
+    assert_eq!(ids(&v), ["d1", "d2", "d3"]);
+    let v = search("kjson", &["--limit", "3", "--offset", "3"]);
+    assert_eq!(v["pagination"]["truncated"], json!(false));
+    assert_eq!(v["pagination"]["next_offset"], Value::Null);
+    assert_eq!(ids(&v), ["e1"]);
+    let hit = &v["result"]["hits"][0];
+    assert_eq!(hit["title"], json!(tricky_title));
+    assert_eq!(hit["body"], json!(tricky_body));
+    assert_eq!(hit["verification"], json!("Unverified"));
+    assert_eq!(hit["support"], json!("unknown"));
+
+    // Kind filter echoes into the result; zero hits stay a valid object.
+    let v = search("kjson", &["--kind", "benchmark"]);
+    assert_eq!(v["result"]["kind"], json!("benchmark"));
+    assert_eq!(v["result"]["hits"], json!([]));
+    assert_eq!(v["pagination"]["total"], json!(0));
+    let v = search("zzznope", &[]);
+    assert_eq!(v["result"]["hits"], json!([]));
+    assert_eq!(v["pagination"]["total"], json!(0));
+
+    // Visibility: archived, superseded and retracted records leave the
+    // default view and return only under their own flag, carrying their
+    // lifecycle payload.
+    assert_eq!(create(&h, "krepo", "d4", "Four", "kjson delta").0, 0);
+    let archived = "{\"title\":\"Four\",\"body\":\"kjson delta\",\"status\":\"archived\",\"author\":\"a\",\"evidence\":[]}";
+    assert_eq!(update(&h, "krepo", "d4", 1, archived).0, 0);
+    let superseded = "{\"title\":\"Three\",\"body\":\"kjson gamma\",\"status\":\"superseded\",\"author\":\"a\",\"evidence\":[],\"superseded_by\":{\"id\":\"d1\",\"revision\":1},\"reason\":\"replaced by d1\"}";
+    assert_eq!(update(&h, "krepo", "d3", 1, superseded).0, 0);
+    let retracted = "{\"title\":\"Two\",\"body\":\"kjson beta\",\"status\":\"retracted\",\"author\":\"a\",\"evidence\":[],\"reason\":\"wrong\"}";
+    assert_eq!(update(&h, "krepo", "d2", 1, retracted).0, 0);
+
+    let v = search("kjson", &[]);
+    assert_eq!(ids(&v), ["d1", "e1"]);
+    let v = search("kjson", &["--include-archived"]);
+    assert_eq!(v["result"]["include_archived"], json!(true));
+    assert_eq!(ids(&v), ["d1", "d4", "e1"]);
+    assert_eq!(v["result"]["hits"][1]["revision"], json!(2));
+    assert_eq!(v["result"]["hits"][1]["status"], json!("archived"));
+    let v = search("kjson", &["--include-superseded"]);
+    assert_eq!(ids(&v), ["d1", "d3", "e1"]);
+    let d3 = &v["result"]["hits"][1];
+    assert_eq!(d3["revision"], json!(2));
+    assert_eq!(d3["status"], json!("superseded"));
+    assert_eq!(d3["superseded_by"], json!({"id": "d1", "revision": 1}));
+    let v = search("kjson", &["--include-retracted"]);
+    assert_eq!(ids(&v), ["d1", "d2", "e1"]);
+    let d2 = &v["result"]["hits"][1];
+    assert_eq!(d2["revision"], json!(2));
+    assert_eq!(d2["status"], json!("retracted"));
+    assert_eq!(d2["retracted_reason"], json!("wrong"));
+    let v = search(
+        "kjson",
+        &[
+            "--include-archived",
+            "--include-superseded",
+            "--include-retracted",
+        ],
+    );
+    assert_eq!(ids(&v), ["d1", "d2", "d3", "d4", "e1"]);
+    assert_eq!(v["pagination"]["total"], json!(5));
 }

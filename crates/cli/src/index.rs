@@ -1812,6 +1812,17 @@ fn edge_query_inner(
     request: &EdgeRequest<'_>,
     pinned: impl FnOnce(),
 ) -> Result<EdgeQueryOut, String> {
+    let (canon, validated) = validated_edge_anchor(root, request)?;
+    let mut conn = store::open_live(&store::db_path(home, name))?;
+    edge_query_conn(&mut conn, name, &canon, &validated, request, pinned)
+}
+
+/// Bounds and containment checks shared by the CLI path (before its migrating
+/// open) and the MCP read-only path: identical refusals in both worlds.
+pub(crate) fn validated_edge_anchor(
+    root: &Path,
+    request: &EdgeRequest<'_>,
+) -> Result<(PathBuf, String), String> {
     if request.anchor.line1 == 0
         || request.anchor.col1 == 0
         || !(1..=MAX_SEARCH_LIMIT).contains(&request.limit)
@@ -1821,12 +1832,25 @@ fn edge_query_inner(
     }
     let canon = canonical_repo_root(root)?;
     let validated = crate::semantic::validate_doc_path(&canon, request.anchor.rel)?;
-    let mut conn = store::open_live(&store::db_path(home, name))?;
+    Ok((canon, validated))
+}
+
+/// The edge query body on a caller-provided connection: the CLI passes its
+/// migrating `open_live` connection, MCP passes the guard-validated read-only
+/// connection. One read transaction pins snapshot, verdict, and rows.
+pub(crate) fn edge_query_conn(
+    conn: &mut rusqlite::Connection,
+    name: &str,
+    canon: &Path,
+    validated: &str,
+    request: &EdgeRequest<'_>,
+    pinned: impl FnOnce(),
+) -> Result<EdgeQueryOut, String> {
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     let snapshot = store::latest_snapshot(&tx)?.ok_or("no snapshot: index the repository first")?;
     pinned();
     store::require_graph_proof(&tx, snapshot.id)?;
-    let (freshness, mut freshness_reasons) = evaluate_snapshot(&tx, name, &canon, &snapshot);
+    let (freshness, mut freshness_reasons) = evaluate_snapshot(&tx, name, canon, &snapshot);
     freshness_reasons.sort();
     freshness_reasons.dedup();
     let live = live_state_for(&tx, &snapshot)?;
@@ -1834,8 +1858,8 @@ fn edge_query_inner(
     let anchor = resolve_edge_anchor(
         &tx,
         snapshot.id,
-        &canon,
-        &validated,
+        canon,
+        validated,
         request.anchor.line1 - 1,
         request.anchor.col1 - 1,
         request.symbol,
@@ -1889,7 +1913,7 @@ fn edge_query_inner(
         tx: &tx,
         snapshot: &snapshot,
         live: &live,
-        canon: &canon,
+        canon,
         source_fresh: freshness == "fresh",
         memo: BTreeMap::new(),
     };
@@ -2048,6 +2072,27 @@ fn graph_query_inner(
     impact: bool,
 ) -> Result<TraceQueryOut, String> {
     let started = Instant::now();
+    let (canon, rel, dest_path) = validated_trace_anchor(root, request)?;
+    let mut conn = store::open_live(&store::db_path(home, name))?;
+    graph_query_conn(
+        &mut conn,
+        name,
+        &canon,
+        &rel,
+        dest_path.as_deref(),
+        request,
+        started,
+        pinned,
+        impact,
+    )
+}
+
+/// Bounds and containment checks shared by the CLI path (before its migrating
+/// open) and the MCP read-only path: identical refusals in both worlds.
+pub(crate) fn validated_trace_anchor(
+    root: &Path,
+    request: &TraceRequest<'_>,
+) -> Result<(PathBuf, String, Option<String>), String> {
     if !(1..=crate::edges::TRACE_MAX_DEPTH).contains(&request.depth)
         || !(1..=MAX_SEARCH_LIMIT).contains(&request.limit)
         || request.offset > i64::MAX as usize - MAX_SEARCH_LIMIT
@@ -2067,7 +2112,23 @@ fn graph_query_inner(
         .as_ref()
         .map(|d| crate::semantic::validate_doc_path(&canon, d.rel))
         .transpose()?;
-    let mut conn = store::open_live(&store::db_path(home, name))?;
+    Ok((canon, rel, dest_path))
+}
+
+/// The trace/impact body on a caller-provided connection (see
+/// `edge_query_conn`); `started` keeps the time budget anchored to entry.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn graph_query_conn(
+    conn: &mut rusqlite::Connection,
+    name: &str,
+    canon: &Path,
+    rel: &str,
+    dest_path: Option<&str>,
+    request: &TraceRequest<'_>,
+    started: Instant,
+    pinned: impl FnOnce(),
+    impact: bool,
+) -> Result<TraceQueryOut, String> {
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     let snapshot = store::latest_snapshot(&tx)?.ok_or("no snapshot: index the repository first")?;
     pinned();
@@ -2075,8 +2136,8 @@ fn graph_query_inner(
     let anchor = resolve_edge_anchor(
         &tx,
         snapshot.id,
-        &canon,
-        &rel,
+        canon,
+        rel,
         request.source.line1 - 1,
         request.source.col1 - 1,
         request.symbol,
@@ -2084,14 +2145,14 @@ fn graph_query_inner(
     let destination = request
         .destination
         .as_ref()
-        .zip(dest_path.as_ref())
+        .zip(dest_path)
         .map(|(d, p)| {
-            resolve_edge_anchor(&tx, snapshot.id, &canon, p, d.line1 - 1, d.col1 - 1, None)
+            resolve_edge_anchor(&tx, snapshot.id, canon, p, d.line1 - 1, d.col1 - 1, None)
         })
         .transpose()?;
     let start = anchor_endpoint(&anchor).ok_or("source has no identity")?;
     let target = destination.as_ref().and_then(anchor_endpoint);
-    let (freshness, mut freshness_reasons) = evaluate_snapshot(&tx, name, &canon, &snapshot);
+    let (freshness, mut freshness_reasons) = evaluate_snapshot(&tx, name, canon, &snapshot);
     freshness_reasons.sort();
     freshness_reasons.dedup();
     let live = live_state_for(&tx, &snapshot)?;
@@ -2100,7 +2161,7 @@ fn graph_query_inner(
         tx: &tx,
         snapshot: &snapshot,
         live: &live,
-        canon: &canon,
+        canon,
         source_fresh: freshness == "fresh",
         memo: BTreeMap::new(),
     };
@@ -2514,7 +2575,18 @@ pub fn evaluate(home: &Path, name: &str, root: &Path) -> Freshness {
             };
         }
     };
-    let snapshot = match store::latest_snapshot(&tx) {
+    let freshness = evaluate_tx(&tx, root);
+    let _ = tx.commit();
+    freshness
+}
+
+/// Freshness verdict read over an already-open connection, with the same
+/// outcomes as `evaluate`. The CLI calls it on its migrating open; the MCP
+/// read path calls it on a read-only connection. Callers hold one read
+/// transaction across this plus their fact reads, so verdict and results
+/// always describe one revision.
+pub fn evaluate_tx(conn: &rusqlite::Connection, root: &Path) -> Freshness {
+    let snapshot = match store::latest_snapshot(conn) {
         Ok(Some(s)) => s,
         _ => {
             return Freshness {
@@ -2534,8 +2606,7 @@ pub fn evaluate(home: &Path, name: &str, root: &Path) -> Freshness {
             };
         }
     };
-    let (status, reasons) = evaluate_snapshot(&tx, name, &canon_root, &snapshot);
-    let _ = tx.commit();
+    let (status, reasons) = evaluate_snapshot(conn, "", &canon_root, &snapshot);
     Freshness {
         status,
         reasons,
@@ -2589,7 +2660,9 @@ pub fn evaluate_snapshot(
 
 #[cfg(test)]
 mod tests {
-    use super::{build, build_full, config_fingerprint, diff_files, evaluate, input_fingerprint};
+    use super::{
+        build, build_full, config_fingerprint, diff_files, evaluate, evaluate_tx, input_fingerprint,
+    };
     use crate::store;
     use crate::testutil::{git_repo, tmpdir};
 
@@ -2634,6 +2707,27 @@ mod tests {
         assert_eq!(second.processed, first.processed);
         assert_eq!(second.status_at_write, "fresh");
         assert_eq!(second.fallback_reason, "none");
+    }
+
+    #[test]
+    fn evaluate_tx_on_readonly_connection_matches_evaluate() {
+        let home = tmpdir("idx-eval-tx-home");
+        let repo = plain_repo("idx-eval-tx");
+        build_full(&home, "r", &repo).unwrap();
+        let expected = evaluate(&home, "r", &repo);
+        let db = store::db_path(&home, "r");
+        let store::IndexRead::Ready(mut conn) = store::open_read(&db) else {
+            panic!("expected a ready read connection for the built index");
+        };
+        let tx = conn.transaction().unwrap();
+        let got = evaluate_tx(&tx, &repo);
+        let _ = tx.commit();
+        assert_eq!(got.status, expected.status);
+        assert_eq!(got.reasons, expected.reasons);
+        assert_eq!(
+            got.snapshot.as_ref().map(|s| s.id),
+            expected.snapshot.as_ref().map(|s| s.id)
+        );
     }
 
     #[test]

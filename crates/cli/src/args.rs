@@ -47,6 +47,7 @@ pub enum Command {
     Knowledge {
         op: KnowledgeOp,
     },
+    Mcp,
 }
 
 #[derive(Debug, PartialEq)]
@@ -194,6 +195,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         "-h" | "--help" | "help" if args.len() == 1 => Ok(Command::Help),
         "-V" | "--version" | "version" if args.len() == 1 => Ok(Command::Version),
         "status" if args.len() == 1 => Ok(Command::Status),
+        "mcp" if args.len() == 1 => Ok(Command::Mcp),
         "init" => {
             let mut repo = None;
             let mut name = None;

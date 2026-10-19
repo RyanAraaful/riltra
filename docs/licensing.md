@@ -73,7 +73,8 @@ Notes:
 - At M2, `proc-macro2`/`quote`/`syn`/`serde`/`serde_derive` appeared in the
   resolve graph but were not compiled into that feature set (absent from the
   build cache). Since M7, `serde` is a direct dependency and is compiled into
-  the binary (see the M7 addition below); the others remain uncompiled.
+  the binary (see the M7 addition below); since M8 CP3 the proc-macro trio is
+  compiled via `rmcp-macros` (see the CP3 addition below).
 
 ## M3 addition: durable SQLite index (pinned versions, verified 2026-10-14)
 
@@ -110,4 +111,71 @@ Notes:
 - Arrives via crates.io and is pinned in `Cargo.lock`; nothing is vendored.
   Redistributable: MIT OR Apache-2.0, permissive, no copyleft.
 - Only the base `serde` feature set is enabled (the `derive` feature is off),
-  so `serde_derive` is not compiled and remains listed in `Cargo.lock` only.
+  so `serde_derive` was not compiled at M7; since M8 CP1 it is compiled as
+  part of the rmcp/schemars graph (see below).
+
+## M8 CP1 addition: MCP stdio server runtime (pinned versions, verified 2026-10-18)
+
+Direct dependencies (owner decision D1; `rmcp` with `default-features = false`
+and only the `server` + `transport-io` features — no HTTP/SSE transports,
+macros, base64, auth, or elicitation):
+
+| Package | Version | License | Origin |
+|---|---|---|---|
+| rmcp | 3.5.1 | Apache-2.0 (declared in package metadata; the crate package ships no standalone LICENSE file) | https://github.com/modelcontextprotocol/rust-sdk |
+| tokio | 1.53.3 | MIT (declared) | https://github.com/tokio-rs/tokio |
+
+Transitive additions pulled in by the rmcp graph (`Cargo.lock` diff at CP1: 44
+new entries, none removed; all permissive, nothing vendored):
+
+| Package | Version | License |
+|---|---|---|
+| futures / futures-channel / futures-core / futures-executor / futures-io / futures-macro / futures-sink / futures-task / futures-util | 0.3.34 | MIT OR Apache-2.0 |
+| tracing / tracing-attributes / tracing-core | 0.1.44 / 0.1.31 / 0.1.36 | MIT |
+| tokio-macros / tokio-util | 2.7.2 / 0.7.20 | MIT |
+| schemars / schemars_derive / serde_derive_internals | 1.2.3 / 1.2.3 / 0.30.0 | MIT |
+| uuid | 1.28.0 | Apache-2.0 OR MIT |
+| chrono + platform crates (iana-time-zone, iana-time-zone-haiku, android_system_properties, core-foundation-sys, windows-core, windows-implement, windows-interface, windows-link, windows-result, windows-strings) | 0.4.45 (platform crates as pinned) | MIT OR Apache-2.0 |
+| getrandom / r-efi / libc / log / num-traits / autocfg | as pinned in `Cargo.lock` | MIT OR Apache-2.0 |
+| dyn-clone / pastey / ref-cast / ref-cast-impl / pin-project-lite | as pinned in `Cargo.lock` | MIT OR Apache-2.0 |
+| slab / bytes | 0.4.12 / 1.12.1 | MIT |
+
+Notes:
+
+- `schemars` is not a direct dependency; it arrives with rmcp's `server`
+  feature and is compiled into the binary, so it is inventoried here.
+- The dependency audit test (`crates/cli/tests/semantic.rs`) bans protoc
+  bridges, non-tokio async runtimes, dynamic loading, and network stacks
+  (`reqwest`, `hyper`, `ureq`); tokio is allowed only as the M8 MCP stdio
+  runtime.
+- Redistributable: permissive only (MIT / Apache-2.0 alternatives), no
+  copyleft, no noncommercial code.
+
+## M8 CP3 addition: rmcp macro-based tool registration (pinned versions, verified 2026-10-18)
+
+Enabling the `macros` feature of the already-audited `rmcp 3.5.1` dependency
+(design gate §2: `#[tool_router]`/`#[tool]`/`#[tool_handler]` with
+schemars-derived input schemas; no new transports, no base64/auth features).
+`Cargo.lock` diff: 6 new entries, none removed; `serde`'s `derive` feature is
+now declared explicitly (serde_derive was already compiled since CP1; no new
+package).
+
+| Package | Version | License | Origin |
+|---|---|---|---|
+| rmcp-macros | 3.5.1 | Apache-2.0 (declared in package metadata) | https://github.com/modelcontextprotocol/rust-sdk |
+| darling / darling_core / darling_macro | 0.24.1 | MIT (declared) | https://github.com/TedDriggs/darling |
+| ident_case | 1.0.1 | MIT/Apache-2.0 (declared) | https://github.com/TedDriggs/ident_case |
+| strsim | 0.11.1 | MIT (declared) | https://github.com/rapidfuzz/strsim-rs |
+
+Build-time transitive dependencies now compiled (previously resolve-graph
+only, as pinned in `Cargo.lock`): `proc-macro2` 1.0.107, `quote` 1.0.47,
+`syn` 2.0.119 + 3.0.9, `unicode-ident` 1.0.27 — all MIT OR Apache-2.0
+(unicode-ident adds Unicode-3.0).
+
+Notes:
+
+- `rmcp-macros` is the proc-macro half of the same `rmcp` package family
+  (same repository and license); it is compiled into the build, not shipped
+  as a runtime library.
+- Redistributable: permissive only; no copyleft, no noncommercial code,
+  nothing vendored.
