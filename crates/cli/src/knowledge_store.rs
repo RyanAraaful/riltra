@@ -186,21 +186,53 @@ fn companion_paths(db: &Path) -> [PathBuf; 3] {
     ]
 }
 
+/// Total metadata inspections allowed at a store-controlled path. Windows
+/// retries a transient `PermissionDenied` (os error 5) that antivirus or
+/// filter drivers can raise while holding `-wal`/`-shm` during SQLite cleanup
+/// (see `docs/audits/2026-10-19-windows-wal-concurrency.md`); every other
+/// platform keeps the original single inspection.
+const INSPECT_ATTEMPTS: u32 = if cfg!(windows) { 3 } else { 1 };
+
+/// Fixed pause between retried inspections, mirroring SQLite's documented
+/// 25 ms Windows antivirus-retry interval.
+const INSPECT_RETRY_DELAY: Duration = Duration::from_millis(25);
+
 /// Any symlink at a store-controlled path is an escape, including dangling
 /// links (`symlink_metadata` succeeds on those). A missing path is absent;
 /// any other I/O error fails closed instead of being treated as absent.
 fn reject_link(p: &Path) -> Result<(), String> {
-    match std::fs::symlink_metadata(p) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(format!(
-            "cannot inspect knowledge store path '{}': {e}",
-            p.display()
-        )),
-        Ok(md) if md.file_type().is_symlink() => Err(format!(
-            "knowledge store path escapes via link: '{}'",
-            p.display()
-        )),
-        Ok(_) => Ok(()),
+    reject_link_with(p, |q| std::fs::symlink_metadata(q))
+}
+
+/// Testable form of [`reject_link`]: `inspect` is the raw metadata call
+/// (production passes `std::fs::symlink_metadata`), so tests can script
+/// inspection outcomes without changing the retry or classification rules.
+fn reject_link_with<F>(p: &Path, inspect: F) -> Result<(), String>
+where
+    F: Fn(&Path) -> std::io::Result<std::fs::Metadata>,
+{
+    let mut attempts = INSPECT_ATTEMPTS;
+    loop {
+        match inspect(p) {
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied && attempts > 1 => {
+                attempts -= 1;
+                std::thread::sleep(INSPECT_RETRY_DELAY);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => {
+                return Err(format!(
+                    "cannot inspect knowledge store path '{}': {e}",
+                    p.display()
+                ))
+            }
+            Ok(md) if md.file_type().is_symlink() => {
+                return Err(format!(
+                    "knowledge store path escapes via link: '{}'",
+                    p.display()
+                ))
+            }
+            Ok(_) => return Ok(()),
+        }
     }
 }
 
@@ -5394,6 +5426,168 @@ mod tests {
             err.contains("link") || err.contains("escape") || err.contains("retarget"),
             "unexpected: {err}"
         );
+    }
+
+    /// Scripted outcomes for the `reject_link_with` seam: replaces only the
+    /// sequence of raw metadata results, never the classification rules.
+    enum ScriptedInspect {
+        Denied,
+        Invalid,
+        Delegate,
+    }
+
+    fn scripted_inspector(
+        script: Vec<ScriptedInspect>,
+    ) -> (
+        impl Fn(&Path) -> std::io::Result<std::fs::Metadata>,
+        std::rc::Rc<std::cell::Cell<u32>>,
+    ) {
+        let queue = std::cell::RefCell::new(script.into_iter());
+        let calls = std::rc::Rc::new(std::cell::Cell::new(0u32));
+        let counted = std::rc::Rc::clone(&calls);
+        let inspect = move |p: &Path| {
+            counted.set(counted.get() + 1);
+            match queue.borrow_mut().next() {
+                Some(ScriptedInspect::Denied) => Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "scripted permission denied",
+                )),
+                Some(ScriptedInspect::Invalid) => Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "scripted other error",
+                )),
+                Some(ScriptedInspect::Delegate) | None => std::fs::symlink_metadata(p),
+            }
+        };
+        (inspect, calls)
+    }
+
+    #[test]
+    fn reject_link_immediate_success_inspects_once() {
+        let dir = tmpdir("m8-retry-ok");
+        let file = dir.join("krepo.db");
+        std::fs::write(&file, b"db").unwrap();
+        let (inspect, calls) = scripted_inspector(vec![ScriptedInspect::Delegate]);
+        reject_link_with(&file, inspect).unwrap();
+        assert_eq!(calls.get(), 1, "immediate success must not re-inspect");
+    }
+
+    #[test]
+    fn reject_link_other_errors_fail_closed_without_retry() {
+        let dir = tmpdir("m8-retry-other");
+        let file = dir.join("krepo.db");
+        std::fs::write(&file, b"db").unwrap();
+        let (inspect, calls) = scripted_inspector(vec![ScriptedInspect::Invalid]);
+        let err = reject_link_with(&file, inspect).unwrap_err();
+        assert!(
+            err.starts_with("cannot inspect knowledge store path"),
+            "unexpected: {err}"
+        );
+        assert!(err.contains("scripted other error"), "unexpected: {err}");
+        assert_eq!(calls.get(), 1, "non-permission errors must not retry");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn reject_link_retries_transient_permission_denied() {
+        let dir = tmpdir("m8-retry-transient");
+        let file = dir.join("krepo.db");
+        std::fs::write(&file, b"db").unwrap();
+        let (inspect, calls) =
+            scripted_inspector(vec![ScriptedInspect::Denied, ScriptedInspect::Delegate]);
+        reject_link_with(&file, inspect).unwrap();
+        assert_eq!(calls.get(), 2, "transient denial must be re-inspected");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn reject_link_retry_budget_is_three_inspections() {
+        let dir = tmpdir("m8-retry-budget");
+        let file = dir.join("krepo.db");
+        std::fs::write(&file, b"db").unwrap();
+        let (inspect, calls) = scripted_inspector(vec![
+            ScriptedInspect::Denied,
+            ScriptedInspect::Denied,
+            ScriptedInspect::Delegate,
+        ]);
+        reject_link_with(&file, inspect).unwrap();
+        assert_eq!(calls.get(), INSPECT_ATTEMPTS);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn reject_link_transient_denied_then_missing_path_is_absent() {
+        let dir = tmpdir("m8-retry-missing");
+        let missing = dir.join("krepo.db-wal");
+        let (inspect, calls) =
+            scripted_inspector(vec![ScriptedInspect::Denied, ScriptedInspect::Delegate]);
+        reject_link_with(&missing, inspect).unwrap();
+        assert_eq!(calls.get(), 2);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn reject_link_persistent_denial_fails_closed_after_budget() {
+        let dir = tmpdir("m8-retry-persistent");
+        let file = dir.join("krepo.db");
+        std::fs::write(&file, b"db").unwrap();
+        let (inspect, calls) = scripted_inspector(vec![
+            ScriptedInspect::Denied,
+            ScriptedInspect::Denied,
+            ScriptedInspect::Denied,
+            ScriptedInspect::Delegate, // must never be reached
+        ]);
+        let err = reject_link_with(&file, inspect).unwrap_err();
+        assert!(
+            err.starts_with("cannot inspect knowledge store path"),
+            "unexpected: {err}"
+        );
+        assert!(
+            err.contains("scripted permission denied"),
+            "unexpected: {err}"
+        );
+        assert_eq!(calls.get(), INSPECT_ATTEMPTS, "budget must be exact");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn reject_link_transient_denied_then_link_still_rejected() {
+        let dir = tmpdir("m8-retry-link");
+        let target = tmpdir("m8-retry-link-target").join("evil.db");
+        std::fs::write(&target, b"SENTINEL").unwrap();
+        let link = dir.join("krepo.db");
+        match plant_link(&link, &target) {
+            Some(mech) => eprintln!("hostile link planted via {mech}"),
+            None => {
+                eprintln!("NOT TESTED: cannot plant links in this environment");
+                return;
+            }
+        }
+        let (inspect, calls) =
+            scripted_inspector(vec![ScriptedInspect::Denied, ScriptedInspect::Delegate]);
+        let err = reject_link_with(&link, inspect).unwrap_err();
+        assert!(
+            err.starts_with("knowledge store path escapes via link"),
+            "unexpected: {err}"
+        );
+        assert_eq!(calls.get(), 2);
+        assert_eq!(std::fs::read(&target).unwrap(), b"SENTINEL");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn reject_link_permission_denied_not_retried_off_windows() {
+        let dir = tmpdir("m8-retry-unix");
+        let file = dir.join("krepo.db");
+        std::fs::write(&file, b"db").unwrap();
+        let (inspect, calls) =
+            scripted_inspector(vec![ScriptedInspect::Denied, ScriptedInspect::Delegate]);
+        let err = reject_link_with(&file, inspect).unwrap_err();
+        assert!(
+            err.starts_with("cannot inspect knowledge store path"),
+            "unexpected: {err}"
+        );
+        assert_eq!(calls.get(), 1, "unix behavior must stay single-inspection");
     }
 
     use crate::knowledge::{
