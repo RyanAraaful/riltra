@@ -107,11 +107,15 @@ converts either into an unqualified PASS.
 - The blueprint (`OPEN_SOURCE_CODE_INTELLIGENCE_KNOWLEDGE_BLUEPRINT.md`) is
   **not version-controlled in this repository** (ignored by name in
   `.gitignore`; the maintained private copy lives outside the repo, per
-  `docs/m4-validation.md`). This amendment therefore records the
-  reconciliation here and does **not** edit any blueprint copy.
-- External action needed: synchronize the private blueprint so that its
-  M8/G-MCP/M9 client-count clauses match this amendment. No other blueprint
-  clause requires synchronization for this decision.
+  `docs/m4-validation.md`).
+- **External synchronization completed 2026-10-19:** the private blueprint was
+  synchronized to this amendment (all byte-identical private copies brought to
+  the same state) — M8, G-MCP, and M9 client-count clauses, backlog #14
+  evidence note, and a revision note citing this document and decision commit
+  `68d00c9`. No other clause changed. SHA-256 after synchronization:
+  `1316CDEB87DC70BA4803D48B9F5788940142862911E10C2AC6B490CCA070196A`.
+  The blueprint remains private and untracked; no private path or blueprint
+  content is recorded in this repository.
 
 ## 5. Restrictions carried by this decision
 
