@@ -1,0 +1,2 @@
+Synthetic fixture (no real data): JSON-escaped Windows user-profile paths.
+{"workspace": "D:\\Users\\alice\\repos\\demo", "cache": "E:/Users/alice/tmp"}

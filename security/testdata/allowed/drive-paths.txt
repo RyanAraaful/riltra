@@ -1,0 +1,4 @@
+Synthetic fixture: drive paths without a user-profile segment are not personal.
+project: C:\repos\fixture\main.c
+runner:  D:/a/_work/checkout
+extended: \\?\C:\repos\fixture\main.c

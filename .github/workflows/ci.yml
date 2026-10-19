@@ -23,3 +23,30 @@ jobs:
       - run: cargo run -q -p riltra -- --help
       - run: cargo run -q -p riltra -- --version
       - run: cargo run -q -p riltra -- status
+
+  security:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      GITLEAKS_BIN: ${{ github.workspace }}/bin/gitleaks
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install pinned gitleaks 8.30.1
+        run: |
+          mkdir -p "$PWD/bin"
+          curl -sSfL -o /tmp/gitleaks.tar.gz https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  /tmp/gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/gitleaks.tar.gz -C "$PWD/bin" gitleaks
+      - name: Scan changed commits
+        if: github.event_name == 'pull_request'
+        run: security/scan.sh range "${{ github.event.pull_request.base.sha }}..${{ github.sha }}"
+      - name: Scan pushed commits
+        if: github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000'
+        run: security/scan.sh range "${{ github.event.before }}..${{ github.sha }}"
+      - name: Scan committed tree
+        run: security/scan.sh tree
+      - name: Scanner regression tests
+        run: bash security/scan-tests.sh

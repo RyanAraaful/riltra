@@ -1,0 +1,56 @@
+# Secret and local-path scanning for this repository.
+# Pinned scanner: gitleaks 8.30.1 (see security/README.md). The CI `security`
+# job and the optional local hooks (security/scan.sh) run this config. Custom
+# rules cover local machine paths; all other detection uses the bundled
+# default rules.
+#
+# Allowlists are deliberately narrow: verified synthetic fixtures, CI-runner
+# profile paths, and two reviewed false positives. Do not add broad path or
+# rule allowlists (whole directories, *.log, *.json globs, ...).
+
+title = "riltra scan"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "windows-user-path"
+description = "Local Windows user-profile path (privacy)"
+regex = '''(?i)[a-z]:[\\/]+users[\\/]+[a-z0-9._-]+[\\/]'''
+tags = ["privacy", "local-path"]
+
+# The username is captured on purpose: gitleaks' default global allowlist
+# suppresses path-shaped secrets under /home, /tmp, /usr, ... so the finding
+# must key on the username, not on the full path.
+[[rules]]
+id = "unix-home-path"
+description = "Local unix/macOS home directory path (privacy)"
+regex = '''(?i)/(?:home|users)/([a-z0-9._-]+)/'''
+tags = ["privacy", "local-path"]
+
+[[allowlists]]
+description = "Synthetic scanner test fixtures; scan-tests copies them outside this path to prove the rules fire"
+paths = ['''security/testdata/''']
+
+[[allowlists]]
+description = "CI runner profile paths (runner-generated, not personal)"
+targetRules = ["windows-user-path", "unix-home-path"]
+regexes = [
+  '''(?i)^[a-z]:[\\/]+users[\\/]+runner(admin)?[\\/]''',
+  '''(?i)^runner(admin)?$''',
+]
+
+[[allowlists]]
+description = "Synthetic unit-test fixtures in crates/cli/src/semantic.rs (uri_path tests, verified test data)"
+targetRules = ["unix-home-path"]
+condition = "AND"
+paths = ['''^crates/cli/src/semantic\.rs$''']
+regexes = ['''^u$''']
+
+[[allowlists]]
+description = "Reviewed false positives: 40-hex commit SHAs (sourcegraph heuristic) and SHA-256 integrity constants (generic key heuristic)"
+targetRules = ["sourcegraph-access-token", "generic-api-key"]
+regexes = [
+  '''^[0-9a-f]{40}$''',
+  '''^F14C339C76DC916D4E3E09C164AB8F28B2DD14844EA691902352720A24AD7C56$''',
+]
