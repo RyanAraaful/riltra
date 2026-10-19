@@ -13,12 +13,12 @@ stay enabled.
 | --- | --- | --- |
 | pre-commit hook | `security/scan.sh staged` | staged changes |
 | pre-push hook | `security/scan.sh outgoing` | commits being pushed + pushed tip tree |
-| CI `security` job (push/PR) | `security/scan.sh range <before/base>..<head>` + `security/scan.sh tree` | new commits (all commits on a new branch) + whole committed tree |
-| manual | `security/scan.sh tree \| range A..B \| dir <path>` | as requested |
+| CI `security` job (push/PR) | `security/scan.sh range <before/base>..<head>` (new branch: `security/scan.sh new-branch <default>` = merge-base..HEAD) + `security/scan.sh tree` | commits introduced by this push/branch + whole committed tree |
+| manual | `security/scan.sh tree \| range A..B \| new-branch <default> \| dir <path>` | as requested |
 
 Exit codes: `0` clean, `1` findings, `3` scanner unavailable (fail-closed),
-`4` usage or config error. Findings are printed redacted; secret values are
-never echoed.
+`4` usage, config or preflight error (an unavailable merge-base fails closed).
+Findings are printed redacted; secret values are never echoed.
 
 Environment: `GITLEAKS_BIN` (scanner binary; default `gitleaks` from `PATH`),
 `GITLEAKS_CONFIG` (default: this repository's `.gitleaks.toml`).
@@ -56,9 +56,11 @@ directories and checks: blocked fixtures (credential, user-profile, drive and
 UNC path shapes; slash and JSON-escaped variants), allowed fixtures (relative
 paths, placeholders, system/runner paths), secret redaction, fail-closed
 behavior when the scanner is missing, ignored-but-committed files, staged
-changes, outgoing commits, revision ranges, per-file allowlists (a new file in
-`security/testdata/` is still detected), and a clean-tree check of this
-repository.
+changes, outgoing commits, revision ranges, new-branch merge-base scanning
+(including missing ref/merge-base fail-closed cases), fingerprint ignores (the
+exact finding is suppressed, similar content and paths are not), per-file
+allowlists (a new file in `security/testdata/` is still detected), and a
+clean-tree check of this repository.
 
 Allowlists in `.gitleaks.toml` are intentionally narrow and documented inline:
 the verified blocker fixtures (listed one file at a time, never the directory),
@@ -67,4 +69,7 @@ personal), OS-owned Windows directories, verified synthetic path literals in
 unit tests, and two reviewed false positives (40-hex commit SHAs matched by the
 `sourcegraph-access-token` heuristic, and SHA-256 integrity constants matched
 by `generic-api-key`). No blanket allowlists (directories, `*.log`, `*.json`)
-are used.
+are used. The two superseded synthetic findings from the earlier fixture
+revision are pinned by fingerprint in `.gitleaksignore`; these exceptions are
+temporary and must be re-evaluated and removed after the history rewrite
+(`history-rewrite-plan.md`).

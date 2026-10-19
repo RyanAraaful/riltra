@@ -35,6 +35,11 @@ All eight branches contain at least one affected commit; the two findings in
 that synthetic literal to the replacement list or accept the two findings;
 preferred is to replace it so the post-rewrite scan is clean.
 
+Until the rewrite lands, those two findings are pinned by fingerprint in
+`.gitleaksignore` so new-branch merge-base scans pass without allowlisting the
+path or the rule. The entries are temporary: remove and re-evaluate them after
+the rewrite, when the full-history scan must be clean without them.
+
 ## Replacement scheme
 
 Same placeholders as the current-tree sanitization:

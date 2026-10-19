@@ -7,6 +7,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(git -C "$HERE" rev-parse --show-toplevel)"
 SCAN="$HERE/scan.sh"
 TD="$HERE/testdata"
+DEFAULT_BRANCH=master
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 PASS=0
@@ -135,6 +136,98 @@ if [ "$got" -eq 0 ]; then ok "empty range passes"; else no "empty range passes (
 ( cd "$ROOT" && "$SCAN" tree ) >"$TMP/tree.out" 2>&1
 got=$?
 if [ "$got" -eq 0 ]; then ok "repository tree is clean"; else no "repository tree is clean (want exit 0, got $got; see $TMP/tree.out)"; fi
+
+# New-branch pushes scan only commits introduced after the merge-base with the
+# default branch; an unavailable default ref or merge-base fails closed.
+nbrepo="$TMP/newbranch-case"
+mkdir -p "$nbrepo"
+git -C "$nbrepo" init -q
+printf 'clean\n' >"$nbrepo/README.md"
+git -C "$nbrepo" add README.md
+git -C "$nbrepo" -c user.name=scan-test -c user.email=scan-test@example.invalid -c commit.gpgsign=false commit -q -m "clean base"
+cp "$TD/blocked/local-drive-path.txt" "$nbrepo/default-leak.txt"
+git -C "$nbrepo" add default-leak.txt
+git -C "$nbrepo" -c user.name=scan-test -c user.email=scan-test@example.invalid -c commit.gpgsign=false commit -q -m "historical leak on default branch"
+git -C "$nbrepo" update-ref refs/remotes/origin/main "$(git -C "$nbrepo" rev-parse HEAD)"
+git -C "$nbrepo" checkout -q -b feature
+printf 'clean\n' >"$nbrepo/feature.txt"
+git -C "$nbrepo" add feature.txt
+git -C "$nbrepo" -c user.name=scan-test -c user.email=scan-test@example.invalid -c commit.gpgsign=false commit -q -m "clean feature commit"
+
+( cd "$nbrepo" && "$SCAN" new-branch main ) >"$TMP/newbranch-clean.out" 2>&1
+got=$?
+if [ "$got" -eq 0 ]; then ok "new branch passes when the only leak predates the merge-base"; else no "new branch passes when the only leak predates the merge-base (want exit 0, got $got; see $TMP/newbranch-clean.out)"; fi
+
+cp "$TD/blocked/local-drive-path.txt" "$nbrepo/own-leak.txt"
+git -C "$nbrepo" add own-leak.txt
+git -C "$nbrepo" -c user.name=scan-test -c user.email=scan-test@example.invalid -c commit.gpgsign=false commit -q -m "introduce leak"
+( cd "$nbrepo" && "$SCAN" new-branch main ) >"$TMP/newbranch-leak.out" 2>&1
+got=$?
+if [ "$got" -eq 1 ]; then ok "new branch blocks a leak it introduces"; else no "new branch blocks a leak it introduces (want exit 1, got $got)"; fi
+
+noref="$TMP/newbranch-noref"
+mkdir -p "$noref"
+git -C "$noref" init -q
+printf 'clean\n' >"$noref/README.md"
+git -C "$noref" add README.md
+git -C "$noref" -c user.name=scan-test -c user.email=scan-test@example.invalid -c commit.gpgsign=false commit -q -m "clean base"
+( cd "$noref" && "$SCAN" new-branch main ) >"$TMP/newbranch-noref.out" 2>&1
+got=$?
+if [ "$got" -eq 4 ] && grep -q "fail-closed" "$TMP/newbranch-noref.out"; then ok "new branch without the default ref fails closed"; else no "new branch without the default ref fails closed (want exit 4 with fail-closed message, got $got; see $TMP/newbranch-noref.out)"; fi
+
+first_branch="$(git -C "$noref" symbolic-ref --short HEAD)"
+git -C "$noref" checkout -q --orphan unrelated
+printf 'other\n' >"$noref/other.txt"
+git -C "$noref" add other.txt
+git -C "$noref" -c user.name=scan-test -c user.email=scan-test@example.invalid -c commit.gpgsign=false commit -q -m "unrelated root"
+git -C "$noref" update-ref refs/remotes/origin/main "$(git -C "$noref" rev-parse HEAD)"
+git -C "$noref" checkout -q "$first_branch"
+( cd "$noref" && "$SCAN" new-branch main ) >"$TMP/newbranch-unrelated.out" 2>&1
+got=$?
+if [ "$got" -eq 4 ] && grep -q "merge-base" "$TMP/newbranch-unrelated.out"; then ok "new branch without a merge-base fails closed"; else no "new branch without a merge-base fails closed (want exit 4 with merge-base message, got $got; see $TMP/newbranch-unrelated.out)"; fi
+
+# Fingerprint ignores are exact: the synthetic historical finding is ignored,
+# while similar content or a new path is still detected.
+ignrepo="$TMP/ignore-case"
+mkdir -p "$ignrepo/security/testdata/allowed"
+git -C "$ignrepo" init -q
+printf 'clean\n' >"$ignrepo/README.md"
+git -C "$ignrepo" add README.md
+git -C "$ignrepo" -c user.name=scan-test -c user.email=scan-test@example.invalid -c commit.gpgsign=false commit -q -m "clean base"
+ignbase="$(git -C "$ignrepo" rev-parse HEAD)"
+cp "$TD/blocked/local-drive-path.txt" "$ignrepo/security/testdata/allowed/drive-paths.txt"
+git -C "$ignrepo" add security/testdata/allowed/drive-paths.txt
+git -C "$ignrepo" -c user.name=scan-test -c user.email=scan-test@example.invalid -c commit.gpgsign=false commit -q -m "historical synthetic finding"
+hist="$(git -C "$ignrepo" rev-parse HEAD)"
+( cd "$ignrepo" && "$SCAN" range "$ignbase..$hist" ) >"$TMP/ignore-red.out" 2>&1
+got=$?
+if [ "$got" -eq 1 ]; then ok "historical synthetic finding fails without an ignore fingerprint"; else no "historical synthetic finding fails without an ignore fingerprint (want exit 1, got $got)"; fi
+
+printf '%s\n' "$hist:security/testdata/allowed/drive-paths.txt:local-absolute-path:2" >"$ignrepo/.gitleaksignore"
+( cd "$ignrepo" && "$SCAN" range "$ignbase..$hist" ) >"$TMP/ignore-green.out" 2>&1
+got=$?
+if [ "$got" -eq 0 ]; then ok "exact fingerprint ignores the historical synthetic finding"; else no "exact fingerprint ignores the historical synthetic finding (want exit 0, got $got; see $TMP/ignore-green.out)"; fi
+
+cp "$TD/blocked/local-drive-path.txt" "$ignrepo/security/testdata/allowed/drive-paths-copy.txt"
+git -C "$ignrepo" add security/testdata/allowed/drive-paths-copy.txt
+git -C "$ignrepo" -c user.name=scan-test -c user.email=scan-test@example.invalid -c commit.gpgsign=false commit -q -m "same content, new path"
+( cd "$ignrepo" && "$SCAN" range "$ignbase..HEAD" ) >"$TMP/ignore-path.out" 2>&1
+got=$?
+if [ "$got" -eq 1 ]; then ok "similar content at a new path stays blocked"; else no "similar content at a new path stays blocked (want exit 1, got $got)"; fi
+
+git -C "$ignrepo" rm -q security/testdata/allowed/drive-paths-copy.txt
+cp "$TD/blocked/local-drive-path-alt-slash.txt" "$ignrepo/security/testdata/allowed/drive-paths.txt"
+git -C "$ignrepo" add security/testdata/allowed/drive-paths.txt
+git -C "$ignrepo" -c user.name=scan-test -c user.email=scan-test@example.invalid -c commit.gpgsign=false commit -q -m "new content in the ignored file"
+( cd "$ignrepo" && "$SCAN" range "$ignbase..HEAD" ) >"$TMP/ignore-content.out" 2>&1
+got=$?
+if [ "$got" -eq 1 ]; then ok "new content in the ignored file stays blocked"; else no "new content in the ignored file stays blocked (want exit 1, got $got)"; fi
+
+# The two historical synthetic findings pinned in .gitleaksignore must not fail
+# the real branch range scan.
+( cd "$ROOT" && "$SCAN" new-branch "$DEFAULT_BRANCH" ) >"$TMP/historical-range.out" 2>&1
+got=$?
+if [ "$got" -eq 0 ]; then ok "documented historical findings do not fail the new-branch scan"; else no "documented historical findings do not fail the new-branch scan (want exit 0, got $got; see $TMP/historical-range.out)"; fi
 
 echo
 echo "scan-tests: $PASS passed, $FAIL failed"

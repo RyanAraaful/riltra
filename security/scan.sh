@@ -4,6 +4,7 @@
 # Modes:
 #   tree               scan the committed tree of HEAD
 #   range <revrange>   scan commits in a git revision range (e.g. base..head)
+#   new-branch <base>  scan commits a new branch introduced (merge-base..HEAD)
 #   staged             scan staged changes (pre-commit hook)
 #   outgoing           scan commits being pushed, read from pre-push stdin (+ tip trees)
 #   dir <path>         scan an arbitrary directory
@@ -12,7 +13,7 @@
 #   GITLEAKS_BIN     scanner binary (default: gitleaks from PATH)
 #   GITLEAKS_CONFIG  config file (default: <this script's repository>/.gitleaks.toml)
 #
-# Exit codes: 0 clean | 1 findings | 3 scanner unavailable | 4 usage/config error.
+# Exit codes: 0 clean | 1 findings | 3 scanner unavailable | 4 usage/config/preflight error.
 set -u
 set -o pipefail
 
@@ -53,6 +54,20 @@ case "$mode" in
   range)
     [ $# -eq 1 ] || usage
     run_git --log-opts="$1"
+    ;;
+  new-branch)
+    [ $# -eq 1 ] || usage
+    base_ref="refs/remotes/origin/$1"
+    if ! git rev-parse --verify --quiet "$base_ref" >/dev/null; then
+      echo "scan: fail-closed: $base_ref is unavailable; fetch the default branch before scanning a new branch" >&2
+      exit 4
+    fi
+    base="$(git merge-base HEAD "$base_ref")" || base=""
+    if [ -z "$base" ]; then
+      echo "scan: fail-closed: no merge-base between HEAD and $base_ref; refusing to scan unbounded history" >&2
+      exit 4
+    fi
+    run_git --log-opts="$base..HEAD"
     ;;
   staged)
     run_git --staged

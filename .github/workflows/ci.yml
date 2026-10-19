@@ -47,9 +47,13 @@ jobs:
       - name: Scan pushed commits
         if: github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000'
         run: security/scan.sh range "${{ github.event.before }}..${{ github.sha }}"
-      - name: Scan all commits (new branch push)
+      - name: Scan new branch commits
         if: github.event_name == 'push' && github.event.before == '0000000000000000000000000000000000000000'
-        run: security/scan.sh range "--all"
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          git fetch --no-tags origin "+refs/heads/$DEFAULT_BRANCH:refs/remotes/origin/$DEFAULT_BRANCH"
+          security/scan.sh new-branch "$DEFAULT_BRANCH"
       - name: Scan committed tree
         run: security/scan.sh tree
       - name: Scanner regression tests
