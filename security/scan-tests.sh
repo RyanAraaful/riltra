@@ -42,10 +42,16 @@ expect_code "win-user-path json-escaped blocked" 1 "$TD/blocked/win-user-path-js
 expect_code "unix-home-path blocked" 1 "$TD/blocked/unix-home-path.txt"
 expect_code "synthetic token blocked" 1 "$TD/blocked/synthetic-token.txt"
 
+# absolute workspace paths outside user profiles must be detected
+expect_code "local drive path blocked" 1 "$TD/blocked/local-drive-path.txt"
+expect_code "local drive path alt-slash blocked" 1 "$TD/blocked/local-drive-path-alt-slash.txt"
+expect_code "local drive path json-escaped blocked" 1 "$TD/blocked/local-drive-path-json.txt"
+expect_code "UNC path blocked" 1 "$TD/blocked/unc-path.txt"
+
 # 6-8: allowed fixtures must pass
 expect_code "relative path allowed" 0 "$TD/allowed/relative-path.txt"
 expect_code "env placeholders allowed" 0 "$TD/allowed/env-placeholders.txt"
-expect_code "harmless drive paths allowed" 0 "$TD/allowed/drive-paths.txt"
+expect_code "system and runner paths allowed" 0 "$TD/allowed/drive-paths.txt"
 
 # 9: scanner output must not contain the secret value
 d="$(case_dir "$TD/blocked/synthetic-token.txt")"
@@ -81,6 +87,49 @@ git -C "$repo" add staged-leak.txt
 ( cd "$repo" && "$SCAN" staged ) >"$TMP/staged.out" 2>&1
 got=$?
 if [ "$got" -eq 1 ]; then ok "staged leak is blocked"; else no "staged leak is blocked (want exit 1, got $got)"; fi
+
+# allowlists are per fixture file, not per directory: a new file under
+# security/testdata is still scanned even though the known fixtures are allowed
+SCANNER="${GITLEAKS_BIN:-gitleaks}"
+( cd "$ROOT" && "$SCANNER" dir --config "$ROOT/.gitleaks.toml" --redact --no-banner security/testdata ) >"$TMP/testdata-scan.out" 2>&1
+got=$?
+if [ "$got" -eq 0 ]; then ok "known fixtures are allowlisted by exact path"; else no "known fixtures are allowlisted by exact path (want exit 0, got $got; see $TMP/testdata-scan.out)"; fi
+
+unlisted="$TD/blocked/zz-unlisted-leak.txt"
+printf 'C:/Users/%s/unlisted-leak.txt\n' "$TEST_USER" >"$unlisted"
+( cd "$ROOT" && "$SCANNER" dir --config "$ROOT/.gitleaks.toml" --redact --no-banner security/testdata ) >"$TMP/unlisted.out" 2>&1
+got=$?
+rm -f "$unlisted"
+if [ "$got" -eq 1 ]; then ok "unlisted file under security/testdata is detected"; else no "unlisted file under security/testdata is detected (want exit 1, got $got; see $TMP/unlisted.out)"; fi
+
+# push (outgoing) and range modes detect leaks in commit history
+pushrepo="$TMP/push-case"
+mkdir -p "$pushrepo"
+git -C "$pushrepo" init -q
+printf 'clean\n' >"$pushrepo/README.md"
+git -C "$pushrepo" add README.md
+git -C "$pushrepo" -c user.name=scan-test -c user.email=scan-test@example.invalid -c commit.gpgsign=false commit -q -m "clean base"
+base=$(git -C "$pushrepo" rev-parse HEAD)
+cp "$TD/blocked/local-drive-path.txt" "$pushrepo/push-leak.txt"
+git -C "$pushrepo" add push-leak.txt
+git -C "$pushrepo" -c user.name=scan-test -c user.email=scan-test@example.invalid -c commit.gpgsign=false commit -q -m "leak"
+leak=$(git -C "$pushrepo" rev-parse HEAD)
+
+printf 'refs/heads/main %s refs/heads/main %s\n' "$base" "0000000000000000000000000000000000000000" | ( cd "$pushrepo" && "$SCAN" outgoing ) >"$TMP/outgoing-clean.out" 2>&1
+got=$?
+if [ "$got" -eq 0 ]; then ok "outgoing clean commits pass"; else no "outgoing clean commits pass (want exit 0, got $got)"; fi
+
+printf 'refs/heads/main %s refs/heads/main %s\n' "$leak" "0000000000000000000000000000000000000000" | ( cd "$pushrepo" && "$SCAN" outgoing ) >"$TMP/outgoing-leak.out" 2>&1
+got=$?
+if [ "$got" -eq 1 ]; then ok "outgoing leak is blocked"; else no "outgoing leak is blocked (want exit 1, got $got)"; fi
+
+( cd "$pushrepo" && "$SCAN" range "$base..$leak" ) >"$TMP/range-leak.out" 2>&1
+got=$?
+if [ "$got" -eq 1 ]; then ok "range leak is blocked"; else no "range leak is blocked (want exit 1, got $got)"; fi
+
+( cd "$pushrepo" && "$SCAN" range "$leak..$leak" ) >"$TMP/range-empty.out" 2>&1
+got=$?
+if [ "$got" -eq 0 ]; then ok "empty range passes"; else no "empty range passes (want exit 0, got $got)"; fi
 
 # 13: this repository's committed tree is clean
 ( cd "$ROOT" && "$SCAN" tree ) >"$TMP/tree.out" 2>&1

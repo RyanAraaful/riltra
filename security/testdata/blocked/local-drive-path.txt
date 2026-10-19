@@ -1,0 +1,2 @@
+Synthetic fixture (no real data): absolute Windows workspace path, backslash form.
+Project: Z:\development\example-project

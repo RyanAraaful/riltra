@@ -1,0 +1,2 @@
+Synthetic fixture (no real data): UNC share workspace path.
+Share: \\example-server\share\project
