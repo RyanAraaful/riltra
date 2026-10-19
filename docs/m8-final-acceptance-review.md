@@ -15,6 +15,11 @@ anything, and does not start M9. The acceptance decision belongs to the owner.
 - No code, benchmark, corpus, rubric, golden, schema, or dependency change; no
   benchmark rerun; no frozen score is reinterpreted as a new score
 
+> **Post-review resolution (added 2026-10-19, after this review was written):**
+> the owner accepted M8 with the documented G1 exception and G3 limitation —
+> see [`m8-owner-acceptance.md`](m8-owner-acceptance.md)
+> (**OWNER ACCEPTED — M8 CLOSED**). The review below is unchanged.
+
 ## 1. Scope, method, and precedence
 
 Precedence applied:
