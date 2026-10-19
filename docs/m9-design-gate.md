@@ -1,6 +1,8 @@
 # M9 design gate — multi-repo release readiness (MMSP-first pilot)
 
-**Status: PROPOSED — AWAIT OWNER REVIEW.**
+**Status: PROPOSED — AWAIT OWNER REVIEW.** (Revision 2, 2026-10-19: F1–F4
+corrections, G-TOK reconciliation policy, and owner decisions D-M9-1..D-M9-6
+recorded in §6.)
 
 This document is a design proposal only. It authorizes no implementation, no
 checkpoint execution, no benchmark run, no MMSP modification, no packaging, no
@@ -190,18 +192,27 @@ contains none of them.
   `.inl` 37, `.c` 34, `.cpp` 14 (plus `.cmake` 12, `.cuh` 2, smaller sets).
 - `colmap/src/colmap/` modules (files): estimators 109, ui 102, scene 74,
   util 62, mvs 56, controllers 49, geometry 35, feature 34, optim 29.
-- CUDA is concentrated in vendored/generated third-party code: 484 of the 487
-  `.cu` files live under `colmap/src/thirdparty/` (Symforce-Caspar 980 files,
-  PoissonRecon 99, VLFeat 77). First-party CUDA translation units are five:
-  `feature/sift_gpu_native.cu`, `mvs/gpu_mat_prng.cu`,
+- CUDA inventory (tracked files, recomputed 2026-10-19 via `git ls-files` at
+  `d62f06a`; classification proven by tree paths): total `.cu` **487** =
+  third-party **482** + first-party **5**; total `.cuh` **2** = third-party
+  **2** + first-party **0**; combined `.cu + .cuh` = **489**. All 482
+  third-party `.cu` live under `colmap/src/thirdparty/Symforce-Caspar/`
+  (Symforce-Caspar 980 tracked files; the other vendored trees, PoissonRecon
+  99 / VLFeat 77, contain no tracked `.cu`). The two third-party `.cuh` are
+  generated headers (`Symforce-Caspar/generated/f32/memops.cuh`,
+  `.../generated/f64/memops.cuh`). The five first-party CUDA translation
+  units: `feature/sift_gpu_native.cu`, `mvs/gpu_mat_prng.cu`,
   `mvs/gpu_mat_ref_image.cu`, `mvs/gpu_mat_test.cu`,
-  `mvs/patch_match_cuda.cu`; the two `.cuh` files are generated third-party
-  headers. `.cu/.cuh` are unsupported by Riltra by policy (see §1.3) — the
-  pilot must expect **labeled unsupported output** for every one of them
-  (489 tracked: 487 `.cu` + 2 `.cuh`) and must not imply CUDA semantic
-  support. The M2 walk's reported 562 `.cu` reconciles as 487 tracked plus 75
-  untracked build-tree copies in `colmap/build-mx150/` (verified 2026-10-19);
-  a clean snapshot clone carries only the 489 tracked files.
+  `mvs/patch_match_cuda.cu`.
+- Ignored/untracked build-tree copies are a separate inventory category: 75
+  `.cu` copies under `colmap/build-mx150/` — never read or used, and absent
+  from a clean pinned clone. The M2 walk's reported 562 `.cu` reconciles as
+  487 tracked + 75 build-tree copies (verified via `git ls-files` 2026-10-19);
+  a clean snapshot clone carries only the 489 tracked `.cu/.cuh` files.
+- `.cu/.cuh` remain **unsupported by Riltra by policy** (see §1.3) — this
+  inventory correction does not change that: the pilot must still expect
+  **labeled unsupported output** for every tracked `.cu/.cuh` file and must
+  not imply CUDA syntax or semantic support.
 
 ### 2.3 Build system and compilation database status
 
@@ -213,14 +224,15 @@ contains none of them.
   `compile_commands.json` at the repository root or `build/` (checked), no
   `CMAKE_EXPORT_COMPILE_COMMANDS` anywhere in the tree, no `.clangd` file.
   `.clang-tidy` exists (warnings-as-errors profile).
-- Consequence for G-SEM: any C++ semantic provider (e.g. clangd) needs a
-  generated compilation database; CMake only exports it with Makefile/Ninja
-  generators (Context7-verified: `CMAKE_EXPORT_COMPILE_COMMANDS`, CMake ≥3.5,
-  ignored on other generators), and clangd discovers it in parent directories
-  and `build/` subdirectories (Context7-verified). Generating one requires a
-  CMake configure on an isolated copy — not a build — and requires explicit
-  owner approval (decision D-M9-2). Nothing is installed or generated in this
-  design task.
+- Consequence for G-SEM: a future C++ semantic provider (e.g. clangd) would
+  need a generated compilation database; CMake only exports it with
+  Makefile/Ninja generators (Context7-verified: `CMAKE_EXPORT_COMPILE_COMMANDS`,
+  CMake ≥3.5, ignored on other generators), and clangd discovers it in parent
+  directories and `build/` subdirectories (Context7-verified). This is
+  recorded for a potential later proposal only: **D-M9-2 is deferred** — no
+  clangd configuration or integration happens in M9 baseline work, and any
+  future attempt needs its own evidence plus OWNER GO (§4, G-SEM). Nothing is
+  installed or generated in this design task.
 
 ### 2.4 Documentation and licensing surface (tracked)
 
@@ -276,8 +288,10 @@ M9 continues from the identical commit, which keeps the baseline continuous.
 
 - CUDA (`.cu/.cuh`): syntax and semantic support **absent**; every pilot report
   states unsupported counts, never coverage.
-- C++ semantic: no provider has ever been pointed at C++/MMSP (M5 scope); any
-  G-SEM claim requires the D-M9-2 decision plus a verified pilot.
+- C++ semantic: no provider has ever been pointed at C++/MMSP (M5 scope);
+  clangd is deferred (D-M9-2), so C++ semantics stay NOT YET VERIFIED in M9
+  and must never be claimed from syntax output; a future attempt requires a
+  separate evidence-backed proposal plus OWNER GO.
 - Scale ambiguity: MMSP has heavy third-party/generated content; first-party
   error counts are the meaningful signal (55 at M2) and are re-measured, not
   extrapolated.
@@ -302,8 +316,9 @@ M9 continues from the identical commit, which keeps the baseline continuous.
 - Toolchain: rustc/cargo/git versions; build profile recorded per run (M3/M4
   used a debug binary; CP2 repeats that profile for comparability and may add
   one release-profile cold index if the owner wants it).
-- Semantic provider availability: record clangd/scip tool presence and
-  versions (informational; nothing installed or run without D-M9-2 approval).
+- Semantic provider availability: record available provider tooling and
+  versions (informational only; nothing installed or run; clangd is deferred
+  per D-M9-2).
 - `RILTRA_HOME` isolated at `<BENCH_ROOT>\home`; registry contains only the
   snapshot repository.
 
@@ -361,14 +376,14 @@ Matrix summary (release-gate status at M9 entry; details per gate below):
 | G-CLI | stable CLI and JSON | goldens; CP7-A G5 PASS | NOT YET VERIFIED |
 | G-MCP | OpenCode interoperability | CP7-A revised G6 PASS; G4/G5 PASS | NOT YET VERIFIED |
 | G-SYN | source-verified syntax | M2 goldens + MMSP full-tree scan | NOT YET VERIFIED (M9 scope) |
-| G-SEM | semantic providers | M5 PASS (fixtures); C++/CUDA none | NOT YET VERIFIED |
+| G-SEM | semantic providers | M5 PASS (rust-analyzer + scip-typescript, two families) | NOT YET VERIFIED |
 | G-GRF | graph correctness and safety | M6 PASS (fixtures); CP7-A G2 PASS | NOT YET VERIFIED (MMSP scope) |
 | G-FSH | freshness | M3/M4 PASS; MMSP honest staleness | NOT YET VERIFIED (M9 matrix) |
 | G-INC | incremental correctness/perf | M4 PASS; MMSP 13.5× delta | NOT YET VERIFIED (M9 procedure) |
 | G-KNW | knowledge graph | M7 PASS — CLOSED | NOT YET VERIFIED (release) |
-| G-TOK | token/task effectiveness | CP7-A G3 PASS (−30.5%) | NOT YET VERIFIED (candidate) |
+| G-TOK | token/task effectiveness | CP7-A G3 PASS (−30.5%, historical; D-M9-4) | NOT YET VERIFIED (CP4 reuse review) |
 | G-SEC | filesystem, isolation, recovery | M1/M7/M8 + WAL audit + fix | NOT YET VERIFIED (release) |
-| G-PAR | parallel/index performance | — (M10 target) | not an M9 gate |
+| G-PAR | competitive validity (≥3 of 5 pre-registered dimensions) | — (M10 target) | not an M9 gate |
 
 ### G-LIC — License inventory, SBOM, notices
 
@@ -483,27 +498,39 @@ Matrix summary (release-gate status at M9 entry; details per gate below):
 
 ### G-SEM — Semantic providers
 
-- **Requirement.** Semantic answers come only from explicit providers with
-  honest verification (`Unverified`/`Stale`; `Current` unreachable), enforced
-  trust boundary, and no claim beyond provider coverage. C++ and CUDA
-  semantics are unproven and must stay labeled.
+- **Requirement.** Minimum two semantic providers from different language
+  families, at least one of them C/C++ or TypeScript, must carry
+  source-grounded definitions/references evidence. Semantic answers come only
+  from explicit providers with honest verification (`Unverified`/`Stale`;
+  `Current` unreachable), enforced trust boundary, and no claim beyond
+  provider coverage. C++ semantics on MMSP are unproven (clangd deferred by
+  D-M9-2), CUDA semantics are unsupported, and a syntax graph must never be
+  promoted to a verified semantic graph.
 - **Existing evidence.** M5 registry + trust boundary + two real-provider
-  fixture pilots (rust-analyzer, scip-typescript); MMSP+SCIP at scale
+  fixture pilots from different language families: rust-analyzer (Rust) and
+  scip-typescript (TypeScript — satisfies the C/C++-or-TypeScript clause)
+  with source-grounded definitions/references evidence. MMSP+SCIP at scale
   explicitly out of scope; no C++ provider ever run.
-- **Provable via MMSP.** Only with decision D-M9-2: clangd against a
-  compilation database generated (configure-only) on an isolated copy via a
-  Ninja/Makefile generator with `CMAKE_EXPORT_COMPILE_COMMANDS` (CMake ≥3.5;
-  ignored on other generators — Context7-verified). Default without approval:
-  syntax-only, gap recorded.
+- **Provable via MMSP.** Not for C++ in M9: D-M9-2 defers clangd until
+  baseline MMSP correctness evidence demonstrates a justified requirement;
+  early CP1/CP2 work focuses on syntax/graph correctness. A proven need later
+  requires a separate proposal with evidence and OWNER GO before any clangd
+  configuration or integration. Default: syntax-only on MMSP and the C++
+  semantic gap recorded as NOT YET VERIFIED.
 - **Needs Riltra/release artifacts.** Provider policy at release; tooling
-  entries recorded; fallback behavior verified.
-- **Gaps.** C++ semantic unproven; CUDA semantic unsupported; scale unproven;
-  no compilation database exists in MMSP today.
-- **Acceptance test (if approved).** clangd def/ref on first-party MMSP files,
-  spots verified by eye, `Unverified` surfaced, failure paths return fallback
-  JSON. Else: documented NOT YET VERIFIED with reason.
-- **STOP.** Untrusted-server constraints bypassed, silent installs, or
-  unverified semantic claims.
+  entries recorded; fallback behavior verified; documented statement that
+  MMSP pilot accuracy claims are bounded by provider coverage (no C++ provider
+  covers MMSP in M9).
+- **Gaps.** C++ semantic unproven on MMSP; CUDA semantic unsupported; semantic
+  scale unproven; no compilation database exists in MMSP today.
+- **Acceptance test.** The two-provider/two-family minimum (one of them
+  TypeScript or C/C++) is re-verified on the release candidate with
+  source-grounded definitions/references evidence archived; C++ gaps on MMSP
+  are labeled NOT YET VERIFIED with the deferral reason; no syntax candidate
+  is promoted under a semantic label. (No clangd acceptance path in M9.)
+- **STOP.** Untrusted-server constraints bypassed, silent installs, any
+  provider configured without its own OWNER GO, or unverified semantic
+  claims.
 
 ### G-GRF — Graph correctness and safety
 
@@ -582,22 +609,33 @@ Matrix summary (release-gate status at M9 entry; details per gate below):
 
 - **Requirement.** Measured tokens per completed task for MCP no worse than
   the CLI arm under frozen rules; no universal or competitive claim.
-- **Existing evidence.** CP7-A G3 PASS: 16,764.5 vs 24,134.7 gross per
-  completed task (−30.5%; −36.0% on shared tasks); recorded limitations
-  (frozen-rule timing deviation on one pilot task, one run per task,
-  free-tier model, single Windows host, provider-reported tokens).
+- **Existing evidence (historical, D-M9-4).** CP7-A G3 PASS, frozen:
+  16,764.5 vs 24,134.7 gross per completed task (−30.5%; −36.0% on shared
+  tasks); recorded limitations (frozen-rule timing deviation on one pilot
+  task, one run per task, free-tier model, single Windows host,
+  provider-reported tokens). The CP7-A archive — raw evidence, token rules,
+  scores, and rubric — is frozen and must not be edited; it is kept as
+  recorded historical evidence.
 - **Provable via MMSP.** No — MMSP is a measurement target repository, not an
   agent-efficiency corpus; token measurement is a client experiment in the
   CP7-A style.
-- **Needs Riltra/release artifacts.** Decision D-M9-4: accept CP7-A as the
-  recorded G-TOK evidence, or authorize a small release-candidate re-run
-  under the same frozen rules (labeled as a fresh measurement; frozen scores
-  are never replaced).
-- **Gaps.** Single-host/single-model scope; no automation.
-- **Acceptance test.** Frozen-rule measurement with reconciliation checks and
-  archived raw sessions; limitations restated verbatim.
-- **STOP.** Metric substitution, recomputation of frozen results, or
-  extrapolated claims.
+- **Release evidence applicability review (CP4).** At CP4, evaluate whether
+  changes after M8 materially affect MCP output, task outcomes, or token
+  consumption. If the relevant behavior is unchanged, document the rationale
+  for relying on CP7-A for release-candidate acceptance. If there is a
+  material change, or the evidence is insufficient, mark G-TOK NOT YET
+  VERIFIED/BLOCKED and propose a new measurement for OWNER GO. Any approved
+  re-run is a new, separately labeled measurement and never replaces CP7-A.
+  A milestone-level historical PASS alone is never reported as G-TOK release
+  PASS.
+- **Gaps.** Single-host/single-model scope; no automation; the CP4
+  applicability review itself is still pending.
+- **Acceptance test.** Either the CP4 review documents unchanged relevant
+  behavior with concrete diff evidence and rationale, or a separately labeled
+  frozen-rule measurement exists with archived raw sessions and the CP7-A
+  limitations restated.
+- **STOP.** Metric substitution, recomputation of frozen results, declaring
+  release PASS from milestone history, or extrapolated claims.
 
 ### G-SEC — Filesystem, repository isolation, recovery
 
@@ -623,12 +661,15 @@ Matrix summary (release-gate status at M9 entry; details per gate below):
 - **STOP.** Any write inside MMSP, any store created by a read, or any
   confinement bypass.
 
-### G-PAR — (M10 target, not an M9 gate)
+### G-PAR — Competitive validity (M10 target, not an M9 gate)
 
-Concurrency/parallel-index performance remains an M10 objective. Known state:
-multi-repository registry works; concurrent readers are safe (WAL
-single-revision reads; staging promotion); same-repository concurrent builds
-are uncoordinated (documented M3 limitation). No M9 work is proposed.
+G-PAR is an M10 gate, not an M9 gate. PASS requires superiority in at least
+three of five pre-registered measurable dimensions, with no critical
+correctness regression: (1) source-grounded correctness; (2) change
+freshness; (3) changed-file refresh cost; (4) agent token/task success;
+(5) maintainability/deployment burden. M9 does not measure competitors: no
+competitor benchmark and no parallel-implementation work is authorized by
+this design gate (see §7, "No competitor claims").
 
 ## 5. Checkpoint plan (proposal)
 
@@ -659,6 +700,16 @@ requires its own OWNER GO and lands tested, DCO-signed commits with CI green.
   considered **only** if a real gap is proven, and only with an explicit
   owner add-on decision. Deliverable: CP3 gate-evidence report.
   Verification: every updated status cites archived evidence.
+  Simultaneous multi-repo isolation scenario (one isolated `RILTRA_HOME`):
+  register the MMSP pinned snapshot and the Riltra pinned snapshot
+  **together** and exercise the existing registry/query capability only — no
+  new cross-repository relationship feature, no third repository. Acceptance:
+  both repositories appear in the registry; search uses the correct target
+  repository; callers/callees/trace/impact return no cross-repository
+  leakage; freshness verdicts are independent per repository; index/database
+  and generation bindings are never swapped between repositories; the
+  original MMSP and Riltra working trees stay unchanged; every query result
+  carries its repository identity and matching evidence.
 - **CP4 — Packaging and release readiness.**
   Native builds + checksums, clean-install CLI/MCP smokes, SBOM + NOTICE +
   licensing re-check, documented language support matrix and known
@@ -668,29 +719,21 @@ requires its own OWNER GO and lands tested, DCO-signed commits with CI green.
   Verification: G-LIC/G-NAT/G-CLI/G-MCP/G-SEC acceptance tests run on the
   actual candidate.
 
-## 6. Open decisions for owner
+## 6. Owner decisions (approved)
 
-- **D-M9-1 — Pilot pin.** Use `d62f06a…` for CP1 as recorded (default
-  recommendation: yes), or re-pin to a newer MMSP `main` at CP1 time (a new
-  owner decision that invalidates the continuity cited in §2.5).
-- **D-M9-2 — C++ semantic provider.** (a) Approve clangd as an opt-in LSP
-  provider for CP2/CP3 on an isolated MMSP copy, with a compilation database
-  generated by configure-only CMake using a Ninja/Makefile generator
-  (`CMAKE_EXPORT_COMPILE_COMMANDS=ON`; no MMSP modification, no full build,
-  nothing installed without this GO); or (b) keep M9 syntax-only and record
-  G-SEM C++ as NOT YET VERIFIED. The design works either way.
-- **D-M9-3 — Benchmark environment.** Single host with ≥2 cold-index
-  repetitions and explicit variance, identical to the M4 precedent (default),
-  or a stricter policy (more repetitions, pinned power settings).
-- **D-M9-4 — G-TOK evidence.** Accept CP7-A G3 as the recorded evidence
-  (default) or authorize a small, separately labeled release-candidate re-run
-  under the frozen token rules.
-- **D-M9-5 — Additional repositories.** None by default; Python/TS coverage
-  is checked against existing fixtures, and MMSP stays the priority. Any
-  additional repository requires a proven gap plus an explicit owner add-on.
-- **D-M9-6 — Packaging scope.** Plain per-OS archives + checksums + notices
-  (default; no installers, signing infrastructure, or package-manager
-  integrations), unless the owner wants more.
+Recorded 2026-10-19; explicitly approved by the owner. These decisions
+supersede the earlier open-decisions list, change no M8 milestone status, and
+leave every M9 release gate at NOT YET VERIFIED until its own acceptance
+evidence exists.
+
+| Decision | Approved |
+|---|---|
+| D-M9-1 — Pilot pin | Pin MMSP `d62f06a…` for CP1 (continuity per §2.5). |
+| D-M9-2 — C++ semantic provider | DEFER clangd: baseline syntax/graph correctness first; a later proven need requires a separate evidence-backed proposal + OWNER GO before any configuration or integration. |
+| D-M9-3 — Benchmark environment | One host, ≥2 cold-index runs, variance reported (M4 precedent). |
+| D-M9-4 — G-TOK evidence | Keep CP7-A G3 as recorded historical evidence, with the CP4 release evidence applicability review (§4, G-TOK); frozen CP7-A archive untouched. |
+| D-M9-5 — Additional repositories | No additional repository unless a real gap is proven and the owner approves an add-on. |
+| D-M9-6 — Packaging scope | Native per-OS archives + checksums + notices; no new installer or signing infrastructure. |
 
 ## 7. Risks and limitations (carried and new)
 
