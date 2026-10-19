@@ -16,6 +16,14 @@ M8 design accepted; CP1 implementation authorized (dependencies + `riltra mcp`
 skeleton only). The §3 F1 no-implicit-migration guard remains mandatory for
 CP3.
 
+**Revision 3 (2026-10-19) — OpenCode-first (owner decision):** verified
+OpenCode interoperability is required for M8 and the MVP release gates. The
+second-client requirement is superseded only regarding client count (§5 client
+candidates, G6, D5, CP7 interop scope; blueprint G-MCP/M9); Claude Code and
+Codex move to the post-MVP interoperability roadmap. All other gates and all
+prior approvals remain on record. See
+[`m8-opencode-first-amendment.md`](m8-opencode-first-amendment.md).
+
 ## 1. Current-state evidence
 
 All references verified against the tree at `cb40aea`.
@@ -296,6 +304,10 @@ them.
   significant; parser-based comparison, no serializer assumptions), except the
   two composed tools; CLI stdout stays byte-stable under its existing goldens.
 - **G6** Interop: both selected clients complete the smoke corpus.
+  **Revised 2026-10-19 (owner):** real OpenCode interoperability smoke is the
+  M8 requirement; Claude Code is not an M8 prerequisite and remains untested
+  (original G6 BLOCKED result preserved) — see
+  [`m8-opencode-first-amendment.md`](m8-opencode-first-amendment.md).
 - **G7** No M0–M7 regressions: fmt/clippy/check/test plus goldens unchanged on
   all three CI platforms.
 - **G8** Dependency governance: audit allowlist amendment and `licensing.md`
