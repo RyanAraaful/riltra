@@ -46,6 +46,9 @@ jobs:
       - name: Scan pushed commits
         if: github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000'
         run: security/scan.sh range "${{ github.event.before }}..${{ github.sha }}"
+      - name: Scan all commits (new branch push)
+        if: github.event_name == 'push' && github.event.before == '0000000000000000000000000000000000000000'
+        run: security/scan.sh range "--all"
       - name: Scan committed tree
         run: security/scan.sh tree
       - name: Scanner regression tests
