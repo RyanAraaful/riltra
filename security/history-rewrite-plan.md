@@ -12,18 +12,34 @@ are kept as the historical record of that round.
 ## Verified current state (2026-10-20, after the PR #5 merge)
 
 Method: pinned gitleaks 8.30.1 (local SHA-256 checked against the published
-release checksums), this repository's `.gitleaks.toml`, `git log -p --all`,
-and no `.gitleaksignore`. Reproduce with:
+release checksums), this repository's `.gitleaks.toml`, `git log -p --all`.
 
-    gitleaks git --config .gitleaks.toml --redact --no-banner \
-      --log-opts="--all" --gitleaks-ignore-path=<empty-dir> .
+**A no-ignore scan needs an isolated copy.** gitleaks v8.30.1 loads
+`<source>/.gitleaksignore` in addition to `--gitleaks-ignore-path`
+(`cmd/root.go`, `Detector()`), so pointing `-i` at an empty directory does
+**not** produce a scan without the ignore file. The procedure that measures the
+true exposure is: clone the repository into an isolated directory, delete
+`.gitleaksignore` there, and scan that copy with the repository's config.
+
+    git clone https://github.com/RyanAraaful/riltra.git <iso>
+    rm <iso>/.gitleaksignore
+    gitleaks git --config <repo>/.gitleaks.toml --redact --no-banner \
+      --log-opts="--all" --gitleaks-ignore-path=<empty-dir> <iso>
+
+Take the clone from the remote: the local clones' default branches are stale
+(`master` is 11 commits behind `origin/master`).
+
+Both variants are recorded below, because only the second is the true
+exposure and only the first is what CI enforces.
 
 | Item | Value |
 | --- | --- |
-| Full-history findings | 1066 in 8 commits, 183 files |
-| Rule mix | 957 `local-absolute-path`, 94 `windows-user-path`, 15 `unix-home-path` |
+| Full-history findings, ignore file present (what CI enforces) | 1066 in 8 commits, 183 files |
+| Full-history findings, isolated copy without `.gitleaksignore` | 1068 in 9 commits, 184 files |
+| Rule mix (without ignore file) | 959 `local-absolute-path`, 94 `windows-user-path`, 15 `unix-home-path` |
 | Credential-rule findings | 0 |
-| Remote branches | 5 (`master`, `m7-…`, `m8-…`, `m9-…`, `security/privacy-remediation`) |
+| Synthetic fixture findings | 2 per repo (`2538e69`, `security/testdata/allowed/drive-paths.txt:2` and `:4`) |
+| Remote branches | 5 (`master`, `m7-…`, `m8-…`, `m9-…`, `security/privacy-remediation`); the three `m6` task branches are deleted on the remote but still present locally |
 | Commits reachable from all refs | 138 |
 | Pull refs | `refs/pull/1/head` … `refs/pull/5/head` |
 | Tags / notes | none |
@@ -32,37 +48,32 @@ and no `.gitleaksignore`. Reproduce with:
 | `m9` branch tip | `a097e2db` |
 | Scanner regression suite | 32 passed, 0 failed |
 
-Difference against the 2026-10-19 measurement below: the two synthetic
-fixture findings in `2538e69` are no longer reported under the final config,
-and the branch set shrank from eight to five (the three `m6` task branches
-were deleted; their tips are ancestors of `master`). Neither measurement
-contains a credential finding.
+The 2026-10-20 re-measurement confirms the 2026-10-19 numbers above
+(1068 findings in 9 commits and 184 files). The only difference between the
+two variants is the two synthetic fixture findings that the ignore file
+suppresses. No credential finding exists in either variant.
 
-The two `.gitleaksignore` entries are currently **inert**: the new-branch
-scan (`cc963ae..7b9720d`) exits 0 with the file removed as well as with it,
-and the history scan reports no finding in
-`security/testdata/allowed/drive-paths.txt`. Removing the file is a separate,
-owner-approved change; it stays documented as temporary here.
+The two `.gitleaksignore` entries are **load-bearing**: with the file present
+the history scan reports 1066 findings, without it 1068. They stay until the
+rewrite replaces the synthetic literal, and are removed with it.
 
 ## Why a rewrite is needed
 
 The current tree is sanitized on `security/privacy-remediation` and recorded
 in `docs/pilots/cp7a/SANITIZATION.md`, but pre-sanitization bytes remain in
 history. Full-history scan with pinned gitleaks 8.30.1 and the final
-repository `.gitleaks.toml` (`--log-opts=--all`, 2026-10-19):
+repository `.gitleaks.toml` (`--log-opts=--all`, 2026-10-19; re-measured
+2026-10-20 in an isolated copy without `.gitleaksignore`):
 
-- **1068 findings in 9 commits, 184 files** (measured 2026-10-19): 959
-  absolute-path findings (drive-letter workspace paths, mostly the local
-  checkout root), 94 Windows user-profile findings and 15 unix/macOS home
-  findings. The 2026-10-20 re-measurement above gives 1066 in 8 commits and
-  183 files; the difference is the synthetic fixture finding in `2538e69`,
-  which the final config no longer reports.
+- **1068 findings in 9 commits, 184 files**: 959 absolute-path findings
+  (drive-letter workspace paths, mostly the local checkout root), 94 Windows
+  user-profile findings and 15 unix/macOS home findings. The 2026-10-20
+  re-measurement reproduces these numbers.
 - This supersedes the earlier 109-finding count, which used the narrower
   profile-only rule set.
 
-Affected commits as measured on 2026-10-19. The 2026-10-20 re-measurement
-covers the same 8 commits with the same per-commit counts; `2538e69` is no
-longer reported.
+Affected commits as measured on 2026-10-19 and re-measured unchanged on
+2026-10-20 in an isolated copy without `.gitleaksignore`.
 
 | Commit | Date | Subject | Findings |
 | --- | --- | --- | --- |
@@ -77,17 +88,16 @@ longer reported.
 | `d1af757` | 2026-10-19 | chore: M0 open-source bootstrap and legal baseline | 1 |
 
 Five remote branches exist today and all five contain at least one affected
-commit; the three `m6` task branches from the 2026-10-19 round are gone (their
-tips are ancestors of `master`). The two findings in `2538e69` were the old
-synthetic allowed-fixture example (a drive path under
-`security/testdata/allowed/drive-paths.txt`), not personal data. Under the
-final config the scanner no longer reports them, so the replacement-list
-decision for that literal is moot and the post-rewrite scan stays clean
-without it.
+commit; the three `m6` task branches from the 2026-10-19 round are deleted on
+the remote but still present in local clones (their tips are ancestors of
+`master`). The two findings in `2538e69` are the old synthetic allowed-fixture
+example (a drive path under `security/testdata/allowed/drive-paths.txt`), not
+personal data. Add that synthetic literal to the replacement list so the
+post-rewrite scan is clean; preferred over accepting the two findings.
 
-Until the rewrite lands, `.gitleaksignore` still pins those two fingerprints,
-but the pins are inert: the new-branch scan (`cc963ae..7b9720d`) exits 0 with
-the file removed as well as with it. The entries remain temporary: remove and
+Until the rewrite lands, `.gitleaksignore` pins those two fingerprints, and
+the pins are load-bearing: with the file present the history scan reports
+1066 findings, without it 1068. The entries are temporary: remove and
 re-evaluate them after the rewrite, when the full-history scan must be clean
 without them.
 
@@ -130,18 +140,16 @@ replacement list before any real rewrite; do not cite the old zero-finding
 result as proof for the final rule set. The 129-commit baseline above is also
 pre-merge; the current baseline is 138 commits on 5 branches.
 
-The mirror dry-run must additionally cover the scanner's mode gap: a history
-scan (`gitleaks git`) reports no finding in
-`security/testdata/allowed/drive-paths.txt`, while a file scan of the same
-content (`gitleaks dir`) reports two. A clean history scan is therefore not
-sufficient evidence on its own; the literal grep in the verification list is
-mandatory, not optional.
+The mirror dry-run must scan an isolated copy **without** `.gitleaksignore`
+(see "Verified current state" above), so the two synthetic fixture findings
+cannot be hidden by the pins; and it must verify the rewritten content itself,
+not the pre-rewrite SHAs (see the verification list).
 
 Reference mapping from the earlier dry-run (stale; will shift with the final
 list and the newer security commits). The `Old` column is the tip of that
 time; the tips have since moved: `master` is now `cbd38f1` (PR #5 merge, with
 `cc963ae` as the PR #3 merge below it), `m8` is `d1ce68f`, `m9` is `a097e2db`,
-`m7` is `7530102`, and the three `m6` task branches no longer exist.
+`m7` is `7530102`, and the three `m6` task branches are deleted on the remote.
 
 | Old | New | Note |
 | --- | --- | --- |
@@ -216,18 +224,27 @@ cannot guarantee erasure. Record this residual risk in the owner decision.
 
 ## Verification (must pass after the real run)
 
-1. `security/scan.sh range <root>..HEAD` on every branch = clean.
-2. Full-history scan with the final `.gitleaks.toml` = 0 findings
-   (including the synthetic fixture example decision above).
-3. Case-insensitive tree grep over `git rev-list --all` for the replaced
-   prefixes = 0 hits.
+Cleanliness is verified on the **rewritten** content, addressed through the
+new SHA mapping produced by the dry run. Re-checking the old SHAs only proves
+the pre-rewrite state and is not a verification of the rewrite.
+
+1. For every affected commit, take its rewritten SHA from the dry-run mapping
+   and scan the file content **at that new SHA** (`gitleaks dir` on the blob
+   extracted at the new SHA, or the equivalent file-level scan): 0 findings.
+2. Full-history scan of the rewritten mirror with the final `.gitleaks.toml`
+   = 0 findings, run in an isolated copy **without** `.gitleaksignore` so the
+   two synthetic fixture findings cannot be masked by the pins.
+3. Case-insensitive tree grep over `git rev-list --all` of the rewritten
+   mirror for the replaced prefixes = 0 hits.
 4. `git rev-list --all --count` unchanged; DCO sign-off count unchanged.
-5. `bash security/scan-tests.sh` passes on a fresh clone.
+5. `bash security/scan-tests.sh` passes on a fresh clone of the rewritten
+   mirror.
 6. `git ls-remote origin` contains no unexpected surviving refs carrying old
    bytes (branches, tags, notes, pull refs).
-7. File-level spot check of the known path-bearing files at their pre-rewrite
-   SHAs (`gitleaks dir`), because the history scan does not report the
-   synthetic fixture paths that a file scan does.
+7. Content equivalence: for every rewritten commit, the new tree differs from
+   the old tree **only** in the replaced paths (compare the per-file blob IDs
+   of both trees), so "clean" is never achieved by dropping or truncating
+   content.
 
 ## Execution (owner-gated)
 
