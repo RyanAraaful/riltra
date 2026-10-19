@@ -15,7 +15,7 @@
   "artifact_sha256": "64072ab9c055054b1e83beec181926d744a423d38afe81934ecd8c98b4af3db0",
   "scip_producer": {
     "exit": 0,
-    "stdout": "+ E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\code (41ms)\ndone E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\code\\index.scip\n",
+    "stdout": "+ <RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\code (41ms)\ndone <RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\code\\index.scip\n",
     "stderr": "",
     "elapsed_ms": 1174.617,
     "peak_working_set_bytes": 144465920
@@ -23,16 +23,16 @@
   "native_measurements": [
     {
       "label": "ts-init",
-      "exe": "E:\\dev\\Riltra\\target\\debug\\riltra.exe",
+      "exe": "<RILTRA_REPO_ROOT>\\target\\debug\\riltra.exe",
       "args": [
         "init",
         "--repo",
-        "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\code",
+        "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\code",
         "--name",
         "ts"
       ],
-      "cwd": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\code",
-      "home": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\home",
+      "cwd": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\code",
+      "home": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\home",
       "exit": 0,
       "elapsed_ms": 46.535,
       "peak_working_set_bytes": null,
@@ -40,15 +40,15 @@
     },
     {
       "label": "ts-full",
-      "exe": "E:\\dev\\Riltra\\target\\debug\\riltra.exe",
+      "exe": "<RILTRA_REPO_ROOT>\\target\\debug\\riltra.exe",
       "args": [
         "index",
         "--repo",
         "ts",
         "--full"
       ],
-      "cwd": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\code",
-      "home": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\home",
+      "cwd": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\code",
+      "home": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\home",
       "exit": 0,
       "elapsed_ms": 827.769,
       "peak_working_set_bytes": 8208384,
@@ -56,17 +56,17 @@
     },
     {
       "label": "ts-import",
-      "exe": "E:\\dev\\Riltra\\target\\debug\\riltra.exe",
+      "exe": "<RILTRA_REPO_ROOT>\\target\\debug\\riltra.exe",
       "args": [
         "semantic",
         "import",
         "--repo",
         "ts",
         "--scip",
-        "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\code\\index.scip"
+        "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\code\\index.scip"
       ],
-      "cwd": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\code",
-      "home": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\home",
+      "cwd": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\code",
+      "home": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\home",
       "exit": 0,
       "elapsed_ms": 211.367,
       "peak_working_set_bytes": 8163328,
@@ -74,7 +74,7 @@
     },
     {
       "label": "ts-callers",
-      "exe": "E:\\dev\\Riltra\\target\\debug\\riltra.exe",
+      "exe": "<RILTRA_REPO_ROOT>\\target\\debug\\riltra.exe",
       "args": [
         "callers",
         "--repo",
@@ -86,8 +86,8 @@
         "--col",
         "17"
       ],
-      "cwd": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\code",
-      "home": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\home",
+      "cwd": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\code",
+      "home": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\home",
       "exit": 0,
       "elapsed_ms": 39.099,
       "peak_working_set_bytes": 6696960,
@@ -95,7 +95,7 @@
     },
     {
       "label": "ts-callees",
-      "exe": "E:\\dev\\Riltra\\target\\debug\\riltra.exe",
+      "exe": "<RILTRA_REPO_ROOT>\\target\\debug\\riltra.exe",
       "args": [
         "callees",
         "--repo",
@@ -107,8 +107,8 @@
         "--col",
         "17"
       ],
-      "cwd": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\code",
-      "home": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\home",
+      "cwd": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\code",
+      "home": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\home",
       "exit": 0,
       "elapsed_ms": 44.756,
       "peak_working_set_bytes": 7143424,
@@ -116,7 +116,7 @@
     },
     {
       "label": "ts-trace",
-      "exe": "E:\\dev\\Riltra\\target\\debug\\riltra.exe",
+      "exe": "<RILTRA_REPO_ROOT>\\target\\debug\\riltra.exe",
       "args": [
         "trace",
         "--repo",
@@ -128,8 +128,8 @@
         "--col",
         "17"
       ],
-      "cwd": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\code",
-      "home": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\home",
+      "cwd": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\code",
+      "home": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\home",
       "exit": 0,
       "elapsed_ms": 41.063,
       "peak_working_set_bytes": 7114752,
@@ -137,7 +137,7 @@
     },
     {
       "label": "ts-impact",
-      "exe": "E:\\dev\\Riltra\\target\\debug\\riltra.exe",
+      "exe": "<RILTRA_REPO_ROOT>\\target\\debug\\riltra.exe",
       "args": [
         "impact",
         "--repo",
@@ -149,8 +149,8 @@
         "--col",
         "17"
       ],
-      "cwd": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\code",
-      "home": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\home",
+      "cwd": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\code",
+      "home": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\home",
       "exit": 0,
       "elapsed_ms": 42.172,
       "peak_working_set_bytes": 7483392,
@@ -158,7 +158,7 @@
     },
     {
       "label": "ts-reference",
-      "exe": "E:\\dev\\Riltra\\target\\debug\\riltra.exe",
+      "exe": "<RILTRA_REPO_ROOT>\\target\\debug\\riltra.exe",
       "args": [
         "callees",
         "--repo",
@@ -170,8 +170,8 @@
         "--col",
         "17"
       ],
-      "cwd": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\code",
-      "home": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\home",
+      "cwd": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\code",
+      "home": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\home",
       "exit": 0,
       "elapsed_ms": 39.188,
       "peak_working_set_bytes": 7426048,
@@ -179,7 +179,7 @@
     },
     {
       "label": "ts-parameter",
-      "exe": "E:\\dev\\Riltra\\target\\debug\\riltra.exe",
+      "exe": "<RILTRA_REPO_ROOT>\\target\\debug\\riltra.exe",
       "args": [
         "callees",
         "--repo",
@@ -191,8 +191,8 @@
         "--col",
         "17"
       ],
-      "cwd": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\code",
-      "home": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\home",
+      "cwd": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\code",
+      "home": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\home",
       "exit": 0,
       "elapsed_ms": 43.28,
       "peak_working_set_bytes": 7139328,
@@ -200,7 +200,7 @@
     },
     {
       "label": "ts-alias",
-      "exe": "E:\\dev\\Riltra\\target\\debug\\riltra.exe",
+      "exe": "<RILTRA_REPO_ROOT>\\target\\debug\\riltra.exe",
       "args": [
         "callees",
         "--repo",
@@ -212,8 +212,8 @@
         "--col",
         "17"
       ],
-      "cwd": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\code",
-      "home": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\home",
+      "cwd": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\code",
+      "home": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\home",
       "exit": 0,
       "elapsed_ms": 51.682,
       "peak_working_set_bytes": 7467008,
@@ -221,7 +221,7 @@
     },
     {
       "label": "ts-other",
-      "exe": "E:\\dev\\Riltra\\target\\debug\\riltra.exe",
+      "exe": "<RILTRA_REPO_ROOT>\\target\\debug\\riltra.exe",
       "args": [
         "callers",
         "--repo",
@@ -233,8 +233,8 @@
         "--col",
         "17"
       ],
-      "cwd": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\code",
-      "home": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\home",
+      "cwd": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\code",
+      "home": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\home",
       "exit": 0,
       "elapsed_ms": 46.444,
       "peak_working_set_bytes": null,
@@ -242,7 +242,7 @@
     },
     {
       "label": "ts-fallback-callees",
-      "exe": "E:\\dev\\Riltra\\target\\debug\\riltra.exe",
+      "exe": "<RILTRA_REPO_ROOT>\\target\\debug\\riltra.exe",
       "args": [
         "callees",
         "--repo",
@@ -254,8 +254,8 @@
         "--col",
         "8"
       ],
-      "cwd": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\code",
-      "home": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\home",
+      "cwd": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\code",
+      "home": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\home",
       "exit": 0,
       "elapsed_ms": 44.659,
       "peak_working_set_bytes": 6397952,
@@ -263,7 +263,7 @@
     },
     {
       "label": "ts-fallback-trace",
-      "exe": "E:\\dev\\Riltra\\target\\debug\\riltra.exe",
+      "exe": "<RILTRA_REPO_ROOT>\\target\\debug\\riltra.exe",
       "args": [
         "trace",
         "--repo",
@@ -275,8 +275,8 @@
         "--col",
         "8"
       ],
-      "cwd": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\code",
-      "home": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\home",
+      "cwd": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\code",
+      "home": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\home",
       "exit": 0,
       "elapsed_ms": 53.194,
       "peak_working_set_bytes": null,
@@ -284,7 +284,7 @@
     },
     {
       "label": "ts-fallback-parameter",
-      "exe": "E:\\dev\\Riltra\\target\\debug\\riltra.exe",
+      "exe": "<RILTRA_REPO_ROOT>\\target\\debug\\riltra.exe",
       "args": [
         "callees",
         "--repo",
@@ -296,8 +296,8 @@
         "--col",
         "8"
       ],
-      "cwd": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\code",
-      "home": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\home",
+      "cwd": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\code",
+      "home": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\home",
       "exit": 0,
       "elapsed_ms": 49.087,
       "peak_working_set_bytes": 5693440,
@@ -305,7 +305,7 @@
     },
     {
       "label": "ts-fallback-alias",
-      "exe": "E:\\dev\\Riltra\\target\\debug\\riltra.exe",
+      "exe": "<RILTRA_REPO_ROOT>\\target\\debug\\riltra.exe",
       "args": [
         "callees",
         "--repo",
@@ -317,8 +317,8 @@
         "--col",
         "8"
       ],
-      "cwd": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\code",
-      "home": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\home",
+      "cwd": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\code",
+      "home": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\home",
       "exit": 0,
       "elapsed_ms": 46.868,
       "peak_working_set_bytes": 7487488,
@@ -326,7 +326,7 @@
     },
     {
       "label": "ts-warm-callers-1",
-      "exe": "E:\\dev\\Riltra\\target\\debug\\riltra.exe",
+      "exe": "<RILTRA_REPO_ROOT>\\target\\debug\\riltra.exe",
       "args": [
         "callers",
         "--repo",
@@ -338,8 +338,8 @@
         "--col",
         "17"
       ],
-      "cwd": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\code",
-      "home": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\home",
+      "cwd": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\code",
+      "home": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\home",
       "exit": 0,
       "elapsed_ms": 44.441,
       "peak_working_set_bytes": null,
@@ -347,7 +347,7 @@
     },
     {
       "label": "ts-warm-callees-1",
-      "exe": "E:\\dev\\Riltra\\target\\debug\\riltra.exe",
+      "exe": "<RILTRA_REPO_ROOT>\\target\\debug\\riltra.exe",
       "args": [
         "callees",
         "--repo",
@@ -359,8 +359,8 @@
         "--col",
         "8"
       ],
-      "cwd": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\code",
-      "home": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\home",
+      "cwd": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\code",
+      "home": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\home",
       "exit": 0,
       "elapsed_ms": 44.591,
       "peak_working_set_bytes": 6287360,
@@ -368,7 +368,7 @@
     },
     {
       "label": "ts-warm-trace-1",
-      "exe": "E:\\dev\\Riltra\\target\\debug\\riltra.exe",
+      "exe": "<RILTRA_REPO_ROOT>\\target\\debug\\riltra.exe",
       "args": [
         "trace",
         "--repo",
@@ -380,8 +380,8 @@
         "--col",
         "8"
       ],
-      "cwd": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\code",
-      "home": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\home",
+      "cwd": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\code",
+      "home": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\home",
       "exit": 0,
       "elapsed_ms": 52.062,
       "peak_working_set_bytes": 7528448,
@@ -389,7 +389,7 @@
     },
     {
       "label": "ts-warm-impact-1",
-      "exe": "E:\\dev\\Riltra\\target\\debug\\riltra.exe",
+      "exe": "<RILTRA_REPO_ROOT>\\target\\debug\\riltra.exe",
       "args": [
         "impact",
         "--repo",
@@ -401,8 +401,8 @@
         "--col",
         "17"
       ],
-      "cwd": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\code",
-      "home": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\home",
+      "cwd": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\code",
+      "home": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\home",
       "exit": 0,
       "elapsed_ms": 49.663,
       "peak_working_set_bytes": null,
@@ -410,7 +410,7 @@
     },
     {
       "label": "ts-warm-callers-2",
-      "exe": "E:\\dev\\Riltra\\target\\debug\\riltra.exe",
+      "exe": "<RILTRA_REPO_ROOT>\\target\\debug\\riltra.exe",
       "args": [
         "callers",
         "--repo",
@@ -422,8 +422,8 @@
         "--col",
         "17"
       ],
-      "cwd": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\code",
-      "home": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\home",
+      "cwd": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\code",
+      "home": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\home",
       "exit": 0,
       "elapsed_ms": 39.719,
       "peak_working_set_bytes": 6627328,
@@ -431,7 +431,7 @@
     },
     {
       "label": "ts-warm-callees-2",
-      "exe": "E:\\dev\\Riltra\\target\\debug\\riltra.exe",
+      "exe": "<RILTRA_REPO_ROOT>\\target\\debug\\riltra.exe",
       "args": [
         "callees",
         "--repo",
@@ -443,8 +443,8 @@
         "--col",
         "8"
       ],
-      "cwd": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\code",
-      "home": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\home",
+      "cwd": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\code",
+      "home": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\home",
       "exit": 0,
       "elapsed_ms": 38.026,
       "peak_working_set_bytes": 7499776,
@@ -452,7 +452,7 @@
     },
     {
       "label": "ts-warm-trace-2",
-      "exe": "E:\\dev\\Riltra\\target\\debug\\riltra.exe",
+      "exe": "<RILTRA_REPO_ROOT>\\target\\debug\\riltra.exe",
       "args": [
         "trace",
         "--repo",
@@ -464,8 +464,8 @@
         "--col",
         "8"
       ],
-      "cwd": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\code",
-      "home": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\home",
+      "cwd": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\code",
+      "home": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\home",
       "exit": 0,
       "elapsed_ms": 44.522,
       "peak_working_set_bytes": null,
@@ -473,7 +473,7 @@
     },
     {
       "label": "ts-warm-impact-2",
-      "exe": "E:\\dev\\Riltra\\target\\debug\\riltra.exe",
+      "exe": "<RILTRA_REPO_ROOT>\\target\\debug\\riltra.exe",
       "args": [
         "impact",
         "--repo",
@@ -485,8 +485,8 @@
         "--col",
         "17"
       ],
-      "cwd": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\code",
-      "home": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\home",
+      "cwd": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\code",
+      "home": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\home",
       "exit": 0,
       "elapsed_ms": 38.354,
       "peak_working_set_bytes": 7516160,
@@ -494,7 +494,7 @@
     },
     {
       "label": "ts-warm-callers-3",
-      "exe": "E:\\dev\\Riltra\\target\\debug\\riltra.exe",
+      "exe": "<RILTRA_REPO_ROOT>\\target\\debug\\riltra.exe",
       "args": [
         "callers",
         "--repo",
@@ -506,8 +506,8 @@
         "--col",
         "17"
       ],
-      "cwd": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\code",
-      "home": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\home",
+      "cwd": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\code",
+      "home": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\home",
       "exit": 0,
       "elapsed_ms": 42.309,
       "peak_working_set_bytes": 7258112,
@@ -515,7 +515,7 @@
     },
     {
       "label": "ts-warm-callees-3",
-      "exe": "E:\\dev\\Riltra\\target\\debug\\riltra.exe",
+      "exe": "<RILTRA_REPO_ROOT>\\target\\debug\\riltra.exe",
       "args": [
         "callees",
         "--repo",
@@ -527,8 +527,8 @@
         "--col",
         "8"
       ],
-      "cwd": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\code",
-      "home": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\home",
+      "cwd": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\code",
+      "home": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\home",
       "exit": 0,
       "elapsed_ms": 37.886,
       "peak_working_set_bytes": 7487488,
@@ -536,7 +536,7 @@
     },
     {
       "label": "ts-warm-trace-3",
-      "exe": "E:\\dev\\Riltra\\target\\debug\\riltra.exe",
+      "exe": "<RILTRA_REPO_ROOT>\\target\\debug\\riltra.exe",
       "args": [
         "trace",
         "--repo",
@@ -548,8 +548,8 @@
         "--col",
         "8"
       ],
-      "cwd": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\code",
-      "home": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\home",
+      "cwd": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\code",
+      "home": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\home",
       "exit": 0,
       "elapsed_ms": 41.919,
       "peak_working_set_bytes": 7659520,
@@ -557,7 +557,7 @@
     },
     {
       "label": "ts-warm-impact-3",
-      "exe": "E:\\dev\\Riltra\\target\\debug\\riltra.exe",
+      "exe": "<RILTRA_REPO_ROOT>\\target\\debug\\riltra.exe",
       "args": [
         "impact",
         "--repo",
@@ -569,8 +569,8 @@
         "--col",
         "17"
       ],
-      "cwd": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\code",
-      "home": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\home",
+      "cwd": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\code",
+      "home": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\home",
       "exit": 0,
       "elapsed_ms": 40.627,
       "peak_working_set_bytes": null,
@@ -578,7 +578,7 @@
     },
     {
       "label": "ts-warm-callers-4",
-      "exe": "E:\\dev\\Riltra\\target\\debug\\riltra.exe",
+      "exe": "<RILTRA_REPO_ROOT>\\target\\debug\\riltra.exe",
       "args": [
         "callers",
         "--repo",
@@ -590,8 +590,8 @@
         "--col",
         "17"
       ],
-      "cwd": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\code",
-      "home": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\home",
+      "cwd": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\code",
+      "home": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\home",
       "exit": 0,
       "elapsed_ms": 41.173,
       "peak_working_set_bytes": 6627328,
@@ -599,7 +599,7 @@
     },
     {
       "label": "ts-warm-callees-4",
-      "exe": "E:\\dev\\Riltra\\target\\debug\\riltra.exe",
+      "exe": "<RILTRA_REPO_ROOT>\\target\\debug\\riltra.exe",
       "args": [
         "callees",
         "--repo",
@@ -611,8 +611,8 @@
         "--col",
         "8"
       ],
-      "cwd": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\code",
-      "home": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\home",
+      "cwd": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\code",
+      "home": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\home",
       "exit": 0,
       "elapsed_ms": 50.042,
       "peak_working_set_bytes": 7499776,
@@ -620,7 +620,7 @@
     },
     {
       "label": "ts-warm-trace-4",
-      "exe": "E:\\dev\\Riltra\\target\\debug\\riltra.exe",
+      "exe": "<RILTRA_REPO_ROOT>\\target\\debug\\riltra.exe",
       "args": [
         "trace",
         "--repo",
@@ -632,8 +632,8 @@
         "--col",
         "8"
       ],
-      "cwd": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\code",
-      "home": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\home",
+      "cwd": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\code",
+      "home": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\home",
       "exit": 0,
       "elapsed_ms": 42.768,
       "peak_working_set_bytes": 7630848,
@@ -641,7 +641,7 @@
     },
     {
       "label": "ts-warm-impact-4",
-      "exe": "E:\\dev\\Riltra\\target\\debug\\riltra.exe",
+      "exe": "<RILTRA_REPO_ROOT>\\target\\debug\\riltra.exe",
       "args": [
         "impact",
         "--repo",
@@ -653,8 +653,8 @@
         "--col",
         "17"
       ],
-      "cwd": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\code",
-      "home": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\home",
+      "cwd": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\code",
+      "home": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\home",
       "exit": 0,
       "elapsed_ms": 51.982,
       "peak_working_set_bytes": null,
@@ -662,7 +662,7 @@
     },
     {
       "label": "ts-warm-callers-5",
-      "exe": "E:\\dev\\Riltra\\target\\debug\\riltra.exe",
+      "exe": "<RILTRA_REPO_ROOT>\\target\\debug\\riltra.exe",
       "args": [
         "callers",
         "--repo",
@@ -674,8 +674,8 @@
         "--col",
         "17"
       ],
-      "cwd": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\code",
-      "home": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\home",
+      "cwd": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\code",
+      "home": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\home",
       "exit": 0,
       "elapsed_ms": 42.655,
       "peak_working_set_bytes": 6291456,
@@ -683,7 +683,7 @@
     },
     {
       "label": "ts-warm-callees-5",
-      "exe": "E:\\dev\\Riltra\\target\\debug\\riltra.exe",
+      "exe": "<RILTRA_REPO_ROOT>\\target\\debug\\riltra.exe",
       "args": [
         "callees",
         "--repo",
@@ -695,8 +695,8 @@
         "--col",
         "8"
       ],
-      "cwd": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\code",
-      "home": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\home",
+      "cwd": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\code",
+      "home": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\home",
       "exit": 0,
       "elapsed_ms": 46.252,
       "peak_working_set_bytes": null,
@@ -704,7 +704,7 @@
     },
     {
       "label": "ts-warm-trace-5",
-      "exe": "E:\\dev\\Riltra\\target\\debug\\riltra.exe",
+      "exe": "<RILTRA_REPO_ROOT>\\target\\debug\\riltra.exe",
       "args": [
         "trace",
         "--repo",
@@ -716,8 +716,8 @@
         "--col",
         "8"
       ],
-      "cwd": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\code",
-      "home": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\home",
+      "cwd": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\code",
+      "home": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\home",
       "exit": 0,
       "elapsed_ms": 45.124,
       "peak_working_set_bytes": null,
@@ -725,7 +725,7 @@
     },
     {
       "label": "ts-warm-impact-5",
-      "exe": "E:\\dev\\Riltra\\target\\debug\\riltra.exe",
+      "exe": "<RILTRA_REPO_ROOT>\\target\\debug\\riltra.exe",
       "args": [
         "impact",
         "--repo",
@@ -737,8 +737,8 @@
         "--col",
         "17"
       ],
-      "cwd": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\code",
-      "home": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\home",
+      "cwd": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\code",
+      "home": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\home",
       "exit": 0,
       "elapsed_ms": 37.809,
       "peak_working_set_bytes": 6426624,
@@ -746,7 +746,7 @@
     },
     {
       "label": "ts-deterministic",
-      "exe": "E:\\dev\\Riltra\\target\\debug\\riltra.exe",
+      "exe": "<RILTRA_REPO_ROOT>\\target\\debug\\riltra.exe",
       "args": [
         "callers",
         "--repo",
@@ -758,8 +758,8 @@
         "--col",
         "17"
       ],
-      "cwd": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\code",
-      "home": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\home",
+      "cwd": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\code",
+      "home": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\home",
       "exit": 0,
       "elapsed_ms": 45.205,
       "peak_working_set_bytes": null,
@@ -767,7 +767,7 @@
     },
     {
       "label": "ts-page-1",
-      "exe": "E:\\dev\\Riltra\\target\\debug\\riltra.exe",
+      "exe": "<RILTRA_REPO_ROOT>\\target\\debug\\riltra.exe",
       "args": [
         "callers",
         "--repo",
@@ -781,8 +781,8 @@
         "--limit",
         "1"
       ],
-      "cwd": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\code",
-      "home": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\home",
+      "cwd": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\code",
+      "home": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\home",
       "exit": 0,
       "elapsed_ms": 40.447,
       "peak_working_set_bytes": 2973696,
@@ -790,7 +790,7 @@
     },
     {
       "label": "ts-page-2",
-      "exe": "E:\\dev\\Riltra\\target\\debug\\riltra.exe",
+      "exe": "<RILTRA_REPO_ROOT>\\target\\debug\\riltra.exe",
       "args": [
         "callers",
         "--repo",
@@ -806,8 +806,8 @@
         "--offset",
         "1"
       ],
-      "cwd": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\code",
-      "home": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\home",
+      "cwd": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\code",
+      "home": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\home",
       "exit": 0,
       "elapsed_ms": 44.199,
       "peak_working_set_bytes": null,
@@ -815,17 +815,17 @@
     },
     {
       "label": "ts-failed-import",
-      "exe": "E:\\dev\\Riltra\\target\\debug\\riltra.exe",
+      "exe": "<RILTRA_REPO_ROOT>\\target\\debug\\riltra.exe",
       "args": [
         "semantic",
         "import",
         "--repo",
         "ts",
         "--scip",
-        "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\truncated.scip"
+        "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\truncated.scip"
       ],
-      "cwd": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\code",
-      "home": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\home",
+      "cwd": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\code",
+      "home": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\home",
       "exit": 3,
       "elapsed_ms": 49.398,
       "peak_working_set_bytes": 6234112,
@@ -833,14 +833,14 @@
     },
     {
       "label": "ts-noop",
-      "exe": "E:\\dev\\Riltra\\target\\debug\\riltra.exe",
+      "exe": "<RILTRA_REPO_ROOT>\\target\\debug\\riltra.exe",
       "args": [
         "index",
         "--repo",
         "ts"
       ],
-      "cwd": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\code",
-      "home": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\home",
+      "cwd": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\code",
+      "home": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\home",
       "exit": 0,
       "elapsed_ms": 421.524,
       "peak_working_set_bytes": 8568832,
@@ -848,7 +848,7 @@
     },
     {
       "label": "ts-stale",
-      "exe": "E:\\dev\\Riltra\\target\\debug\\riltra.exe",
+      "exe": "<RILTRA_REPO_ROOT>\\target\\debug\\riltra.exe",
       "args": [
         "callers",
         "--repo",
@@ -860,8 +860,8 @@
         "--col",
         "17"
       ],
-      "cwd": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\code",
-      "home": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\home",
+      "cwd": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\code",
+      "home": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\home",
       "exit": 0,
       "elapsed_ms": 44.045,
       "peak_working_set_bytes": null,
@@ -869,14 +869,14 @@
     },
     {
       "label": "ts-delta",
-      "exe": "E:\\dev\\Riltra\\target\\debug\\riltra.exe",
+      "exe": "<RILTRA_REPO_ROOT>\\target\\debug\\riltra.exe",
       "args": [
         "index",
         "--repo",
         "ts"
       ],
-      "cwd": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\code",
-      "home": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\home",
+      "cwd": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\code",
+      "home": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\home",
       "exit": 0,
       "elapsed_ms": 467.307,
       "peak_working_set_bytes": 8577024,
@@ -884,17 +884,17 @@
     },
     {
       "label": "ts-reimport",
-      "exe": "E:\\dev\\Riltra\\target\\debug\\riltra.exe",
+      "exe": "<RILTRA_REPO_ROOT>\\target\\debug\\riltra.exe",
       "args": [
         "semantic",
         "import",
         "--repo",
         "ts",
         "--scip",
-        "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\code\\index.scip"
+        "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\code\\index.scip"
       ],
-      "cwd": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\code",
-      "home": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\home",
+      "cwd": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\code",
+      "home": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\home",
       "exit": 0,
       "elapsed_ms": 134.07,
       "peak_working_set_bytes": 8171520,
@@ -902,7 +902,7 @@
     },
     {
       "label": "ts-duplicate-import-anchor",
-      "exe": "E:\\dev\\Riltra\\target\\debug\\riltra.exe",
+      "exe": "<RILTRA_REPO_ROOT>\\target\\debug\\riltra.exe",
       "args": [
         "callers",
         "--repo",
@@ -914,8 +914,8 @@
         "--col",
         "17"
       ],
-      "cwd": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\code",
-      "home": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\home",
+      "cwd": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\code",
+      "home": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\home",
       "exit": 3,
       "elapsed_ms": 36.878,
       "peak_working_set_bytes": 6934528,
@@ -923,7 +923,7 @@
     },
     {
       "label": "ts-incompatible",
-      "exe": "E:\\dev\\Riltra\\target\\debug\\riltra.exe",
+      "exe": "<RILTRA_REPO_ROOT>\\target\\debug\\riltra.exe",
       "args": [
         "callers",
         "--repo",
@@ -935,8 +935,8 @@
         "--col",
         "17"
       ],
-      "cwd": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\code",
-      "home": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\home",
+      "cwd": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\code",
+      "home": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\home",
       "exit": 3,
       "elapsed_ms": 33.861,
       "peak_working_set_bytes": null,
@@ -944,17 +944,17 @@
     },
     {
       "label": "ts-revalidate",
-      "exe": "E:\\dev\\Riltra\\target\\debug\\riltra.exe",
+      "exe": "<RILTRA_REPO_ROOT>\\target\\debug\\riltra.exe",
       "args": [
         "semantic",
         "import",
         "--repo",
         "ts",
         "--scip",
-        "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\code\\index.scip"
+        "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\code\\index.scip"
       ],
-      "cwd": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\code",
-      "home": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\home",
+      "cwd": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\code",
+      "home": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\home",
       "exit": 0,
       "elapsed_ms": 163.205,
       "peak_working_set_bytes": 8306688,
@@ -962,16 +962,16 @@
     },
     {
       "label": "rs-init",
-      "exe": "E:\\dev\\Riltra\\target\\debug\\riltra.exe",
+      "exe": "<RILTRA_REPO_ROOT>\\target\\debug\\riltra.exe",
       "args": [
         "init",
         "--repo",
-        "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\rs\\code",
+        "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\rs\\code",
         "--name",
         "rs"
       ],
-      "cwd": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\rs\\code",
-      "home": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\rs\\home",
+      "cwd": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\rs\\code",
+      "home": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\rs\\home",
       "exit": 0,
       "elapsed_ms": 31.935,
       "peak_working_set_bytes": null,
@@ -979,15 +979,15 @@
     },
     {
       "label": "rs-full",
-      "exe": "E:\\dev\\Riltra\\target\\debug\\riltra.exe",
+      "exe": "<RILTRA_REPO_ROOT>\\target\\debug\\riltra.exe",
       "args": [
         "index",
         "--repo",
         "rs",
         "--full"
       ],
-      "cwd": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\rs\\code",
-      "home": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\rs\\home",
+      "cwd": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\rs\\code",
+      "home": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\rs\\home",
       "exit": 0,
       "elapsed_ms": 747.394,
       "peak_working_set_bytes": 7917568,
@@ -995,7 +995,7 @@
     },
     {
       "label": "rs-core",
-      "exe": "E:\\dev\\Riltra\\target\\debug\\riltra.exe",
+      "exe": "<RILTRA_REPO_ROOT>\\target\\debug\\riltra.exe",
       "args": [
         "semantic",
         "query",
@@ -1008,8 +1008,8 @@
         "--col",
         "26"
       ],
-      "cwd": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\rs\\code",
-      "home": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\rs\\home",
+      "cwd": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\rs\\code",
+      "home": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\rs\\home",
       "exit": 3,
       "elapsed_ms": 48.532,
       "peak_working_set_bytes": null,
@@ -1017,7 +1017,7 @@
     },
     {
       "label": "rs-definition",
-      "exe": "E:\\dev\\Riltra\\target\\debug\\riltra.exe",
+      "exe": "<RILTRA_REPO_ROOT>\\target\\debug\\riltra.exe",
       "args": [
         "semantic",
         "query",
@@ -1030,10 +1030,10 @@
         "--col",
         "26",
         "--lsp-server",
-        "C:\\Users\\ryan\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\bin\\rust-analyzer.exe"
+        "<USER_HOME>\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\bin\\rust-analyzer.exe"
       ],
-      "cwd": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\rs\\code",
-      "home": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\rs\\home",
+      "cwd": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\rs\\code",
+      "home": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\rs\\home",
       "exit": 0,
       "elapsed_ms": 15333.301,
       "peak_working_set_bytes": 5873664,
@@ -1041,7 +1041,7 @@
     },
     {
       "label": "rs-references",
-      "exe": "E:\\dev\\Riltra\\target\\debug\\riltra.exe",
+      "exe": "<RILTRA_REPO_ROOT>\\target\\debug\\riltra.exe",
       "args": [
         "semantic",
         "query",
@@ -1055,10 +1055,10 @@
         "8",
         "--refs",
         "--lsp-server",
-        "C:\\Users\\ryan\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\bin\\rust-analyzer.exe"
+        "<USER_HOME>\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\bin\\rust-analyzer.exe"
       ],
-      "cwd": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\rs\\code",
-      "home": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\rs\\home",
+      "cwd": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\rs\\code",
+      "home": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\rs\\home",
       "exit": 0,
       "elapsed_ms": 15354.082,
       "peak_working_set_bytes": 5795840,
@@ -1066,7 +1066,7 @@
     },
     {
       "label": "rs-unavailable",
-      "exe": "E:\\dev\\Riltra\\target\\debug\\riltra.exe",
+      "exe": "<RILTRA_REPO_ROOT>\\target\\debug\\riltra.exe",
       "args": [
         "semantic",
         "query",
@@ -1079,10 +1079,10 @@
         "--col",
         "26",
         "--lsp-server",
-        "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\absent.exe"
+        "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\absent.exe"
       ],
-      "cwd": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\rs\\code",
-      "home": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\rs\\home",
+      "cwd": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\rs\\code",
+      "home": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\rs\\home",
       "exit": 0,
       "elapsed_ms": 32.644,
       "peak_working_set_bytes": null,
@@ -1090,7 +1090,7 @@
     },
     {
       "label": "rs-syntax-after-unavailable",
-      "exe": "E:\\dev\\Riltra\\target\\debug\\riltra.exe",
+      "exe": "<RILTRA_REPO_ROOT>\\target\\debug\\riltra.exe",
       "args": [
         "callees",
         "--repo",
@@ -1102,8 +1102,8 @@
         "--col",
         "8"
       ],
-      "cwd": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\rs\\code",
-      "home": "E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\rs\\home",
+      "cwd": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\rs\\code",
+      "home": "<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\rs\\home",
       "exit": 0,
       "elapsed_ms": 48.47,
       "peak_working_set_bytes": 6406144,
@@ -1114,7 +1114,7 @@
     {
       "id": 1,
       "repo": "ts",
-      "root": "\\\\?\\E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\code",
+      "root": "\\\\?\\<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\code",
       "created_unix": 1792151392,
       "head": null,
       "branch": null,
@@ -1146,7 +1146,7 @@
       "provider_name": "scip-typescript",
       "provider_version": "0.4.0",
       "capability": "definitions,references",
-      "project_root": "\\\\?\\E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\ts\\code",
+      "project_root": "\\\\?\\<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\ts\\code",
       "text_encoding": "UTF8",
       "artifact_id": "09077552cf248d52",
       "source_revision": "head=-|branch=-|dirty=false|untracked=0|cfg=1a92ea80d66dd56e|nonce=12152-1792151392805445600-0",
@@ -2889,7 +2889,7 @@
       "fallback": {
         "provider": "lsp-subprocess",
         "status": "fallback",
-        "reason": "language server not found: 'E:\\dev\\Riltra\\target\\m6-pilot-An19ih\\absent.exe'",
+        "reason": "language server not found: '<RILTRA_REPO_ROOT>\\target\\m6-pilot-An19ih\\absent.exe'",
         "syntax_fallback": true
       }
     },

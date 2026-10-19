@@ -1,0 +1,3 @@
+Synthetic fixture (no real data): unix and macOS home directory paths.
+Config: /home/alice/.config/app.ini
+Library: /Users/alice/Library/Application Support/App

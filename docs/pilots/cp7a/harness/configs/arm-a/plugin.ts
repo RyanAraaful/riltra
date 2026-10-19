@@ -1,10 +1,11 @@
 import { Plugin } from "@opencode/plugin"
 import { appendFileSync } from "node:fs"
+import { join } from "node:path"
 
-const LOG = "E:\\dev\\Riltra\\.cp7a\\plugin-events.jsonl"
+const LOG = process.env.RILTRA_CP7A_LOG || join(process.cwd(), ".cp7a", "plugin-events.jsonl")
 const ALLOWED = new Set(["read", "shell"])
 const WRAPPER =
-  /^&?\s*["']?E:[\\/]+dev[\\/]+Riltra[\\/]+\.cp7a[\\/]+bin[\\/]+riltra-ro\.cmd["']?\s+(.+)$/i
+  /^&?\s*["']?[A-Za-z0-9.:\\/_-]*[\\/]\.cp7a[\\/]+bin[\\/]+riltra-ro\.cmd["']?\s+(.+)$/i
 const FORBIDDEN = /[;&|<>`$(){}\[\]\n\r*?]/
 
 function log(entry) {

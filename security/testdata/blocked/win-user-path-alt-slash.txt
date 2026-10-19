@@ -1,0 +1,2 @@
+Synthetic fixture (no real data): Windows user-profile path, forward-slash form.
+Workspace mount: C:/Users/alice/projects/demo

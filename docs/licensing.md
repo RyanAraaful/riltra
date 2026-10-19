@@ -179,3 +179,12 @@ Notes:
   as a runtime library.
 - Redistributable: permissive only; no copyleft, no noncommercial code,
   nothing vendored.
+
+## Security tooling addition: gitleaks (privacy remediation, 2026-10-19)
+
+| Package | Version | License | Origin | Redistributable? |
+|---|---|---|---|---|
+| gitleaks | 8.30.1 | MIT | https://github.com/gitleaks/gitleaks | tool only - pinned release binary, checksum-verified at fetch time; never compiled into or shipped with `riltra` |
+
+Used by the CI `security` job and the optional local hooks (`security/scan.sh`,
+`.githooks/`); it is not a build dependency and no code is vendored.

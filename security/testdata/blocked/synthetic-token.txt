@@ -1,0 +1,3 @@
+Synthetic fixture (no real data): a fake GitHub token in a valid-format,
+high-entropy shape. Not a credential; rotates nothing; usable by nobody.
+token: ghp_aB3xK9qW2mZ7pL4vN8cR1sD6fG5hJ0kT2eYz

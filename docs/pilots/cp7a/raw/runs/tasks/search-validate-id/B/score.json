@@ -16,7 +16,7 @@
         "repo": "riltra",
         "query": "validate_id"
       },
-      "output": "{\"freshness\":\"fresh\",\"query\":{\"limit\":50,\"offset\":0,\"symbol\":\"validate_id\"},\"reasons\":[],\"repo\":\"riltra\",\"results\":[{\"bytes\":[3696,4286],\"kind\":\"function\",\"name\":\"validate_id\",\"path\":\"crates/cli/src/knowledge.rs\",\"provenance\":{\"grammar\":\"rust:0.24.2\",\"language\":\"rust\",\"provider\":\"syntax\"},\"snapshot\":1,\"span\":{\"end_col\":2,\"end_line\":104,\"start_col\":1,\"start_line\":89}}],\"root\":\"\\\\\\\\?\\\\E:\\\\dev\\\\Riltra\\\\.cp7a\\\\source\",\"snapshot\":{\"branch\":null,\"created_unix\":1792343570,\"dirty\":false,\"head\":\"0fd22a1134274c1e92f741fc0d4e3b4886ceeaf3\",\"id\":1,\"nonce\":\"7360-1792343570898653400-0\",\"status_at_write\":\"fresh\"},\"total\":1,\"truncated\":false}",
+      "output": "{\"freshness\":\"fresh\",\"query\":{\"limit\":50,\"offset\":0,\"symbol\":\"validate_id\"},\"reasons\":[],\"repo\":\"riltra\",\"results\":[{\"bytes\":[3696,4286],\"kind\":\"function\",\"name\":\"validate_id\",\"path\":\"crates/cli/src/knowledge.rs\",\"provenance\":{\"grammar\":\"rust:0.24.2\",\"language\":\"rust\",\"provider\":\"syntax\"},\"snapshot\":1,\"span\":{\"end_col\":2,\"end_line\":104,\"start_col\":1,\"start_line\":89}}],\"root\":\"\\\\\\\\?\\\\<CP7A_ROOT>\\\\source\",\"snapshot\":{\"branch\":null,\"created_unix\":1792343570,\"dirty\":false,\"head\":\"0fd22a1134274c1e92f741fc0d4e3b4886ceeaf3\",\"id\":1,\"nonce\":\"7360-1792343570898653400-0\",\"status_at_write\":\"fresh\"},\"total\":1,\"truncated\":false}",
       "status": "completed",
       "error": null,
       "success": true,

@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Pre-commit: scan staged changes for secrets and local machine paths.
+# Enable once per clone: git config core.hooksPath .githooks
+# Bypassable with --no-verify; the CI security job is the backstop.
+exec "$(git rev-parse --show-toplevel)/security/scan.sh" staged

@@ -1,0 +1,2 @@
+Synthetic fixture (no real data): JSON-escaped absolute Windows workspace path.
+{"workspace": "Z:\\development\\example-project"}

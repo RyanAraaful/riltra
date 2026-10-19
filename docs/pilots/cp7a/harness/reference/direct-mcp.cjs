@@ -8,10 +8,11 @@ const path = require("node:path");
 const crypto = require("node:crypto");
 const { spawn } = require("node:child_process");
 
-const ROOT = "E:\\dev\\Riltra\\.cp7a";
+const REPO_ROOT = path.resolve(__dirname, "..", "..", "..", "..", "..");
+const ROOT = path.join(REPO_ROOT, ".cp7a");
 const HOME = path.join(ROOT, "home-template");
 const PRISTINE = path.join(ROOT, "home-pristine");
-const BIN = "E:\\dev\\Riltra\\target\\debug\\riltra.exe";
+const BIN = path.join(REPO_ROOT, "target", "debug", "riltra.exe");
 const OUT = path.join(ROOT, "reference");
 const MAIN = ["registry.json", "index\\riltra.db", "index\\other.db", "knowledge\\riltra.db", "knowledge\\other.db"];
 const PROTOCOL = "2024-11-05";
@@ -60,7 +61,7 @@ async function main() {
   writeJson(path.join(OUT, "mcp-home-before.json"), before);
   const started = now();
   const child = spawn(BIN, ["mcp"], {
-    cwd: "E:\\dev\\Riltra",
+    cwd: REPO_ROOT,
     env: { ...process.env, RILTRA_HOME: HOME },
     stdio: ["pipe", "pipe", "pipe"],
     windowsHide: true

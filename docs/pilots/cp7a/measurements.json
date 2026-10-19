@@ -56,8 +56,8 @@
     "retries": 0,
     "first_session_created_unix_ms": 1792347530302,
     "last_idle_unix_ms": 1792347953661,
-    "tasks_dir": "E:\\dev\\Riltra\\.cp7a\\runs\\tasks",
-    "startup_dir": "E:\\dev\\Riltra\\.cp7a\\runs\\startup"
+    "tasks_dir": "<CP7A_ROOT>\\runs\\tasks",
+    "startup_dir": "<CP7A_ROOT>\\runs\\startup"
   },
   "startup": {
     "A": {
@@ -108,7 +108,7 @@
       ],
       "ready": {
         "session": "ses_eafc36ab9ffevccMEdtoUOucuX",
-        "dir": "E:\\dev\\Riltra\\.cp7a\\runs\\startup\\A\\attempt-1",
+        "dir": "<CP7A_ROOT>\\runs\\startup\\A\\attempt-1",
         "context_kept": [
           "read",
           "shell"
@@ -221,7 +221,7 @@
       ],
       "ready": {
         "session": "ses_eafc3591dffezV3YE1tXYMS8NJ",
-        "dir": "E:\\dev\\Riltra\\.cp7a\\runs\\startup\\B\\attempt-1",
+        "dir": "<CP7A_ROOT>\\runs\\startup\\B\\attempt-1",
         "context_kept": [
           "read",
           "riltra_riltra_code_callees",
@@ -530,7 +530,7 @@
           "failures": [],
           "ambiguous": []
         },
-        "answer": "Registered repositories (from `riltra-ro.cmd repo list`):\n\n| # | Name | Root |\n|---|------|------|\n| 1 | empty | `\\\\?\\E:\\dev\\Riltra\\.cp7a\\empty-repo` |\n| 2 | other | `\\\\?\\E:\\dev\\Riltra\\.cp7a\\other-repo` |\n| 3 | riltra | `\\\\?\\E:\\dev\\Riltra\\.cp7a\\source` |\n\n**Total registered: 3.**\n\nEvidence: the `--help` usage shows only `riltra repo list` (no filtering/pagination flags), and its JSON output was exactly `{\"repos\":[{...empty...},{...other...},{...riltra...}]}` with three entries, each with `name`, `root`, and `added_unix`.\n\nSkipped/not checked: didn't run `repo status` or `doctor` per repo to confirm on-disk health; the count reflects the registry listing only, not whether each root currently exists."
+        "answer": "Registered repositories (from `riltra-ro.cmd repo list`):\n\n| # | Name | Root |\n|---|------|------|\n| 1 | empty | `\\\\?\\<CP7A_ROOT>\\empty-repo` |\n| 2 | other | `\\\\?\\<CP7A_ROOT>\\other-repo` |\n| 3 | riltra | `\\\\?\\<CP7A_ROOT>\\source` |\n\n**Total registered: 3.**\n\nEvidence: the `--help` usage shows only `riltra repo list` (no filtering/pagination flags), and its JSON output was exactly `{\"repos\":[{...empty...},{...other...},{...riltra...}]}` with three entries, each with `name`, `root`, and `added_unix`.\n\nSkipped/not checked: didn't run `repo status` or `doctor` per repo to confirm on-disk health; the count reflects the registry listing only, not whether each root currently exists."
       },
       "b": {
         "task": "repo-list",
@@ -579,7 +579,7 @@
           "failures": [],
           "ambiguous": []
         },
-        "answer": "Registered repositories:\n\n1. `empty` ΓÇö `\\\\?\\E:\\dev\\Riltra\\.cp7a\\empty-repo`\n2. `other` ΓÇö `\\\\?\\E:\\dev\\Riltra\\.cp7a\\other-repo`\n3. `riltra` ΓÇö `\\\\?\\E:\\dev\\Riltra\\.cp7a\\source`\n\nCount: **3**.\n\nEvidence: `riltra_riltra_repo_list` returned a `repos` array with exactly three entries (names as above).\n\nSkipped: no status/health checks per repo, since the question only asked for names and count. Risk: none material ΓÇö the list reflects the current registry snapshot; repos added or removed after this call would not appear."
+        "answer": "Registered repositories:\n\n1. `empty` ΓÇö `\\\\?\\<CP7A_ROOT>\\empty-repo`\n2. `other` ΓÇö `\\\\?\\<CP7A_ROOT>\\other-repo`\n3. `riltra` ΓÇö `\\\\?\\<CP7A_ROOT>\\source`\n\nCount: **3**.\n\nEvidence: `riltra_riltra_repo_list` returned a `repos` array with exactly three entries (names as above).\n\nSkipped: no status/health checks per repo, since the question only asked for names and count. Risk: none material ΓÇö the list reflects the current registry snapshot; repos added or removed after this call would not appear."
       },
       "delta_gross": -1863,
       "delta_tool_calls": -1,
@@ -636,7 +636,7 @@
           "failures": [],
           "ambiguous": []
         },
-        "answer": "Repository `riltra` (`\\\\?\\E:\\dev\\Riltra\\.cp7a\\source`):\n\n**Git HEAD:** `0fd22a1134274c1e92f741fc0d4e3b4886ceeaf3`\n- `repo status --repo riltra` ΓåÆ `\"git\":{\"present\":true,\"valid\":true,\"head\":\"0fd22a1134274c1e92f741fc0d4e3b4886ceeaf3\",\"branch\":null,...}` ΓÇö branch is reported as `null` (detached/unknown branch label).\n\n**Worktree dirty:** no\n- Same output ΓåÆ `\"dirty\":false,\"untracked\":0,\"worktree\":true`, `\"ignore\":{\"file\":false,\"rules\":0}`.\n\n**Code-index freshness:** `fresh`\n- `index status --repo riltra` ΓåÆ `\"freshness\":\"fresh\",\"reasons\":[],\"fts\":true`.\n- Snapshot evidence: `{\"id\":1,\"created_unix\":1792343570,\"head\":\"0fd22a1134274c1e92f741fc0d4e3b4886ceeaf3\",\"branch\":null,\"dirty\":false,\"status_at_write\":\"fresh\",\"nonce\":\"7360-1792343570898653400-0\"}` ΓÇö snapshot HEAD matches current HEAD and its recorded dirty=false matches the live worktree, so the index is not stale.\n\nSkipped: no `doctor`/`scan`/content-index verification, so \"fresh\" reflects the wrapper's HEAD+dirty fingerprint only, not that every indexed file's contents were re-hashed. Risk: a file modified with an identical mtime/size and clean git state could still be covered by the fresh flag; `branch: null` also means the HEAD was read detached, so the reported branch name should not be trusted.\nI'll start by checking the wrapper's CLI syntax."
+        "answer": "Repository `riltra` (`\\\\?\\<CP7A_ROOT>\\source`):\n\n**Git HEAD:** `0fd22a1134274c1e92f741fc0d4e3b4886ceeaf3`\n- `repo status --repo riltra` ΓåÆ `\"git\":{\"present\":true,\"valid\":true,\"head\":\"0fd22a1134274c1e92f741fc0d4e3b4886ceeaf3\",\"branch\":null,...}` ΓÇö branch is reported as `null` (detached/unknown branch label).\n\n**Worktree dirty:** no\n- Same output ΓåÆ `\"dirty\":false,\"untracked\":0,\"worktree\":true`, `\"ignore\":{\"file\":false,\"rules\":0}`.\n\n**Code-index freshness:** `fresh`\n- `index status --repo riltra` ΓåÆ `\"freshness\":\"fresh\",\"reasons\":[],\"fts\":true`.\n- Snapshot evidence: `{\"id\":1,\"created_unix\":1792343570,\"head\":\"0fd22a1134274c1e92f741fc0d4e3b4886ceeaf3\",\"branch\":null,\"dirty\":false,\"status_at_write\":\"fresh\",\"nonce\":\"7360-1792343570898653400-0\"}` ΓÇö snapshot HEAD matches current HEAD and its recorded dirty=false matches the live worktree, so the index is not stale.\n\nSkipped: no `doctor`/`scan`/content-index verification, so \"fresh\" reflects the wrapper's HEAD+dirty fingerprint only, not that every indexed file's contents were re-hashed. Risk: a file modified with an identical mtime/size and clean git state could still be covered by the fresh flag; `branch: null` also means the HEAD was read detached, so the reported branch name should not be trusted.\nI'll start by checking the wrapper's CLI syntax."
       },
       "b": {
         "task": "repo-status",
@@ -685,7 +685,7 @@
           "failures": [],
           "ambiguous": []
         },
-        "answer": "Repository `riltra` status (evidence from `riltra_repo_status`):\n\n- **Git HEAD:** `0fd22a1134274c1e92f741fc0d4e3b4886ceeaf3`\n- **Worktree dirty:** no ΓÇö `dirty: false`, `untracked: 0`, `valid: true`, `worktree: true`\n- **Code-index freshness:** `fresh` ΓÇö `index_status.freshness: \"fresh\"`, `fts: true`, no `reasons`; snapshot id 1 matches the current head (`0fd22a1ΓÇª`), snapshot `status_at_write: \"fresh\"`.\n\nSupporting detail: index root `\\\\?\\E:\\dev\\Riltra\\.cp7a\\source`; branch is `null` (detached HEAD). Environment doctor passes; Riltra 0.1.0, code-index schema 4.\n\nSkipped/not checked: I did not verify index contents by running searches or call-graph queries, and did not confirm HEAD against remote refs. Risk: `fresh` reflects the snapshot recorded at index time (created_unix 1792343570); if files changed since, the tool would have reported staleness ΓÇö it did not, but that guarantee rests on this single status response."
+        "answer": "Repository `riltra` status (evidence from `riltra_repo_status`):\n\n- **Git HEAD:** `0fd22a1134274c1e92f741fc0d4e3b4886ceeaf3`\n- **Worktree dirty:** no ΓÇö `dirty: false`, `untracked: 0`, `valid: true`, `worktree: true`\n- **Code-index freshness:** `fresh` ΓÇö `index_status.freshness: \"fresh\"`, `fts: true`, no `reasons`; snapshot id 1 matches the current head (`0fd22a1ΓÇª`), snapshot `status_at_write: \"fresh\"`.\n\nSupporting detail: index root `\\\\?\\<CP7A_ROOT>\\source`; branch is `null` (detached HEAD). Environment doctor passes; Riltra 0.1.0, code-index schema 4.\n\nSkipped/not checked: I did not verify index contents by running searches or call-graph queries, and did not confirm HEAD against remote refs. Risk: `fresh` reflects the snapshot recorded at index time (created_unix 1792343570); if files changed since, the tool would have reported staleness ΓÇö it did not, but that guarantee rests on this single status response."
       },
       "delta_gross": -2061,
       "delta_tool_calls": -2,
@@ -742,7 +742,7 @@
           "failures": [],
           "ambiguous": []
         },
-        "answer": "Verified with the read-only wrapper.\n\n**Matches for `validate_id`:** 1 indexed symbol (`total: 1`, `truncated: false`).\n\n**Exact function `validate_id`:**\n- path: `crates/cli/src/knowledge.rs`\n- start line: `89`\n- kind: `function`\n\nEvidence:\n- `search --repo riltra --symbol validate_id --limit 50` returned `\"freshness\":\"fresh\"`, `\"total\":1`, with the single result `{\"path\":\"crates/cli/src/knowledge.rs\",\"kind\":\"function\",\"name\":\"validate_id\",\"span\":{\"start_line\":89,...,\"end_line\":104,...},\"provenance\":{\"provider\":\"syntax\",\"grammar\":\"rust:0.24.2\",\"language\":\"rust\"}}`.\n- Repo `riltra` root is `E:\\dev\\Riltra\\.cp7a\\source`, snapshot 1, `\"status_at_write\":\"fresh\"`.\n\nSkipped/risks: I did not verify against `scan` or a raw grep, so this answers only what the durable index reports; if the index were stale the counts could differ, but the snapshot reports fresh for this query. The `other` and `empty` repos were not searched."
+        "answer": "Verified with the read-only wrapper.\n\n**Matches for `validate_id`:** 1 indexed symbol (`total: 1`, `truncated: false`).\n\n**Exact function `validate_id`:**\n- path: `crates/cli/src/knowledge.rs`\n- start line: `89`\n- kind: `function`\n\nEvidence:\n- `search --repo riltra --symbol validate_id --limit 50` returned `\"freshness\":\"fresh\"`, `\"total\":1`, with the single result `{\"path\":\"crates/cli/src/knowledge.rs\",\"kind\":\"function\",\"name\":\"validate_id\",\"span\":{\"start_line\":89,...,\"end_line\":104,...},\"provenance\":{\"provider\":\"syntax\",\"grammar\":\"rust:0.24.2\",\"language\":\"rust\"}}`.\n- Repo `riltra` root is `<CP7A_ROOT>\\source`, snapshot 1, `\"status_at_write\":\"fresh\"`.\n\nSkipped/risks: I did not verify against `scan` or a raw grep, so this answers only what the durable index reports; if the index were stale the counts could differ, but the snapshot reports fresh for this query. The `other` and `empty` repos were not searched."
       },
       "b": {
         "task": "search-validate-id",
@@ -848,7 +848,7 @@
           "failures": [],
           "ambiguous": []
         },
-        "answer": "**4 caller edges**, all of kind **`POTENTIAL_CALL`**, all with verification status **`Unverified`**.\n\nEvidence (single command, read-only wrapper):\n\n```\nE:\\dev\\Riltra\\.cp7a\\bin\\riltra-ro.cmd callers --repo riltra \\\n  --path crates/cli/src/knowledge.rs --line 89 --col 1\n```\n\nObserved in the JSON:\n- `\"direction\":\"callers\"`, `\"edges\":[ ...4 objects... ]`, `\"truncated\":false`\n- Every edge: `\"kind\":\"POTENTIAL_CALL\"`, `\"verification\":\"Unverified\"`, `\"precision\":\"Heuristic\"`, `\"provider\":\"syntax\"`, `\"unresolved\":\"no-overlap\"`\n- Caller spans (byte offsets in the same file): `[7350,7372]` and `[7393,7412]` in one enclosing def (`6645ΓÇô7558`), `[7952,7974]` in def `7885ΓÇô8224`, `[27149,27165]` in def `26935ΓÇô27545`\n- `\"completeness\":{\"status\":\"partial\",\"covered\":4,\"total\":4}`\n\nContext: the anchor itself was resolved as `\"kind\":\"syntax-fallback\"` with `\"anchor_uncertainty\":\"syntax-only anchor: no semantic identity at this position\"` and `verification\":\"Unverified\"`, so these are heuristic syntax-derived potential call sites, not verified semantic call edges.\n\nSkipped/not checked: I did not run `callees`, `semantic status`, `index status`, or inspect source bytes to confirm the 4 call sites; the counts above are exactly what the wrapper returned for this anchor, nothing else. Risk: a col-1 anchor is syntax-only, so the edge set may be incomplete or imprecise if a different column targets the same symbol."
+        "answer": "**4 caller edges**, all of kind **`POTENTIAL_CALL`**, all with verification status **`Unverified`**.\n\nEvidence (single command, read-only wrapper):\n\n```\n<CP7A_ROOT>\\bin\\riltra-ro.cmd callers --repo riltra \\\n  --path crates/cli/src/knowledge.rs --line 89 --col 1\n```\n\nObserved in the JSON:\n- `\"direction\":\"callers\"`, `\"edges\":[ ...4 objects... ]`, `\"truncated\":false`\n- Every edge: `\"kind\":\"POTENTIAL_CALL\"`, `\"verification\":\"Unverified\"`, `\"precision\":\"Heuristic\"`, `\"provider\":\"syntax\"`, `\"unresolved\":\"no-overlap\"`\n- Caller spans (byte offsets in the same file): `[7350,7372]` and `[7393,7412]` in one enclosing def (`6645ΓÇô7558`), `[7952,7974]` in def `7885ΓÇô8224`, `[27149,27165]` in def `26935ΓÇô27545`\n- `\"completeness\":{\"status\":\"partial\",\"covered\":4,\"total\":4}`\n\nContext: the anchor itself was resolved as `\"kind\":\"syntax-fallback\"` with `\"anchor_uncertainty\":\"syntax-only anchor: no semantic identity at this position\"` and `verification\":\"Unverified\"`, so these are heuristic syntax-derived potential call sites, not verified semantic call edges.\n\nSkipped/not checked: I did not run `callees`, `semantic status`, `index status`, or inspect source bytes to confirm the 4 call sites; the counts above are exactly what the wrapper returned for this anchor, nothing else. Risk: a col-1 anchor is syntax-only, so the edge set may be incomplete or imprecise if a different column targets the same symbol."
       },
       "b": {
         "task": "callers-validate-id",
@@ -954,7 +954,7 @@
           "failures": [],
           "ambiguous": []
         },
-        "answer": "**Callee edges returned: 9** (distinct callee names: **7**).\n\nDistinct callee names, in edge order:\n1. `validate_id`\n2. `validate_kind`\n3. `validate_new_status`\n4. `is_empty` (3 edges ΓÇö spans 8058, 8084, 8109)\n5. `Err`\n6. `to_string`\n7. `Ok`\n\nEvidence observed:\n- Command: `E:\\dev\\Riltra\\.cp7a\\bin\\riltra-ro.cmd callees --repo riltra --path crates/cli/src/knowledge.rs --line 199 --col 1`\n- `\"edges\"` array contained exactly 9 `POTENTIAL_CALL` entries; `\"truncated\":false`, `limits.limit=50`, `next_offset=null` (so the full result set is the 9 edges).\n- Sorted callee_name values from output: Err, Ok, is_empty, is_empty, is_empty, to_string, validate_id, validate_kind, validate_new_status ΓåÆ 9 edges, 7 unique.\n- Anchor resolved as `syntax-fallback` / precision `Heuristic` (span bytes 7885ΓÇô8224), so all edges are `Unverified` with `unresolved` reasons (`no-overlap` or `dynamic`); completeness is `partial`.\n\nSkipped/not checked: I did not independently verify the source at `crates/cli/src/knowledge.rs:199` (shell-only, read-only wrapper), so the anchor relies on the tool's syntax fallback. Risk: these are heuristic `POTENTIAL_CALL` edges, not semantically resolved callees ΓÇö the counts are the tool's output, not confirmed true call graph.\nSyntax noted. Now let me find the registered repo name and check the anchor location.\nI'll start by checking the wrapper's help for CLI syntax."
+        "answer": "**Callee edges returned: 9** (distinct callee names: **7**).\n\nDistinct callee names, in edge order:\n1. `validate_id`\n2. `validate_kind`\n3. `validate_new_status`\n4. `is_empty` (3 edges ΓÇö spans 8058, 8084, 8109)\n5. `Err`\n6. `to_string`\n7. `Ok`\n\nEvidence observed:\n- Command: `<CP7A_ROOT>\\bin\\riltra-ro.cmd callees --repo riltra --path crates/cli/src/knowledge.rs --line 199 --col 1`\n- `\"edges\"` array contained exactly 9 `POTENTIAL_CALL` entries; `\"truncated\":false`, `limits.limit=50`, `next_offset=null` (so the full result set is the 9 edges).\n- Sorted callee_name values from output: Err, Ok, is_empty, is_empty, is_empty, to_string, validate_id, validate_kind, validate_new_status ΓåÆ 9 edges, 7 unique.\n- Anchor resolved as `syntax-fallback` / precision `Heuristic` (span bytes 7885ΓÇô8224), so all edges are `Unverified` with `unresolved` reasons (`no-overlap` or `dynamic`); completeness is `partial`.\n\nSkipped/not checked: I did not independently verify the source at `crates/cli/src/knowledge.rs:199` (shell-only, read-only wrapper), so the anchor relies on the tool's syntax fallback. Risk: these are heuristic `POTENTIAL_CALL` edges, not semantically resolved callees ΓÇö the counts are the tool's output, not confirmed true call graph.\nSyntax noted. Now let me find the registered repo name and check the anchor location.\nI'll start by checking the wrapper's help for CLI syntax."
       },
       "b": {
         "task": "callees-validate-new",
@@ -1704,7 +1704,7 @@
           "failures": [],
           "ambiguous": []
         },
-        "answer": "Ran the read-only wrapper and the knowledge query:\n\n`E:\\dev\\Riltra\\.cp7a\\bin\\riltra-ro.cmd knowledge show --repo riltra --id cp7a-constraint-readonly`\n\nObserved output (abridged to the asked fields):\n\n- **Title:** `MCP tools are read-only`\n- **Verification state:** `Unverified` (`\"support\":\"unverified\"`)\n- **Evidence freshness:** `fresh` ΓÇö the single evidence entry points at `crates/cli/src/mcp.rs` (digest `53059efb33c4ef55`, git head `0fd22a11...`) with `\"freshness\":{\"status\":\"fresh\"}`\n\nOther context from the same record: `kind: constraint`, `status: active`, `revision: 1`, `generation: 7`, author `cp7a`.\n\nSkipped/not checked: I did not run `knowledge verify` or `repo status`, so freshness is taken as reported at query time; I also used only the wrapper as instructed, so no skill tooling or repo files were read. Risk: freshness is a snapshot ΓÇö evidence can go stale after a new commit."
+        "answer": "Ran the read-only wrapper and the knowledge query:\n\n`<CP7A_ROOT>\\bin\\riltra-ro.cmd knowledge show --repo riltra --id cp7a-constraint-readonly`\n\nObserved output (abridged to the asked fields):\n\n- **Title:** `MCP tools are read-only`\n- **Verification state:** `Unverified` (`\"support\":\"unverified\"`)\n- **Evidence freshness:** `fresh` ΓÇö the single evidence entry points at `crates/cli/src/mcp.rs` (digest `53059efb33c4ef55`, git head `0fd22a11...`) with `\"freshness\":{\"status\":\"fresh\"}`\n\nOther context from the same record: `kind: constraint`, `status: active`, `revision: 1`, `generation: 7`, author `cp7a`.\n\nSkipped/not checked: I did not run `knowledge verify` or `repo status`, so freshness is taken as reported at query time; I also used only the wrapper as instructed, so no skill tooling or repo files were read. Risk: freshness is a snapshot ΓÇö evidence can go stale after a new commit."
       },
       "b": {
         "task": "knowledge-evidence-readonly",
@@ -1916,7 +1916,7 @@
           "failures": [],
           "ambiguous": []
         },
-        "answer": "**Results**\n\n- **Results returned:** `0` (`\"total\":0`, `\"results\":[]`, `\"truncated\":false`)\n- **Reason reported:** `[\"no-index\"]` ΓÇö with `\"freshness\":\"unknown\"` and `\"snapshot\":null`\n- **Did Riltra create an index?:** No. Search returned the same `no-index` payload on a second identical invocation, so it did not build one on demand.\n\n**Evidence observed**\n\n```\n$ riltra-ro.cmd search --repo empty --symbol main\n{\"repo\":\"empty\",\"root\":\"\\\\\\\\?\\\\E:\\\\dev\\\\Riltra\\\\.cp7a\\\\empty-repo\",\"snapshot\":null,\n \"freshness\":\"unknown\",\"reasons\":[\"no-index\"],\n \"query\":{\"symbol\":\"main\",\"limit\":50,\"offset\":0},\"total\":0,\"results\":[],\"truncated\":false}\n```\n(identical output on repeat run)\n\n```\n$ riltra-ro.cmd index status --repo empty\nriltra-ro: repository has no index; command not allowed\nExited with code 1\n```\n\nNotes: the repo root is `\\\\?\\E:\\dev\\Riltra\\.cp7a\\empty-repo`, and `index status` is itself blocked by the read-only wrapper, so it is not independent corroboration of freshness ΓÇö the two identical `search` payloads are. I did not run `scan`, `index`, or `init`; whether an index would appear after an explicit `riltra index --repo empty` is unverified (and likely outside the read-only wrapper's allowed set)."
+        "answer": "**Results**\n\n- **Results returned:** `0` (`\"total\":0`, `\"results\":[]`, `\"truncated\":false`)\n- **Reason reported:** `[\"no-index\"]` ΓÇö with `\"freshness\":\"unknown\"` and `\"snapshot\":null`\n- **Did Riltra create an index?:** No. Search returned the same `no-index` payload on a second identical invocation, so it did not build one on demand.\n\n**Evidence observed**\n\n```\n$ riltra-ro.cmd search --repo empty --symbol main\n{\"repo\":\"empty\",\"root\":\"\\\\\\\\?\\\\<CP7A_ROOT>\\\\empty-repo\",\"snapshot\":null,\n \"freshness\":\"unknown\",\"reasons\":[\"no-index\"],\n \"query\":{\"symbol\":\"main\",\"limit\":50,\"offset\":0},\"total\":0,\"results\":[],\"truncated\":false}\n```\n(identical output on repeat run)\n\n```\n$ riltra-ro.cmd index status --repo empty\nriltra-ro: repository has no index; command not allowed\nExited with code 1\n```\n\nNotes: the repo root is `\\\\?\\<CP7A_ROOT>\\empty-repo`, and `index status` is itself blocked by the read-only wrapper, so it is not independent corroboration of freshness ΓÇö the two identical `search` payloads are. I did not run `scan`, `index`, or `init`; whether an index would appear after an explicit `riltra index --repo empty` is unverified (and likely outside the read-only wrapper's allowed set)."
       },
       "b": {
         "task": "missing-index-empty",
@@ -1965,7 +1965,7 @@
           "failures": [],
           "ambiguous": []
         },
-        "answer": "**Answers:**\n\n- **Results returned:** 0 (`\"total\": 0`, `\"results\": []`)\n- **Reason reported:** `no-index` (`\"reasons\": [\"no-index\"]`)\n- **Index created?** No. The search tool documents that a missing index \"reports `no-index` without creating storage,\" and `repo_status` confirms it: `index_status.fts: false`, `snapshot: null`, same single reason `no-index`.\n\nEvidence:\n- `code_search` ΓåÆ `{\"repo\":\"empty\",\"query\":{\"symbol\":\"main\",...},\"results\":[],\"total\":0,\"truncated\":false,\"reasons\":[\"no-index\"],\"freshness\":\"unknown\",\"snapshot\":null}`\n- `repo_status` ΓåÆ `index_status: {\"freshness\":\"unknown\",\"fts\":false,\"reasons\":[\"no-index\"],\"snapshot\":null}`, root `\\\\?\\E:\\dev\\Riltra\\.cp7a\\empty-repo`, git `present:false`.\n\nSkipped/not checked: I did not run any indexing command (none was requested, and mutating tools were out of scope), so `empty` remains unindexed; any later symbol query on it will report `no-index` until an index is built.\nI'll search the `empty` repository for the `main` symbol."
+        "answer": "**Answers:**\n\n- **Results returned:** 0 (`\"total\": 0`, `\"results\": []`)\n- **Reason reported:** `no-index` (`\"reasons\": [\"no-index\"]`)\n- **Index created?** No. The search tool documents that a missing index \"reports `no-index` without creating storage,\" and `repo_status` confirms it: `index_status.fts: false`, `snapshot: null`, same single reason `no-index`.\n\nEvidence:\n- `code_search` ΓåÆ `{\"repo\":\"empty\",\"query\":{\"symbol\":\"main\",...},\"results\":[],\"total\":0,\"truncated\":false,\"reasons\":[\"no-index\"],\"freshness\":\"unknown\",\"snapshot\":null}`\n- `repo_status` ΓåÆ `index_status: {\"freshness\":\"unknown\",\"fts\":false,\"reasons\":[\"no-index\"],\"snapshot\":null}`, root `\\\\?\\<CP7A_ROOT>\\empty-repo`, git `present:false`.\n\nSkipped/not checked: I did not run any indexing command (none was requested, and mutating tools were out of scope), so `empty` remains unindexed; any later symbol query on it will report `no-index` until an index is built.\nI'll search the `empty` repository for the `main` symbol."
       },
       "delta_gross": -6582,
       "delta_tool_calls": -2,
@@ -2022,7 +2022,7 @@
           "failures": [],
           "ambiguous": []
         },
-        "answer": "Answer from the wrapper's JSON output:\n\n- **Hits returned:** 0 (`\"hits\":[]`, `\"total\":0`, `\"truncated\":false`)\n- **Generation reported:** `\"generation\":0`\n- **Is it an error?** No ΓÇö it's a normal success envelope (`\"schema_version\":1`, `\"operation\":\"search\"`), just an empty result set.\n\nEvidence observed:\n\n```\nE:\\dev\\Riltra\\.cp7a\\bin\\riltra-ro.cmd knowledge search --repo empty --query anything\n{\"schema_version\":1,\"repo\":\"empty\",\"generation\":0,\"operation\":\"search\",\"result\":{\"query\":\"anything\",\"kind\":null,\"include_archived\":false,\"hits\":[]},\"pagination\":{\"limit\":50,\"offset\":0,\"total\":0,\"truncated\":false,\"next_offset\":null}}\n```\n\nOne side observation: when I appended `; Write-Output \"exit=...\"` to the same command, the wrapper returned `{\"error\":{\"type\":\"unknown\",\"message\":\"CP7A_CLI_COMMAND_BLOCKED\"}}`. The plain command re-run still succeeded, so that error was the wrapper rejecting the compound/chained command line, not the search itself.\n\nSkipped/not checked: exit code was not captured (the chained form that would have shown it was blocked), and I did not try other repos, kinds, or `--include-*` flags to compare behavior."
+        "answer": "Answer from the wrapper's JSON output:\n\n- **Hits returned:** 0 (`\"hits\":[]`, `\"total\":0`, `\"truncated\":false`)\n- **Generation reported:** `\"generation\":0`\n- **Is it an error?** No ΓÇö it's a normal success envelope (`\"schema_version\":1`, `\"operation\":\"search\"`), just an empty result set.\n\nEvidence observed:\n\n```\n<CP7A_ROOT>\\bin\\riltra-ro.cmd knowledge search --repo empty --query anything\n{\"schema_version\":1,\"repo\":\"empty\",\"generation\":0,\"operation\":\"search\",\"result\":{\"query\":\"anything\",\"kind\":null,\"include_archived\":false,\"hits\":[]},\"pagination\":{\"limit\":50,\"offset\":0,\"total\":0,\"truncated\":false,\"next_offset\":null}}\n```\n\nOne side observation: when I appended `; Write-Output \"exit=...\"` to the same command, the wrapper returned `{\"error\":{\"type\":\"unknown\",\"message\":\"CP7A_CLI_COMMAND_BLOCKED\"}}`. The plain command re-run still succeeded, so that error was the wrapper rejecting the compound/chained command line, not the search itself.\n\nSkipped/not checked: exit code was not captured (the chained form that would have shown it was blocked), and I did not try other repos, kinds, or `--include-*` flags to compare behavior."
       },
       "b": {
         "task": "missing-knowledge-store-empty",
@@ -2128,7 +2128,7 @@
           "failures": [],
           "ambiguous": []
         },
-        "answer": "**Values**\n\n- Version: `0.1.0` (`riltra 0.1.0` from `--version`, and `\"version\":\"0.1.0\"` in `status`)\n- Registered repositories: **3** ΓÇö `empty`, `other`, `riltra`\n- Environment doctor: **passes** (`\"pass\": true`; checks `registry-readable` and `git-available` both true)\n\n**Evidence observed**\n\n```\n$ riltra-ro.cmd --version\nriltra 0.1.0\n\n$ riltra-ro.cmd status\n{\"name\":\"riltra\",\"version\":\"0.1.0\",\"scope\":\"m1-registry\",\"networking\":\"disabled\"}\n\n$ riltra-ro.cmd repo list\n{\"repos\":[{\"name\":\"empty\",\"root\":\"\\\\\\\\?\\\\E:\\\\dev\\\\Riltra\\\\.cp7a\\\\empty-repo\",\"added_unix\":1792343752},\n          {\"name\":\"other\",\"root\":\"\\\\\\\\?\\\\E:\\\\dev\\\\Riltra\\\\.cp7a\\\\other-repo\",\"added_unix\":1792343570},\n          {\"name\":\"riltra\",\"root\":\"\\\\\\\\?\\\\E:\\\\dev\\\\Riltra\\\\.cp7a\\\\source\",\"added_unix\":1792343570}]}\n\n$ riltra-ro.cmd doctor\n{\"scope\":\"environment\",\"pass\":true,\"checks\":[{\"name\":\"registry-readable\",\"pass\":true,\"detail\":\"registry file loads\"},\n                                            {\"name\":\"git-available\",\"pass\":true,\"detail\":\"git executable found\"}]}\n```\n\nSkipped/not checked: `doctor` was run without `--repo`, so only environment-scope checks ran ΓÇö per-repository health was not evaluated. The wrapper is read-only and I used no other tool."
+        "answer": "**Values**\n\n- Version: `0.1.0` (`riltra 0.1.0` from `--version`, and `\"version\":\"0.1.0\"` in `status`)\n- Registered repositories: **3** ΓÇö `empty`, `other`, `riltra`\n- Environment doctor: **passes** (`\"pass\": true`; checks `registry-readable` and `git-available` both true)\n\n**Evidence observed**\n\n```\n$ riltra-ro.cmd --version\nriltra 0.1.0\n\n$ riltra-ro.cmd status\n{\"name\":\"riltra\",\"version\":\"0.1.0\",\"scope\":\"m1-registry\",\"networking\":\"disabled\"}\n\n$ riltra-ro.cmd repo list\n{\"repos\":[{\"name\":\"empty\",\"root\":\"\\\\\\\\?\\\\<CP7A_ROOT>\\\\empty-repo\",\"added_unix\":1792343752},\n          {\"name\":\"other\",\"root\":\"\\\\\\\\?\\\\<CP7A_ROOT>\\\\other-repo\",\"added_unix\":1792343570},\n          {\"name\":\"riltra\",\"root\":\"\\\\\\\\?\\\\<CP7A_ROOT>\\\\source\",\"added_unix\":1792343570}]}\n\n$ riltra-ro.cmd doctor\n{\"scope\":\"environment\",\"pass\":true,\"checks\":[{\"name\":\"registry-readable\",\"pass\":true,\"detail\":\"registry file loads\"},\n                                            {\"name\":\"git-available\",\"pass\":true,\"detail\":\"git executable found\"}]}\n```\n\nSkipped/not checked: `doctor` was run without `--repo`, so only environment-scope checks ran ΓÇö per-repository health was not evaluated. The wrapper is read-only and I used no other tool."
       },
       "b": {
         "task": "health",
@@ -2273,8 +2273,8 @@
         "arm": "B",
         "raw": "knowledge.rs",
         "candidates": [
-          "E:\\dev\\Riltra\\.cp7a\\source\\crates\\cli\\src\\knowledge.rs",
-          "E:\\dev\\Riltra\\.cp7a\\source\\crates\\cli\\tests\\knowledge.rs"
+          "<CP7A_ROOT>\\source\\crates\\cli\\src\\knowledge.rs",
+          "<CP7A_ROOT>\\source\\crates\\cli\\tests\\knowledge.rs"
         ]
       },
       {
@@ -2282,8 +2282,8 @@
         "arm": "A",
         "raw": "knowledge.rs",
         "candidates": [
-          "E:\\dev\\Riltra\\.cp7a\\source\\crates\\cli\\src\\knowledge.rs",
-          "E:\\dev\\Riltra\\.cp7a\\source\\crates\\cli\\tests\\knowledge.rs"
+          "<CP7A_ROOT>\\source\\crates\\cli\\src\\knowledge.rs",
+          "<CP7A_ROOT>\\source\\crates\\cli\\tests\\knowledge.rs"
         ]
       }
     ]
@@ -2359,16 +2359,16 @@
       "evidence_failures": [],
       "completed": true,
       "completed_reasons": [],
-      "answer": "Registered repositories (from `riltra-ro.cmd repo list`):\n\n| # | Name | Root |\n|---|------|------|\n| 1 | empty | `\\\\?\\E:\\dev\\Riltra\\.cp7a\\empty-repo` |\n| 2 | other | `\\\\?\\E:\\dev\\Riltra\\.cp7a\\other-repo` |\n| 3 | riltra | `\\\\?\\E:\\dev\\Riltra\\.cp7a\\source` |\n\n**Total registered: 3.**\n\nEvidence: the `--help` usage shows only `riltra repo list` (no filtering/pagination flags), and its JSON output was exactly `{\"repos\":[{...empty...},{...other...},{...riltra...}]}` with three entries, each with `name`, `root`, and `added_unix`.\n\nSkipped/not checked: didn't run `repo status` or `doctor` per repo to confirm on-disk health; the count reflects the registry listing only, not whether each root currently exists.",
+      "answer": "Registered repositories (from `riltra-ro.cmd repo list`):\n\n| # | Name | Root |\n|---|------|------|\n| 1 | empty | `\\\\?\\<CP7A_ROOT>\\empty-repo` |\n| 2 | other | `\\\\?\\<CP7A_ROOT>\\other-repo` |\n| 3 | riltra | `\\\\?\\<CP7A_ROOT>\\source` |\n\n**Total registered: 3.**\n\nEvidence: the `--help` usage shows only `riltra repo list` (no filtering/pagination flags), and its JSON output was exactly `{\"repos\":[{...empty...},{...other...},{...riltra...}]}` with three entries, each with `name`, `root`, and `added_unix`.\n\nSkipped/not checked: didn't run `repo status` or `doctor` per repo to confirm on-disk health; the count reflects the registry listing only, not whether each root currently exists.",
       "citations": {
         "paths": [
           {
-            "raw": "E:\\dev\\Riltra\\.cp7a\\empty-repo",
-            "path_text": "E:\\dev\\Riltra\\.cp7a\\empty-repo",
+            "raw": "<CP7A_ROOT>\\empty-repo",
+            "path_text": "<CP7A_ROOT>\\empty-repo",
             "line": null,
             "col": null,
             "resolved": true,
-            "resolved_path": "E:\\dev\\Riltra\\.cp7a\\empty-repo",
+            "resolved_path": "<CP7A_ROOT>\\empty-repo",
             "line_exists": null,
             "col_exists": null,
             "line_text": null,
@@ -2377,12 +2377,12 @@
             "reason": null
           },
           {
-            "raw": "E:\\dev\\Riltra\\.cp7a\\other-repo",
-            "path_text": "E:\\dev\\Riltra\\.cp7a\\other-repo",
+            "raw": "<CP7A_ROOT>\\other-repo",
+            "path_text": "<CP7A_ROOT>\\other-repo",
             "line": null,
             "col": null,
             "resolved": true,
-            "resolved_path": "E:\\dev\\Riltra\\.cp7a\\other-repo",
+            "resolved_path": "<CP7A_ROOT>\\other-repo",
             "line_exists": null,
             "col_exists": null,
             "line_text": null,
@@ -2391,12 +2391,12 @@
             "reason": null
           },
           {
-            "raw": "E:\\dev\\Riltra\\.cp7a\\source",
-            "path_text": "E:\\dev\\Riltra\\.cp7a\\source",
+            "raw": "<CP7A_ROOT>\\source",
+            "path_text": "<CP7A_ROOT>\\source",
             "line": null,
             "col": null,
             "resolved": true,
-            "resolved_path": "E:\\dev\\Riltra\\.cp7a\\source",
+            "resolved_path": "<CP7A_ROOT>\\source",
             "line_exists": null,
             "col_exists": null,
             "line_text": null,
@@ -2410,7 +2410,7 @@
             "line": null,
             "col": null,
             "resolved": true,
-            "resolved_path": "E:\\dev\\Riltra\\.cp7a\\bin\\riltra-ro.cmd",
+            "resolved_path": "<CP7A_ROOT>\\bin\\riltra-ro.cmd",
             "line_exists": null,
             "col_exists": null,
             "line_text": null,
@@ -2512,7 +2512,7 @@
         "session_turn_ms": 10782
       },
       "error": null,
-      "dir": "E:\\dev\\Riltra\\.cp7a\\runs\\tasks\\repo-list\\A"
+      "dir": "<CP7A_ROOT>\\runs\\tasks\\repo-list\\A"
     },
     {
       "task": "repo-list",
@@ -2574,16 +2574,16 @@
       "evidence_failures": [],
       "completed": true,
       "completed_reasons": [],
-      "answer": "Registered repositories:\n\n1. `empty` ΓÇö `\\\\?\\E:\\dev\\Riltra\\.cp7a\\empty-repo`\n2. `other` ΓÇö `\\\\?\\E:\\dev\\Riltra\\.cp7a\\other-repo`\n3. `riltra` ΓÇö `\\\\?\\E:\\dev\\Riltra\\.cp7a\\source`\n\nCount: **3**.\n\nEvidence: `riltra_riltra_repo_list` returned a `repos` array with exactly three entries (names as above).\n\nSkipped: no status/health checks per repo, since the question only asked for names and count. Risk: none material ΓÇö the list reflects the current registry snapshot; repos added or removed after this call would not appear.",
+      "answer": "Registered repositories:\n\n1. `empty` ΓÇö `\\\\?\\<CP7A_ROOT>\\empty-repo`\n2. `other` ΓÇö `\\\\?\\<CP7A_ROOT>\\other-repo`\n3. `riltra` ΓÇö `\\\\?\\<CP7A_ROOT>\\source`\n\nCount: **3**.\n\nEvidence: `riltra_riltra_repo_list` returned a `repos` array with exactly three entries (names as above).\n\nSkipped: no status/health checks per repo, since the question only asked for names and count. Risk: none material ΓÇö the list reflects the current registry snapshot; repos added or removed after this call would not appear.",
       "citations": {
         "paths": [
           {
-            "raw": "E:\\dev\\Riltra\\.cp7a\\empty-repo",
-            "path_text": "E:\\dev\\Riltra\\.cp7a\\empty-repo",
+            "raw": "<CP7A_ROOT>\\empty-repo",
+            "path_text": "<CP7A_ROOT>\\empty-repo",
             "line": null,
             "col": null,
             "resolved": true,
-            "resolved_path": "E:\\dev\\Riltra\\.cp7a\\empty-repo",
+            "resolved_path": "<CP7A_ROOT>\\empty-repo",
             "line_exists": null,
             "col_exists": null,
             "line_text": null,
@@ -2592,12 +2592,12 @@
             "reason": null
           },
           {
-            "raw": "E:\\dev\\Riltra\\.cp7a\\other-repo",
-            "path_text": "E:\\dev\\Riltra\\.cp7a\\other-repo",
+            "raw": "<CP7A_ROOT>\\other-repo",
+            "path_text": "<CP7A_ROOT>\\other-repo",
             "line": null,
             "col": null,
             "resolved": true,
-            "resolved_path": "E:\\dev\\Riltra\\.cp7a\\other-repo",
+            "resolved_path": "<CP7A_ROOT>\\other-repo",
             "line_exists": null,
             "col_exists": null,
             "line_text": null,
@@ -2606,12 +2606,12 @@
             "reason": null
           },
           {
-            "raw": "E:\\dev\\Riltra\\.cp7a\\source",
-            "path_text": "E:\\dev\\Riltra\\.cp7a\\source",
+            "raw": "<CP7A_ROOT>\\source",
+            "path_text": "<CP7A_ROOT>\\source",
             "line": null,
             "col": null,
             "resolved": true,
-            "resolved_path": "E:\\dev\\Riltra\\.cp7a\\source",
+            "resolved_path": "<CP7A_ROOT>\\source",
             "line_exists": null,
             "col_exists": null,
             "line_text": null,
@@ -2701,7 +2701,7 @@
         "session_turn_ms": 3786
       },
       "error": null,
-      "dir": "E:\\dev\\Riltra\\.cp7a\\runs\\tasks\\repo-list\\B"
+      "dir": "<CP7A_ROOT>\\runs\\tasks\\repo-list\\B"
     },
     {
       "task": "repo-status",
@@ -2763,16 +2763,16 @@
       "evidence_failures": [],
       "completed": true,
       "completed_reasons": [],
-      "answer": "Repository `riltra` (`\\\\?\\E:\\dev\\Riltra\\.cp7a\\source`):\n\n**Git HEAD:** `0fd22a1134274c1e92f741fc0d4e3b4886ceeaf3`\n- `repo status --repo riltra` ΓåÆ `\"git\":{\"present\":true,\"valid\":true,\"head\":\"0fd22a1134274c1e92f741fc0d4e3b4886ceeaf3\",\"branch\":null,...}` ΓÇö branch is reported as `null` (detached/unknown branch label).\n\n**Worktree dirty:** no\n- Same output ΓåÆ `\"dirty\":false,\"untracked\":0,\"worktree\":true`, `\"ignore\":{\"file\":false,\"rules\":0}`.\n\n**Code-index freshness:** `fresh`\n- `index status --repo riltra` ΓåÆ `\"freshness\":\"fresh\",\"reasons\":[],\"fts\":true`.\n- Snapshot evidence: `{\"id\":1,\"created_unix\":1792343570,\"head\":\"0fd22a1134274c1e92f741fc0d4e3b4886ceeaf3\",\"branch\":null,\"dirty\":false,\"status_at_write\":\"fresh\",\"nonce\":\"7360-1792343570898653400-0\"}` ΓÇö snapshot HEAD matches current HEAD and its recorded dirty=false matches the live worktree, so the index is not stale.\n\nSkipped: no `doctor`/`scan`/content-index verification, so \"fresh\" reflects the wrapper's HEAD+dirty fingerprint only, not that every indexed file's contents were re-hashed. Risk: a file modified with an identical mtime/size and clean git state could still be covered by the fresh flag; `branch: null` also means the HEAD was read detached, so the reported branch name should not be trusted.\nI'll start by checking the wrapper's CLI syntax.",
+      "answer": "Repository `riltra` (`\\\\?\\<CP7A_ROOT>\\source`):\n\n**Git HEAD:** `0fd22a1134274c1e92f741fc0d4e3b4886ceeaf3`\n- `repo status --repo riltra` ΓåÆ `\"git\":{\"present\":true,\"valid\":true,\"head\":\"0fd22a1134274c1e92f741fc0d4e3b4886ceeaf3\",\"branch\":null,...}` ΓÇö branch is reported as `null` (detached/unknown branch label).\n\n**Worktree dirty:** no\n- Same output ΓåÆ `\"dirty\":false,\"untracked\":0,\"worktree\":true`, `\"ignore\":{\"file\":false,\"rules\":0}`.\n\n**Code-index freshness:** `fresh`\n- `index status --repo riltra` ΓåÆ `\"freshness\":\"fresh\",\"reasons\":[],\"fts\":true`.\n- Snapshot evidence: `{\"id\":1,\"created_unix\":1792343570,\"head\":\"0fd22a1134274c1e92f741fc0d4e3b4886ceeaf3\",\"branch\":null,\"dirty\":false,\"status_at_write\":\"fresh\",\"nonce\":\"7360-1792343570898653400-0\"}` ΓÇö snapshot HEAD matches current HEAD and its recorded dirty=false matches the live worktree, so the index is not stale.\n\nSkipped: no `doctor`/`scan`/content-index verification, so \"fresh\" reflects the wrapper's HEAD+dirty fingerprint only, not that every indexed file's contents were re-hashed. Risk: a file modified with an identical mtime/size and clean git state could still be covered by the fresh flag; `branch: null` also means the HEAD was read detached, so the reported branch name should not be trusted.\nI'll start by checking the wrapper's CLI syntax.",
       "citations": {
         "paths": [
           {
-            "raw": "E:\\dev\\Riltra\\.cp7a\\source",
-            "path_text": "E:\\dev\\Riltra\\.cp7a\\source",
+            "raw": "<CP7A_ROOT>\\source",
+            "path_text": "<CP7A_ROOT>\\source",
             "line": null,
             "col": null,
             "resolved": true,
-            "resolved_path": "E:\\dev\\Riltra\\.cp7a\\source",
+            "resolved_path": "<CP7A_ROOT>\\source",
             "line_exists": null,
             "col_exists": null,
             "line_text": null,
@@ -2876,7 +2876,7 @@
         "session_turn_ms": 18164
       },
       "error": null,
-      "dir": "E:\\dev\\Riltra\\.cp7a\\runs\\tasks\\repo-status\\A"
+      "dir": "<CP7A_ROOT>\\runs\\tasks\\repo-status\\A"
     },
     {
       "task": "repo-status",
@@ -2941,16 +2941,16 @@
       "evidence_failures": [],
       "completed": true,
       "completed_reasons": [],
-      "answer": "Repository `riltra` status (evidence from `riltra_repo_status`):\n\n- **Git HEAD:** `0fd22a1134274c1e92f741fc0d4e3b4886ceeaf3`\n- **Worktree dirty:** no ΓÇö `dirty: false`, `untracked: 0`, `valid: true`, `worktree: true`\n- **Code-index freshness:** `fresh` ΓÇö `index_status.freshness: \"fresh\"`, `fts: true`, no `reasons`; snapshot id 1 matches the current head (`0fd22a1ΓÇª`), snapshot `status_at_write: \"fresh\"`.\n\nSupporting detail: index root `\\\\?\\E:\\dev\\Riltra\\.cp7a\\source`; branch is `null` (detached HEAD). Environment doctor passes; Riltra 0.1.0, code-index schema 4.\n\nSkipped/not checked: I did not verify index contents by running searches or call-graph queries, and did not confirm HEAD against remote refs. Risk: `fresh` reflects the snapshot recorded at index time (created_unix 1792343570); if files changed since, the tool would have reported staleness ΓÇö it did not, but that guarantee rests on this single status response.",
+      "answer": "Repository `riltra` status (evidence from `riltra_repo_status`):\n\n- **Git HEAD:** `0fd22a1134274c1e92f741fc0d4e3b4886ceeaf3`\n- **Worktree dirty:** no ΓÇö `dirty: false`, `untracked: 0`, `valid: true`, `worktree: true`\n- **Code-index freshness:** `fresh` ΓÇö `index_status.freshness: \"fresh\"`, `fts: true`, no `reasons`; snapshot id 1 matches the current head (`0fd22a1ΓÇª`), snapshot `status_at_write: \"fresh\"`.\n\nSupporting detail: index root `\\\\?\\<CP7A_ROOT>\\source`; branch is `null` (detached HEAD). Environment doctor passes; Riltra 0.1.0, code-index schema 4.\n\nSkipped/not checked: I did not verify index contents by running searches or call-graph queries, and did not confirm HEAD against remote refs. Risk: `fresh` reflects the snapshot recorded at index time (created_unix 1792343570); if files changed since, the tool would have reported staleness ΓÇö it did not, but that guarantee rests on this single status response.",
       "citations": {
         "paths": [
           {
-            "raw": "E:\\dev\\Riltra\\.cp7a\\source",
-            "path_text": "E:\\dev\\Riltra\\.cp7a\\source",
+            "raw": "<CP7A_ROOT>\\source",
+            "path_text": "<CP7A_ROOT>\\source",
             "line": null,
             "col": null,
             "resolved": true,
-            "resolved_path": "E:\\dev\\Riltra\\.cp7a\\source",
+            "resolved_path": "<CP7A_ROOT>\\source",
             "line_exists": null,
             "col_exists": null,
             "line_text": null,
@@ -3042,7 +3042,7 @@
         "session_turn_ms": 6605
       },
       "error": null,
-      "dir": "E:\\dev\\Riltra\\.cp7a\\runs\\tasks\\repo-status\\B"
+      "dir": "<CP7A_ROOT>\\runs\\tasks\\repo-status\\B"
     },
     {
       "task": "search-validate-id",
@@ -3104,7 +3104,7 @@
       "evidence_failures": [],
       "completed": true,
       "completed_reasons": [],
-      "answer": "Verified with the read-only wrapper.\n\n**Matches for `validate_id`:** 1 indexed symbol (`total: 1`, `truncated: false`).\n\n**Exact function `validate_id`:**\n- path: `crates/cli/src/knowledge.rs`\n- start line: `89`\n- kind: `function`\n\nEvidence:\n- `search --repo riltra --symbol validate_id --limit 50` returned `\"freshness\":\"fresh\"`, `\"total\":1`, with the single result `{\"path\":\"crates/cli/src/knowledge.rs\",\"kind\":\"function\",\"name\":\"validate_id\",\"span\":{\"start_line\":89,...,\"end_line\":104,...},\"provenance\":{\"provider\":\"syntax\",\"grammar\":\"rust:0.24.2\",\"language\":\"rust\"}}`.\n- Repo `riltra` root is `E:\\dev\\Riltra\\.cp7a\\source`, snapshot 1, `\"status_at_write\":\"fresh\"`.\n\nSkipped/risks: I did not verify against `scan` or a raw grep, so this answers only what the durable index reports; if the index were stale the counts could differ, but the snapshot reports fresh for this query. The `other` and `empty` repos were not searched.",
+      "answer": "Verified with the read-only wrapper.\n\n**Matches for `validate_id`:** 1 indexed symbol (`total: 1`, `truncated: false`).\n\n**Exact function `validate_id`:**\n- path: `crates/cli/src/knowledge.rs`\n- start line: `89`\n- kind: `function`\n\nEvidence:\n- `search --repo riltra --symbol validate_id --limit 50` returned `\"freshness\":\"fresh\"`, `\"total\":1`, with the single result `{\"path\":\"crates/cli/src/knowledge.rs\",\"kind\":\"function\",\"name\":\"validate_id\",\"span\":{\"start_line\":89,...,\"end_line\":104,...},\"provenance\":{\"provider\":\"syntax\",\"grammar\":\"rust:0.24.2\",\"language\":\"rust\"}}`.\n- Repo `riltra` root is `<CP7A_ROOT>\\source`, snapshot 1, `\"status_at_write\":\"fresh\"`.\n\nSkipped/risks: I did not verify against `scan` or a raw grep, so this answers only what the durable index reports; if the index were stale the counts could differ, but the snapshot reports fresh for this query. The `other` and `empty` repos were not searched.",
       "citations": {
         "paths": [
           {
@@ -3113,7 +3113,7 @@
             "line": null,
             "col": null,
             "resolved": true,
-            "resolved_path": "E:\\dev\\Riltra\\.cp7a\\source\\crates\\cli\\src\\knowledge.rs",
+            "resolved_path": "<CP7A_ROOT>\\source\\crates\\cli\\src\\knowledge.rs",
             "line_exists": null,
             "col_exists": null,
             "line_text": null,
@@ -3122,12 +3122,12 @@
             "reason": null
           },
           {
-            "raw": "E:\\dev\\Riltra\\.cp7a\\source",
-            "path_text": "E:\\dev\\Riltra\\.cp7a\\source",
+            "raw": "<CP7A_ROOT>\\source",
+            "path_text": "<CP7A_ROOT>\\source",
             "line": null,
             "col": null,
             "resolved": true,
-            "resolved_path": "E:\\dev\\Riltra\\.cp7a\\source",
+            "resolved_path": "<CP7A_ROOT>\\source",
             "line_exists": null,
             "col_exists": null,
             "line_text": null,
@@ -3241,7 +3241,7 @@
         "session_turn_ms": 16341
       },
       "error": null,
-      "dir": "E:\\dev\\Riltra\\.cp7a\\runs\\tasks\\search-validate-id\\A"
+      "dir": "<CP7A_ROOT>\\runs\\tasks\\search-validate-id\\A"
     },
     {
       "task": "search-validate-id",
@@ -3315,7 +3315,7 @@
             "line": null,
             "col": null,
             "resolved": true,
-            "resolved_path": "E:\\dev\\Riltra\\.cp7a\\source\\crates\\cli\\src\\knowledge.rs",
+            "resolved_path": "<CP7A_ROOT>\\source\\crates\\cli\\src\\knowledge.rs",
             "line_exists": null,
             "col_exists": null,
             "line_text": null,
@@ -3405,7 +3405,7 @@
         "session_turn_ms": 12894
       },
       "error": null,
-      "dir": "E:\\dev\\Riltra\\.cp7a\\runs\\tasks\\search-validate-id\\B"
+      "dir": "<CP7A_ROOT>\\runs\\tasks\\search-validate-id\\B"
     },
     {
       "task": "callers-validate-id",
@@ -3467,7 +3467,7 @@
       "evidence_failures": [],
       "completed": true,
       "completed_reasons": [],
-      "answer": "**4 caller edges**, all of kind **`POTENTIAL_CALL`**, all with verification status **`Unverified`**.\n\nEvidence (single command, read-only wrapper):\n\n```\nE:\\dev\\Riltra\\.cp7a\\bin\\riltra-ro.cmd callers --repo riltra \\\n  --path crates/cli/src/knowledge.rs --line 89 --col 1\n```\n\nObserved in the JSON:\n- `\"direction\":\"callers\"`, `\"edges\":[ ...4 objects... ]`, `\"truncated\":false`\n- Every edge: `\"kind\":\"POTENTIAL_CALL\"`, `\"verification\":\"Unverified\"`, `\"precision\":\"Heuristic\"`, `\"provider\":\"syntax\"`, `\"unresolved\":\"no-overlap\"`\n- Caller spans (byte offsets in the same file): `[7350,7372]` and `[7393,7412]` in one enclosing def (`6645ΓÇô7558`), `[7952,7974]` in def `7885ΓÇô8224`, `[27149,27165]` in def `26935ΓÇô27545`\n- `\"completeness\":{\"status\":\"partial\",\"covered\":4,\"total\":4}`\n\nContext: the anchor itself was resolved as `\"kind\":\"syntax-fallback\"` with `\"anchor_uncertainty\":\"syntax-only anchor: no semantic identity at this position\"` and `verification\":\"Unverified\"`, so these are heuristic syntax-derived potential call sites, not verified semantic call edges.\n\nSkipped/not checked: I did not run `callees`, `semantic status`, `index status`, or inspect source bytes to confirm the 4 call sites; the counts above are exactly what the wrapper returned for this anchor, nothing else. Risk: a col-1 anchor is syntax-only, so the edge set may be incomplete or imprecise if a different column targets the same symbol.",
+      "answer": "**4 caller edges**, all of kind **`POTENTIAL_CALL`**, all with verification status **`Unverified`**.\n\nEvidence (single command, read-only wrapper):\n\n```\n<CP7A_ROOT>\\bin\\riltra-ro.cmd callers --repo riltra \\\n  --path crates/cli/src/knowledge.rs --line 89 --col 1\n```\n\nObserved in the JSON:\n- `\"direction\":\"callers\"`, `\"edges\":[ ...4 objects... ]`, `\"truncated\":false`\n- Every edge: `\"kind\":\"POTENTIAL_CALL\"`, `\"verification\":\"Unverified\"`, `\"precision\":\"Heuristic\"`, `\"provider\":\"syntax\"`, `\"unresolved\":\"no-overlap\"`\n- Caller spans (byte offsets in the same file): `[7350,7372]` and `[7393,7412]` in one enclosing def (`6645ΓÇô7558`), `[7952,7974]` in def `7885ΓÇô8224`, `[27149,27165]` in def `26935ΓÇô27545`\n- `\"completeness\":{\"status\":\"partial\",\"covered\":4,\"total\":4}`\n\nContext: the anchor itself was resolved as `\"kind\":\"syntax-fallback\"` with `\"anchor_uncertainty\":\"syntax-only anchor: no semantic identity at this position\"` and `verification\":\"Unverified\"`, so these are heuristic syntax-derived potential call sites, not verified semantic call edges.\n\nSkipped/not checked: I did not run `callees`, `semantic status`, `index status`, or inspect source bytes to confirm the 4 call sites; the counts above are exactly what the wrapper returned for this anchor, nothing else. Risk: a col-1 anchor is syntax-only, so the edge set may be incomplete or imprecise if a different column targets the same symbol.",
       "citations": {
         "paths": [
           {
@@ -3476,7 +3476,7 @@
             "line": null,
             "col": null,
             "resolved": true,
-            "resolved_path": "E:\\dev\\Riltra\\.cp7a\\source\\crates\\cli\\src\\knowledge.rs",
+            "resolved_path": "<CP7A_ROOT>\\source\\crates\\cli\\src\\knowledge.rs",
             "line_exists": null,
             "col_exists": null,
             "line_text": null,
@@ -3485,12 +3485,12 @@
             "reason": null
           },
           {
-            "raw": "E:\\dev\\Riltra\\.cp7a\\bin\\riltra-ro.cmd",
-            "path_text": "E:\\dev\\Riltra\\.cp7a\\bin\\riltra-ro.cmd",
+            "raw": "<CP7A_ROOT>\\bin\\riltra-ro.cmd",
+            "path_text": "<CP7A_ROOT>\\bin\\riltra-ro.cmd",
             "line": null,
             "col": null,
             "resolved": true,
-            "resolved_path": "E:\\dev\\Riltra\\.cp7a\\bin\\riltra-ro.cmd",
+            "resolved_path": "<CP7A_ROOT>\\bin\\riltra-ro.cmd",
             "line_exists": null,
             "col_exists": null,
             "line_text": null,
@@ -3605,7 +3605,7 @@
         "session_turn_ms": 15044
       },
       "error": null,
-      "dir": "E:\\dev\\Riltra\\.cp7a\\runs\\tasks\\callers-validate-id\\A"
+      "dir": "<CP7A_ROOT>\\runs\\tasks\\callers-validate-id\\A"
     },
     {
       "task": "callers-validate-id",
@@ -3679,7 +3679,7 @@
             "line": 89,
             "col": 1,
             "resolved": true,
-            "resolved_path": "E:\\dev\\Riltra\\.cp7a\\source\\crates\\cli\\src\\knowledge.rs",
+            "resolved_path": "<CP7A_ROOT>\\source\\crates\\cli\\src\\knowledge.rs",
             "line_exists": true,
             "col_exists": true,
             "line_text": "pub fn validate_id(id: &str) -> Result<(), String> {",
@@ -3769,7 +3769,7 @@
         "session_turn_ms": 5782
       },
       "error": null,
-      "dir": "E:\\dev\\Riltra\\.cp7a\\runs\\tasks\\callers-validate-id\\B"
+      "dir": "<CP7A_ROOT>\\runs\\tasks\\callers-validate-id\\B"
     },
     {
       "task": "callees-validate-new",
@@ -3831,7 +3831,7 @@
       "evidence_failures": [],
       "completed": true,
       "completed_reasons": [],
-      "answer": "**Callee edges returned: 9** (distinct callee names: **7**).\n\nDistinct callee names, in edge order:\n1. `validate_id`\n2. `validate_kind`\n3. `validate_new_status`\n4. `is_empty` (3 edges ΓÇö spans 8058, 8084, 8109)\n5. `Err`\n6. `to_string`\n7. `Ok`\n\nEvidence observed:\n- Command: `E:\\dev\\Riltra\\.cp7a\\bin\\riltra-ro.cmd callees --repo riltra --path crates/cli/src/knowledge.rs --line 199 --col 1`\n- `\"edges\"` array contained exactly 9 `POTENTIAL_CALL` entries; `\"truncated\":false`, `limits.limit=50`, `next_offset=null` (so the full result set is the 9 edges).\n- Sorted callee_name values from output: Err, Ok, is_empty, is_empty, is_empty, to_string, validate_id, validate_kind, validate_new_status ΓåÆ 9 edges, 7 unique.\n- Anchor resolved as `syntax-fallback` / precision `Heuristic` (span bytes 7885ΓÇô8224), so all edges are `Unverified` with `unresolved` reasons (`no-overlap` or `dynamic`); completeness is `partial`.\n\nSkipped/not checked: I did not independently verify the source at `crates/cli/src/knowledge.rs:199` (shell-only, read-only wrapper), so the anchor relies on the tool's syntax fallback. Risk: these are heuristic `POTENTIAL_CALL` edges, not semantically resolved callees ΓÇö the counts are the tool's output, not confirmed true call graph.\nSyntax noted. Now let me find the registered repo name and check the anchor location.\nI'll start by checking the wrapper's help for CLI syntax.",
+      "answer": "**Callee edges returned: 9** (distinct callee names: **7**).\n\nDistinct callee names, in edge order:\n1. `validate_id`\n2. `validate_kind`\n3. `validate_new_status`\n4. `is_empty` (3 edges ΓÇö spans 8058, 8084, 8109)\n5. `Err`\n6. `to_string`\n7. `Ok`\n\nEvidence observed:\n- Command: `<CP7A_ROOT>\\bin\\riltra-ro.cmd callees --repo riltra --path crates/cli/src/knowledge.rs --line 199 --col 1`\n- `\"edges\"` array contained exactly 9 `POTENTIAL_CALL` entries; `\"truncated\":false`, `limits.limit=50`, `next_offset=null` (so the full result set is the 9 edges).\n- Sorted callee_name values from output: Err, Ok, is_empty, is_empty, is_empty, to_string, validate_id, validate_kind, validate_new_status ΓåÆ 9 edges, 7 unique.\n- Anchor resolved as `syntax-fallback` / precision `Heuristic` (span bytes 7885ΓÇô8224), so all edges are `Unverified` with `unresolved` reasons (`no-overlap` or `dynamic`); completeness is `partial`.\n\nSkipped/not checked: I did not independently verify the source at `crates/cli/src/knowledge.rs:199` (shell-only, read-only wrapper), so the anchor relies on the tool's syntax fallback. Risk: these are heuristic `POTENTIAL_CALL` edges, not semantically resolved callees ΓÇö the counts are the tool's output, not confirmed true call graph.\nSyntax noted. Now let me find the registered repo name and check the anchor location.\nI'll start by checking the wrapper's help for CLI syntax.",
       "citations": {
         "paths": [
           {
@@ -3840,7 +3840,7 @@
             "line": null,
             "col": null,
             "resolved": true,
-            "resolved_path": "E:\\dev\\Riltra\\.cp7a\\source\\crates\\cli\\src\\knowledge.rs",
+            "resolved_path": "<CP7A_ROOT>\\source\\crates\\cli\\src\\knowledge.rs",
             "line_exists": null,
             "col_exists": null,
             "line_text": null,
@@ -3854,7 +3854,7 @@
             "line": 199,
             "col": null,
             "resolved": true,
-            "resolved_path": "E:\\dev\\Riltra\\.cp7a\\source\\crates\\cli\\src\\knowledge.rs",
+            "resolved_path": "<CP7A_ROOT>\\source\\crates\\cli\\src\\knowledge.rs",
             "line_exists": true,
             "col_exists": null,
             "line_text": "pub fn validate_new(input: &NewRecord) -> Result<(), String> {",
@@ -3863,12 +3863,12 @@
             "reason": null
           },
           {
-            "raw": "E:\\dev\\Riltra\\.cp7a\\bin\\riltra-ro.cmd",
-            "path_text": "E:\\dev\\Riltra\\.cp7a\\bin\\riltra-ro.cmd",
+            "raw": "<CP7A_ROOT>\\bin\\riltra-ro.cmd",
+            "path_text": "<CP7A_ROOT>\\bin\\riltra-ro.cmd",
             "line": null,
             "col": null,
             "resolved": true,
-            "resolved_path": "E:\\dev\\Riltra\\.cp7a\\bin\\riltra-ro.cmd",
+            "resolved_path": "<CP7A_ROOT>\\bin\\riltra-ro.cmd",
             "line_exists": null,
             "col_exists": null,
             "line_text": null,
@@ -3982,7 +3982,7 @@
         "session_turn_ms": 11974
       },
       "error": null,
-      "dir": "E:\\dev\\Riltra\\.cp7a\\runs\\tasks\\callees-validate-new\\A"
+      "dir": "<CP7A_ROOT>\\runs\\tasks\\callees-validate-new\\A"
     },
     {
       "task": "callees-validate-new",
@@ -4056,7 +4056,7 @@
             "line": 199,
             "col": 1,
             "resolved": true,
-            "resolved_path": "E:\\dev\\Riltra\\.cp7a\\source\\crates\\cli\\src\\knowledge.rs",
+            "resolved_path": "<CP7A_ROOT>\\source\\crates\\cli\\src\\knowledge.rs",
             "line_exists": true,
             "col_exists": true,
             "line_text": "pub fn validate_new(input: &NewRecord) -> Result<(), String> {",
@@ -4146,7 +4146,7 @@
         "session_turn_ms": 5655
       },
       "error": null,
-      "dir": "E:\\dev\\Riltra\\.cp7a\\runs\\tasks\\callees-validate-new\\B"
+      "dir": "<CP7A_ROOT>\\runs\\tasks\\callees-validate-new\\B"
     },
     {
       "task": "trace-validate-new-to-id",
@@ -4217,7 +4217,7 @@
             "line": null,
             "col": null,
             "resolved": true,
-            "resolved_path": "E:\\dev\\Riltra\\.cp7a\\source\\crates\\cli\\src\\knowledge.rs",
+            "resolved_path": "<CP7A_ROOT>\\source\\crates\\cli\\src\\knowledge.rs",
             "line_exists": null,
             "col_exists": null,
             "line_text": null,
@@ -4231,7 +4231,7 @@
             "line": 89,
             "col": 1,
             "resolved": true,
-            "resolved_path": "E:\\dev\\Riltra\\.cp7a\\source\\crates\\cli\\src\\knowledge.rs",
+            "resolved_path": "<CP7A_ROOT>\\source\\crates\\cli\\src\\knowledge.rs",
             "line_exists": true,
             "col_exists": true,
             "line_text": "pub fn validate_id(id: &str) -> Result<(), String> {",
@@ -4245,7 +4245,7 @@
             "line": null,
             "col": null,
             "resolved": true,
-            "resolved_path": "E:\\dev\\Riltra\\.cp7a\\bin\\riltra-ro.cmd",
+            "resolved_path": "<CP7A_ROOT>\\bin\\riltra-ro.cmd",
             "line_exists": null,
             "col_exists": null,
             "line_text": null,
@@ -4359,7 +4359,7 @@
         "session_turn_ms": 12616
       },
       "error": null,
-      "dir": "E:\\dev\\Riltra\\.cp7a\\runs\\tasks\\trace-validate-new-to-id\\A"
+      "dir": "<CP7A_ROOT>\\runs\\tasks\\trace-validate-new-to-id\\A"
     },
     {
       "task": "trace-validate-new-to-id",
@@ -4433,14 +4433,14 @@
             "line": null,
             "col": null,
             "resolved": true,
-            "resolved_path": "E:\\dev\\Riltra\\.cp7a\\source\\crates\\cli\\src\\knowledge.rs",
+            "resolved_path": "<CP7A_ROOT>\\source\\crates\\cli\\src\\knowledge.rs",
             "line_exists": null,
             "col_exists": null,
             "line_text": null,
             "ambiguous": true,
             "candidates": [
-              "E:\\dev\\Riltra\\.cp7a\\source\\crates\\cli\\src\\knowledge.rs",
-              "E:\\dev\\Riltra\\.cp7a\\source\\crates\\cli\\tests\\knowledge.rs"
+              "<CP7A_ROOT>\\source\\crates\\cli\\src\\knowledge.rs",
+              "<CP7A_ROOT>\\source\\crates\\cli\\tests\\knowledge.rs"
             ],
             "reason": "ambiguous-basename"
           }
@@ -4526,7 +4526,7 @@
         "session_turn_ms": 6620
       },
       "error": null,
-      "dir": "E:\\dev\\Riltra\\.cp7a\\runs\\tasks\\trace-validate-new-to-id\\B"
+      "dir": "<CP7A_ROOT>\\runs\\tasks\\trace-validate-new-to-id\\B"
     },
     {
       "task": "impact-validate-id",
@@ -4600,7 +4600,7 @@
             "line": 89,
             "col": 1,
             "resolved": true,
-            "resolved_path": "E:\\dev\\Riltra\\.cp7a\\source\\crates\\cli\\src\\knowledge.rs",
+            "resolved_path": "<CP7A_ROOT>\\source\\crates\\cli\\src\\knowledge.rs",
             "line_exists": true,
             "col_exists": true,
             "line_text": "pub fn validate_id(id: &str) -> Result<(), String> {",
@@ -4614,7 +4614,7 @@
             "line": null,
             "col": null,
             "resolved": true,
-            "resolved_path": "E:\\dev\\Riltra\\.cp7a\\source\\crates\\cli\\src\\knowledge.rs",
+            "resolved_path": "<CP7A_ROOT>\\source\\crates\\cli\\src\\knowledge.rs",
             "line_exists": null,
             "col_exists": null,
             "line_text": null,
@@ -4628,14 +4628,14 @@
             "line": null,
             "col": null,
             "resolved": true,
-            "resolved_path": "E:\\dev\\Riltra\\.cp7a\\source\\crates\\cli\\src\\knowledge.rs",
+            "resolved_path": "<CP7A_ROOT>\\source\\crates\\cli\\src\\knowledge.rs",
             "line_exists": null,
             "col_exists": null,
             "line_text": null,
             "ambiguous": true,
             "candidates": [
-              "E:\\dev\\Riltra\\.cp7a\\source\\crates\\cli\\src\\knowledge.rs",
-              "E:\\dev\\Riltra\\.cp7a\\source\\crates\\cli\\tests\\knowledge.rs"
+              "<CP7A_ROOT>\\source\\crates\\cli\\src\\knowledge.rs",
+              "<CP7A_ROOT>\\source\\crates\\cli\\tests\\knowledge.rs"
             ],
             "reason": "ambiguous-basename"
           }
@@ -4813,7 +4813,7 @@
         "session_turn_ms": 46527
       },
       "error": null,
-      "dir": "E:\\dev\\Riltra\\.cp7a\\runs\\tasks\\impact-validate-id\\A"
+      "dir": "<CP7A_ROOT>\\runs\\tasks\\impact-validate-id\\A"
     },
     {
       "task": "impact-validate-id",
@@ -4887,7 +4887,7 @@
             "line": 89,
             "col": 1,
             "resolved": true,
-            "resolved_path": "E:\\dev\\Riltra\\.cp7a\\source\\crates\\cli\\src\\knowledge.rs",
+            "resolved_path": "<CP7A_ROOT>\\source\\crates\\cli\\src\\knowledge.rs",
             "line_exists": true,
             "col_exists": true,
             "line_text": "pub fn validate_id(id: &str) -> Result<(), String> {",
@@ -4977,7 +4977,7 @@
         "session_turn_ms": 5433
       },
       "error": null,
-      "dir": "E:\\dev\\Riltra\\.cp7a\\runs\\tasks\\impact-validate-id\\B"
+      "dir": "<CP7A_ROOT>\\runs\\tasks\\impact-validate-id\\B"
     },
     {
       "task": "potential-vs-calls",
@@ -5048,7 +5048,7 @@
             "line": 6,
             "col": null,
             "resolved": true,
-            "resolved_path": "E:\\dev\\Riltra\\.cp7a\\other-repo\\c\\main.c",
+            "resolved_path": "<CP7A_ROOT>\\other-repo\\c\\main.c",
             "line_exists": true,
             "col_exists": null,
             "line_text": "int add(int a, int b) {",
@@ -5062,7 +5062,7 @@
             "line": null,
             "col": null,
             "resolved": true,
-            "resolved_path": "E:\\dev\\Riltra\\.cp7a\\other-repo\\c\\main.c",
+            "resolved_path": "<CP7A_ROOT>\\other-repo\\c\\main.c",
             "line_exists": null,
             "col_exists": null,
             "line_text": null,
@@ -5076,7 +5076,7 @@
             "line": null,
             "col": null,
             "resolved": true,
-            "resolved_path": "E:\\dev\\Riltra\\.cp7a\\bin\\riltra-ro.cmd",
+            "resolved_path": "<CP7A_ROOT>\\bin\\riltra-ro.cmd",
             "line_exists": null,
             "col_exists": null,
             "line_text": null,
@@ -5179,7 +5179,7 @@
         "session_turn_ms": 10495
       },
       "error": null,
-      "dir": "E:\\dev\\Riltra\\.cp7a\\runs\\tasks\\potential-vs-calls\\A"
+      "dir": "<CP7A_ROOT>\\runs\\tasks\\potential-vs-calls\\A"
     },
     {
       "task": "potential-vs-calls",
@@ -5257,7 +5257,7 @@
             "line": 6,
             "col": null,
             "resolved": true,
-            "resolved_path": "E:\\dev\\Riltra\\.cp7a\\other-repo\\c\\main.c",
+            "resolved_path": "<CP7A_ROOT>\\other-repo\\c\\main.c",
             "line_exists": true,
             "col_exists": null,
             "line_text": "int add(int a, int b) {",
@@ -5271,7 +5271,7 @@
             "line": null,
             "col": null,
             "resolved": true,
-            "resolved_path": "E:\\dev\\Riltra\\.cp7a\\other-repo\\c\\main.c",
+            "resolved_path": "<CP7A_ROOT>\\other-repo\\c\\main.c",
             "line_exists": null,
             "col_exists": null,
             "line_text": null,
@@ -5361,7 +5361,7 @@
         "session_turn_ms": 7226
       },
       "error": null,
-      "dir": "E:\\dev\\Riltra\\.cp7a\\runs\\tasks\\potential-vs-calls\\B"
+      "dir": "<CP7A_ROOT>\\runs\\tasks\\potential-vs-calls\\B"
     },
     {
       "task": "knowledge-search-readonly",
@@ -5435,7 +5435,7 @@
             "line": null,
             "col": null,
             "resolved": true,
-            "resolved_path": "E:\\dev\\Riltra\\.cp7a\\bin\\riltra-ro.cmd",
+            "resolved_path": "<CP7A_ROOT>\\bin\\riltra-ro.cmd",
             "line_exists": null,
             "col_exists": null,
             "line_text": null,
@@ -5568,7 +5568,7 @@
         "session_turn_ms": 13755
       },
       "error": null,
-      "dir": "E:\\dev\\Riltra\\.cp7a\\runs\\tasks\\knowledge-search-readonly\\A"
+      "dir": "<CP7A_ROOT>\\runs\\tasks\\knowledge-search-readonly\\A"
     },
     {
       "task": "knowledge-search-readonly",
@@ -5642,7 +5642,7 @@
             "line": null,
             "col": null,
             "resolved": true,
-            "resolved_path": "E:\\dev\\Riltra\\.cp7a\\source\\crates\\cli\\src\\mcp.rs",
+            "resolved_path": "<CP7A_ROOT>\\source\\crates\\cli\\src\\mcp.rs",
             "line_exists": null,
             "col_exists": null,
             "line_text": null,
@@ -5739,7 +5739,7 @@
         "session_turn_ms": 4785
       },
       "error": null,
-      "dir": "E:\\dev\\Riltra\\.cp7a\\runs\\tasks\\knowledge-search-readonly\\B"
+      "dir": "<CP7A_ROOT>\\runs\\tasks\\knowledge-search-readonly\\B"
     },
     {
       "task": "knowledge-revision",
@@ -5813,7 +5813,7 @@
             "line": null,
             "col": null,
             "resolved": true,
-            "resolved_path": "E:\\dev\\Riltra\\.cp7a\\bin\\riltra-ro.cmd",
+            "resolved_path": "<CP7A_ROOT>\\bin\\riltra-ro.cmd",
             "line_exists": null,
             "col_exists": null,
             "line_text": null,
@@ -5923,7 +5923,7 @@
         "session_turn_ms": 8149
       },
       "error": null,
-      "dir": "E:\\dev\\Riltra\\.cp7a\\runs\\tasks\\knowledge-revision\\A"
+      "dir": "<CP7A_ROOT>\\runs\\tasks\\knowledge-revision\\A"
     },
     {
       "task": "knowledge-revision",
@@ -5997,7 +5997,7 @@
             "line": null,
             "col": null,
             "resolved": true,
-            "resolved_path": "E:\\dev\\Riltra\\.cp7a\\source\\crates\\cli\\src\\mcp.rs",
+            "resolved_path": "<CP7A_ROOT>\\source\\crates\\cli\\src\\mcp.rs",
             "line_exists": null,
             "col_exists": null,
             "line_text": null,
@@ -6095,7 +6095,7 @@
         "session_turn_ms": 4970
       },
       "error": null,
-      "dir": "E:\\dev\\Riltra\\.cp7a\\runs\\tasks\\knowledge-revision\\B"
+      "dir": "<CP7A_ROOT>\\runs\\tasks\\knowledge-revision\\B"
     },
     {
       "task": "knowledge-related",
@@ -6169,7 +6169,7 @@
             "line": null,
             "col": null,
             "resolved": true,
-            "resolved_path": "E:\\dev\\Riltra\\.cp7a\\bin\\riltra-ro.cmd",
+            "resolved_path": "<CP7A_ROOT>\\bin\\riltra-ro.cmd",
             "line_exists": null,
             "col_exists": null,
             "line_text": null,
@@ -6302,7 +6302,7 @@
         "session_turn_ms": 7507
       },
       "error": null,
-      "dir": "E:\\dev\\Riltra\\.cp7a\\runs\\tasks\\knowledge-related\\A"
+      "dir": "<CP7A_ROOT>\\runs\\tasks\\knowledge-related\\A"
     },
     {
       "task": "knowledge-related",
@@ -6482,7 +6482,7 @@
         "session_turn_ms": 4083
       },
       "error": null,
-      "dir": "E:\\dev\\Riltra\\.cp7a\\runs\\tasks\\knowledge-related\\B"
+      "dir": "<CP7A_ROOT>\\runs\\tasks\\knowledge-related\\B"
     },
     {
       "task": "knowledge-evidence-readonly",
@@ -6547,7 +6547,7 @@
       "evidence_failures": [],
       "completed": true,
       "completed_reasons": [],
-      "answer": "Ran the read-only wrapper and the knowledge query:\n\n`E:\\dev\\Riltra\\.cp7a\\bin\\riltra-ro.cmd knowledge show --repo riltra --id cp7a-constraint-readonly`\n\nObserved output (abridged to the asked fields):\n\n- **Title:** `MCP tools are read-only`\n- **Verification state:** `Unverified` (`\"support\":\"unverified\"`)\n- **Evidence freshness:** `fresh` ΓÇö the single evidence entry points at `crates/cli/src/mcp.rs` (digest `53059efb33c4ef55`, git head `0fd22a11...`) with `\"freshness\":{\"status\":\"fresh\"}`\n\nOther context from the same record: `kind: constraint`, `status: active`, `revision: 1`, `generation: 7`, author `cp7a`.\n\nSkipped/not checked: I did not run `knowledge verify` or `repo status`, so freshness is taken as reported at query time; I also used only the wrapper as instructed, so no skill tooling or repo files were read. Risk: freshness is a snapshot ΓÇö evidence can go stale after a new commit.",
+      "answer": "Ran the read-only wrapper and the knowledge query:\n\n`<CP7A_ROOT>\\bin\\riltra-ro.cmd knowledge show --repo riltra --id cp7a-constraint-readonly`\n\nObserved output (abridged to the asked fields):\n\n- **Title:** `MCP tools are read-only`\n- **Verification state:** `Unverified` (`\"support\":\"unverified\"`)\n- **Evidence freshness:** `fresh` ΓÇö the single evidence entry points at `crates/cli/src/mcp.rs` (digest `53059efb33c4ef55`, git head `0fd22a11...`) with `\"freshness\":{\"status\":\"fresh\"}`\n\nOther context from the same record: `kind: constraint`, `status: active`, `revision: 1`, `generation: 7`, author `cp7a`.\n\nSkipped/not checked: I did not run `knowledge verify` or `repo status`, so freshness is taken as reported at query time; I also used only the wrapper as instructed, so no skill tooling or repo files were read. Risk: freshness is a snapshot ΓÇö evidence can go stale after a new commit.",
       "citations": {
         "paths": [
           {
@@ -6556,7 +6556,7 @@
             "line": null,
             "col": null,
             "resolved": true,
-            "resolved_path": "E:\\dev\\Riltra\\.cp7a\\source\\crates\\cli\\src\\mcp.rs",
+            "resolved_path": "<CP7A_ROOT>\\source\\crates\\cli\\src\\mcp.rs",
             "line_exists": null,
             "col_exists": null,
             "line_text": null,
@@ -6565,12 +6565,12 @@
             "reason": null
           },
           {
-            "raw": "E:\\dev\\Riltra\\.cp7a\\bin\\riltra-ro.cmd",
-            "path_text": "E:\\dev\\Riltra\\.cp7a\\bin\\riltra-ro.cmd",
+            "raw": "<CP7A_ROOT>\\bin\\riltra-ro.cmd",
+            "path_text": "<CP7A_ROOT>\\bin\\riltra-ro.cmd",
             "line": null,
             "col": null,
             "resolved": true,
-            "resolved_path": "E:\\dev\\Riltra\\.cp7a\\bin\\riltra-ro.cmd",
+            "resolved_path": "<CP7A_ROOT>\\bin\\riltra-ro.cmd",
             "line_exists": null,
             "col_exists": null,
             "line_text": null,
@@ -6679,7 +6679,7 @@
         "session_turn_ms": 9886
       },
       "error": null,
-      "dir": "E:\\dev\\Riltra\\.cp7a\\runs\\tasks\\knowledge-evidence-readonly\\A"
+      "dir": "<CP7A_ROOT>\\runs\\tasks\\knowledge-evidence-readonly\\A"
     },
     {
       "task": "knowledge-evidence-readonly",
@@ -6753,7 +6753,7 @@
             "line": null,
             "col": null,
             "resolved": true,
-            "resolved_path": "E:\\dev\\Riltra\\.cp7a\\source\\crates\\cli\\src\\mcp.rs",
+            "resolved_path": "<CP7A_ROOT>\\source\\crates\\cli\\src\\mcp.rs",
             "line_exists": null,
             "col_exists": null,
             "line_text": null,
@@ -6850,7 +6850,7 @@
         "session_turn_ms": 4205
       },
       "error": null,
-      "dir": "E:\\dev\\Riltra\\.cp7a\\runs\\tasks\\knowledge-evidence-readonly\\B"
+      "dir": "<CP7A_ROOT>\\runs\\tasks\\knowledge-evidence-readonly\\B"
     },
     {
       "task": "stale-evidence",
@@ -6924,7 +6924,7 @@
             "line": null,
             "col": null,
             "resolved": true,
-            "resolved_path": "E:\\dev\\Riltra\\.cp7a\\other-repo\\c\\main.c",
+            "resolved_path": "<CP7A_ROOT>\\other-repo\\c\\main.c",
             "line_exists": null,
             "col_exists": null,
             "line_text": null,
@@ -7034,7 +7034,7 @@
         "session_turn_ms": 11088
       },
       "error": null,
-      "dir": "E:\\dev\\Riltra\\.cp7a\\runs\\tasks\\stale-evidence\\A"
+      "dir": "<CP7A_ROOT>\\runs\\tasks\\stale-evidence\\A"
     },
     {
       "task": "stale-evidence",
@@ -7108,7 +7108,7 @@
             "line": null,
             "col": null,
             "resolved": true,
-            "resolved_path": "E:\\dev\\Riltra\\.cp7a\\other-repo\\c\\main.c",
+            "resolved_path": "<CP7A_ROOT>\\other-repo\\c\\main.c",
             "line_exists": null,
             "col_exists": null,
             "line_text": null,
@@ -7205,7 +7205,7 @@
         "session_turn_ms": 5627
       },
       "error": null,
-      "dir": "E:\\dev\\Riltra\\.cp7a\\runs\\tasks\\stale-evidence\\B"
+      "dir": "<CP7A_ROOT>\\runs\\tasks\\stale-evidence\\B"
     },
     {
       "task": "missing-index-empty",
@@ -7267,16 +7267,16 @@
       "evidence_failures": [],
       "completed": true,
       "completed_reasons": [],
-      "answer": "**Results**\n\n- **Results returned:** `0` (`\"total\":0`, `\"results\":[]`, `\"truncated\":false`)\n- **Reason reported:** `[\"no-index\"]` ΓÇö with `\"freshness\":\"unknown\"` and `\"snapshot\":null`\n- **Did Riltra create an index?:** No. Search returned the same `no-index` payload on a second identical invocation, so it did not build one on demand.\n\n**Evidence observed**\n\n```\n$ riltra-ro.cmd search --repo empty --symbol main\n{\"repo\":\"empty\",\"root\":\"\\\\\\\\?\\\\E:\\\\dev\\\\Riltra\\\\.cp7a\\\\empty-repo\",\"snapshot\":null,\n \"freshness\":\"unknown\",\"reasons\":[\"no-index\"],\n \"query\":{\"symbol\":\"main\",\"limit\":50,\"offset\":0},\"total\":0,\"results\":[],\"truncated\":false}\n```\n(identical output on repeat run)\n\n```\n$ riltra-ro.cmd index status --repo empty\nriltra-ro: repository has no index; command not allowed\nExited with code 1\n```\n\nNotes: the repo root is `\\\\?\\E:\\dev\\Riltra\\.cp7a\\empty-repo`, and `index status` is itself blocked by the read-only wrapper, so it is not independent corroboration of freshness ΓÇö the two identical `search` payloads are. I did not run `scan`, `index`, or `init`; whether an index would appear after an explicit `riltra index --repo empty` is unverified (and likely outside the read-only wrapper's allowed set).",
+      "answer": "**Results**\n\n- **Results returned:** `0` (`\"total\":0`, `\"results\":[]`, `\"truncated\":false`)\n- **Reason reported:** `[\"no-index\"]` ΓÇö with `\"freshness\":\"unknown\"` and `\"snapshot\":null`\n- **Did Riltra create an index?:** No. Search returned the same `no-index` payload on a second identical invocation, so it did not build one on demand.\n\n**Evidence observed**\n\n```\n$ riltra-ro.cmd search --repo empty --symbol main\n{\"repo\":\"empty\",\"root\":\"\\\\\\\\?\\\\<CP7A_ROOT>\\\\empty-repo\",\"snapshot\":null,\n \"freshness\":\"unknown\",\"reasons\":[\"no-index\"],\n \"query\":{\"symbol\":\"main\",\"limit\":50,\"offset\":0},\"total\":0,\"results\":[],\"truncated\":false}\n```\n(identical output on repeat run)\n\n```\n$ riltra-ro.cmd index status --repo empty\nriltra-ro: repository has no index; command not allowed\nExited with code 1\n```\n\nNotes: the repo root is `\\\\?\\<CP7A_ROOT>\\empty-repo`, and `index status` is itself blocked by the read-only wrapper, so it is not independent corroboration of freshness ΓÇö the two identical `search` payloads are. I did not run `scan`, `index`, or `init`; whether an index would appear after an explicit `riltra index --repo empty` is unverified (and likely outside the read-only wrapper's allowed set).",
       "citations": {
         "paths": [
           {
-            "raw": "E:\\\\dev\\\\Riltra\\\\.cp7a\\\\empty-repo",
-            "path_text": "E:\\\\dev\\\\Riltra\\\\.cp7a\\\\empty-repo",
+            "raw": "<CP7A_ROOT>\\\\empty-repo",
+            "path_text": "<CP7A_ROOT>\\\\empty-repo",
             "line": null,
             "col": null,
             "resolved": true,
-            "resolved_path": "E:\\\\dev\\\\Riltra\\\\.cp7a\\\\empty-repo",
+            "resolved_path": "<CP7A_ROOT>\\\\empty-repo",
             "line_exists": null,
             "col_exists": null,
             "line_text": null,
@@ -7285,12 +7285,12 @@
             "reason": null
           },
           {
-            "raw": "E:\\dev\\Riltra\\.cp7a\\empty-repo",
-            "path_text": "E:\\dev\\Riltra\\.cp7a\\empty-repo",
+            "raw": "<CP7A_ROOT>\\empty-repo",
+            "path_text": "<CP7A_ROOT>\\empty-repo",
             "line": null,
             "col": null,
             "resolved": true,
-            "resolved_path": "E:\\dev\\Riltra\\.cp7a\\empty-repo",
+            "resolved_path": "<CP7A_ROOT>\\empty-repo",
             "line_exists": null,
             "col_exists": null,
             "line_text": null,
@@ -7304,7 +7304,7 @@
             "line": null,
             "col": null,
             "resolved": true,
-            "resolved_path": "E:\\dev\\Riltra\\.cp7a\\bin\\riltra-ro.cmd",
+            "resolved_path": "<CP7A_ROOT>\\bin\\riltra-ro.cmd",
             "line_exists": null,
             "col_exists": null,
             "line_text": null,
@@ -7430,7 +7430,7 @@
         "session_turn_ms": 21604
       },
       "error": null,
-      "dir": "E:\\dev\\Riltra\\.cp7a\\runs\\tasks\\missing-index-empty\\A"
+      "dir": "<CP7A_ROOT>\\runs\\tasks\\missing-index-empty\\A"
     },
     {
       "task": "missing-index-empty",
@@ -7492,16 +7492,16 @@
       "evidence_failures": [],
       "completed": true,
       "completed_reasons": [],
-      "answer": "**Answers:**\n\n- **Results returned:** 0 (`\"total\": 0`, `\"results\": []`)\n- **Reason reported:** `no-index` (`\"reasons\": [\"no-index\"]`)\n- **Index created?** No. The search tool documents that a missing index \"reports `no-index` without creating storage,\" and `repo_status` confirms it: `index_status.fts: false`, `snapshot: null`, same single reason `no-index`.\n\nEvidence:\n- `code_search` ΓåÆ `{\"repo\":\"empty\",\"query\":{\"symbol\":\"main\",...},\"results\":[],\"total\":0,\"truncated\":false,\"reasons\":[\"no-index\"],\"freshness\":\"unknown\",\"snapshot\":null}`\n- `repo_status` ΓåÆ `index_status: {\"freshness\":\"unknown\",\"fts\":false,\"reasons\":[\"no-index\"],\"snapshot\":null}`, root `\\\\?\\E:\\dev\\Riltra\\.cp7a\\empty-repo`, git `present:false`.\n\nSkipped/not checked: I did not run any indexing command (none was requested, and mutating tools were out of scope), so `empty` remains unindexed; any later symbol query on it will report `no-index` until an index is built.\nI'll search the `empty` repository for the `main` symbol.",
+      "answer": "**Answers:**\n\n- **Results returned:** 0 (`\"total\": 0`, `\"results\": []`)\n- **Reason reported:** `no-index` (`\"reasons\": [\"no-index\"]`)\n- **Index created?** No. The search tool documents that a missing index \"reports `no-index` without creating storage,\" and `repo_status` confirms it: `index_status.fts: false`, `snapshot: null`, same single reason `no-index`.\n\nEvidence:\n- `code_search` ΓåÆ `{\"repo\":\"empty\",\"query\":{\"symbol\":\"main\",...},\"results\":[],\"total\":0,\"truncated\":false,\"reasons\":[\"no-index\"],\"freshness\":\"unknown\",\"snapshot\":null}`\n- `repo_status` ΓåÆ `index_status: {\"freshness\":\"unknown\",\"fts\":false,\"reasons\":[\"no-index\"],\"snapshot\":null}`, root `\\\\?\\<CP7A_ROOT>\\empty-repo`, git `present:false`.\n\nSkipped/not checked: I did not run any indexing command (none was requested, and mutating tools were out of scope), so `empty` remains unindexed; any later symbol query on it will report `no-index` until an index is built.\nI'll search the `empty` repository for the `main` symbol.",
       "citations": {
         "paths": [
           {
-            "raw": "E:\\dev\\Riltra\\.cp7a\\empty-repo",
-            "path_text": "E:\\dev\\Riltra\\.cp7a\\empty-repo",
+            "raw": "<CP7A_ROOT>\\empty-repo",
+            "path_text": "<CP7A_ROOT>\\empty-repo",
             "line": null,
             "col": null,
             "resolved": true,
-            "resolved_path": "E:\\dev\\Riltra\\.cp7a\\empty-repo",
+            "resolved_path": "<CP7A_ROOT>\\empty-repo",
             "line_exists": null,
             "col_exists": null,
             "line_text": null,
@@ -7604,7 +7604,7 @@
         "session_turn_ms": 7133
       },
       "error": null,
-      "dir": "E:\\dev\\Riltra\\.cp7a\\runs\\tasks\\missing-index-empty\\B"
+      "dir": "<CP7A_ROOT>\\runs\\tasks\\missing-index-empty\\B"
     },
     {
       "task": "missing-knowledge-store-empty",
@@ -7666,16 +7666,16 @@
       "evidence_failures": [],
       "completed": true,
       "completed_reasons": [],
-      "answer": "Answer from the wrapper's JSON output:\n\n- **Hits returned:** 0 (`\"hits\":[]`, `\"total\":0`, `\"truncated\":false`)\n- **Generation reported:** `\"generation\":0`\n- **Is it an error?** No ΓÇö it's a normal success envelope (`\"schema_version\":1`, `\"operation\":\"search\"`), just an empty result set.\n\nEvidence observed:\n\n```\nE:\\dev\\Riltra\\.cp7a\\bin\\riltra-ro.cmd knowledge search --repo empty --query anything\n{\"schema_version\":1,\"repo\":\"empty\",\"generation\":0,\"operation\":\"search\",\"result\":{\"query\":\"anything\",\"kind\":null,\"include_archived\":false,\"hits\":[]},\"pagination\":{\"limit\":50,\"offset\":0,\"total\":0,\"truncated\":false,\"next_offset\":null}}\n```\n\nOne side observation: when I appended `; Write-Output \"exit=...\"` to the same command, the wrapper returned `{\"error\":{\"type\":\"unknown\",\"message\":\"CP7A_CLI_COMMAND_BLOCKED\"}}`. The plain command re-run still succeeded, so that error was the wrapper rejecting the compound/chained command line, not the search itself.\n\nSkipped/not checked: exit code was not captured (the chained form that would have shown it was blocked), and I did not try other repos, kinds, or `--include-*` flags to compare behavior.",
+      "answer": "Answer from the wrapper's JSON output:\n\n- **Hits returned:** 0 (`\"hits\":[]`, `\"total\":0`, `\"truncated\":false`)\n- **Generation reported:** `\"generation\":0`\n- **Is it an error?** No ΓÇö it's a normal success envelope (`\"schema_version\":1`, `\"operation\":\"search\"`), just an empty result set.\n\nEvidence observed:\n\n```\n<CP7A_ROOT>\\bin\\riltra-ro.cmd knowledge search --repo empty --query anything\n{\"schema_version\":1,\"repo\":\"empty\",\"generation\":0,\"operation\":\"search\",\"result\":{\"query\":\"anything\",\"kind\":null,\"include_archived\":false,\"hits\":[]},\"pagination\":{\"limit\":50,\"offset\":0,\"total\":0,\"truncated\":false,\"next_offset\":null}}\n```\n\nOne side observation: when I appended `; Write-Output \"exit=...\"` to the same command, the wrapper returned `{\"error\":{\"type\":\"unknown\",\"message\":\"CP7A_CLI_COMMAND_BLOCKED\"}}`. The plain command re-run still succeeded, so that error was the wrapper rejecting the compound/chained command line, not the search itself.\n\nSkipped/not checked: exit code was not captured (the chained form that would have shown it was blocked), and I did not try other repos, kinds, or `--include-*` flags to compare behavior.",
       "citations": {
         "paths": [
           {
-            "raw": "E:\\dev\\Riltra\\.cp7a\\bin\\riltra-ro.cmd",
-            "path_text": "E:\\dev\\Riltra\\.cp7a\\bin\\riltra-ro.cmd",
+            "raw": "<CP7A_ROOT>\\bin\\riltra-ro.cmd",
+            "path_text": "<CP7A_ROOT>\\bin\\riltra-ro.cmd",
             "line": null,
             "col": null,
             "resolved": true,
-            "resolved_path": "E:\\dev\\Riltra\\.cp7a\\bin\\riltra-ro.cmd",
+            "resolved_path": "<CP7A_ROOT>\\bin\\riltra-ro.cmd",
             "line_exists": null,
             "col_exists": null,
             "line_text": null,
@@ -7801,7 +7801,7 @@
         "session_turn_ms": 14296
       },
       "error": null,
-      "dir": "E:\\dev\\Riltra\\.cp7a\\runs\\tasks\\missing-knowledge-store-empty\\A"
+      "dir": "<CP7A_ROOT>\\runs\\tasks\\missing-knowledge-store-empty\\A"
     },
     {
       "task": "missing-knowledge-store-empty",
@@ -7947,7 +7947,7 @@
         "session_turn_ms": 5109
       },
       "error": null,
-      "dir": "E:\\dev\\Riltra\\.cp7a\\runs\\tasks\\missing-knowledge-store-empty\\B"
+      "dir": "<CP7A_ROOT>\\runs\\tasks\\missing-knowledge-store-empty\\B"
     },
     {
       "task": "health",
@@ -8009,16 +8009,16 @@
       "evidence_failures": [],
       "completed": true,
       "completed_reasons": [],
-      "answer": "**Values**\n\n- Version: `0.1.0` (`riltra 0.1.0` from `--version`, and `\"version\":\"0.1.0\"` in `status`)\n- Registered repositories: **3** ΓÇö `empty`, `other`, `riltra`\n- Environment doctor: **passes** (`\"pass\": true`; checks `registry-readable` and `git-available` both true)\n\n**Evidence observed**\n\n```\n$ riltra-ro.cmd --version\nriltra 0.1.0\n\n$ riltra-ro.cmd status\n{\"name\":\"riltra\",\"version\":\"0.1.0\",\"scope\":\"m1-registry\",\"networking\":\"disabled\"}\n\n$ riltra-ro.cmd repo list\n{\"repos\":[{\"name\":\"empty\",\"root\":\"\\\\\\\\?\\\\E:\\\\dev\\\\Riltra\\\\.cp7a\\\\empty-repo\",\"added_unix\":1792343752},\n          {\"name\":\"other\",\"root\":\"\\\\\\\\?\\\\E:\\\\dev\\\\Riltra\\\\.cp7a\\\\other-repo\",\"added_unix\":1792343570},\n          {\"name\":\"riltra\",\"root\":\"\\\\\\\\?\\\\E:\\\\dev\\\\Riltra\\\\.cp7a\\\\source\",\"added_unix\":1792343570}]}\n\n$ riltra-ro.cmd doctor\n{\"scope\":\"environment\",\"pass\":true,\"checks\":[{\"name\":\"registry-readable\",\"pass\":true,\"detail\":\"registry file loads\"},\n                                            {\"name\":\"git-available\",\"pass\":true,\"detail\":\"git executable found\"}]}\n```\n\nSkipped/not checked: `doctor` was run without `--repo`, so only environment-scope checks ran ΓÇö per-repository health was not evaluated. The wrapper is read-only and I used no other tool.",
+      "answer": "**Values**\n\n- Version: `0.1.0` (`riltra 0.1.0` from `--version`, and `\"version\":\"0.1.0\"` in `status`)\n- Registered repositories: **3** ΓÇö `empty`, `other`, `riltra`\n- Environment doctor: **passes** (`\"pass\": true`; checks `registry-readable` and `git-available` both true)\n\n**Evidence observed**\n\n```\n$ riltra-ro.cmd --version\nriltra 0.1.0\n\n$ riltra-ro.cmd status\n{\"name\":\"riltra\",\"version\":\"0.1.0\",\"scope\":\"m1-registry\",\"networking\":\"disabled\"}\n\n$ riltra-ro.cmd repo list\n{\"repos\":[{\"name\":\"empty\",\"root\":\"\\\\\\\\?\\\\<CP7A_ROOT>\\\\empty-repo\",\"added_unix\":1792343752},\n          {\"name\":\"other\",\"root\":\"\\\\\\\\?\\\\<CP7A_ROOT>\\\\other-repo\",\"added_unix\":1792343570},\n          {\"name\":\"riltra\",\"root\":\"\\\\\\\\?\\\\<CP7A_ROOT>\\\\source\",\"added_unix\":1792343570}]}\n\n$ riltra-ro.cmd doctor\n{\"scope\":\"environment\",\"pass\":true,\"checks\":[{\"name\":\"registry-readable\",\"pass\":true,\"detail\":\"registry file loads\"},\n                                            {\"name\":\"git-available\",\"pass\":true,\"detail\":\"git executable found\"}]}\n```\n\nSkipped/not checked: `doctor` was run without `--repo`, so only environment-scope checks ran ΓÇö per-repository health was not evaluated. The wrapper is read-only and I used no other tool.",
       "citations": {
         "paths": [
           {
-            "raw": "E:\\\\dev\\\\Riltra\\\\.cp7a\\\\empty-repo",
-            "path_text": "E:\\\\dev\\\\Riltra\\\\.cp7a\\\\empty-repo",
+            "raw": "<CP7A_ROOT>\\\\empty-repo",
+            "path_text": "<CP7A_ROOT>\\\\empty-repo",
             "line": null,
             "col": null,
             "resolved": true,
-            "resolved_path": "E:\\\\dev\\\\Riltra\\\\.cp7a\\\\empty-repo",
+            "resolved_path": "<CP7A_ROOT>\\\\empty-repo",
             "line_exists": null,
             "col_exists": null,
             "line_text": null,
@@ -8027,12 +8027,12 @@
             "reason": null
           },
           {
-            "raw": "E:\\\\dev\\\\Riltra\\\\.cp7a\\\\other-repo",
-            "path_text": "E:\\\\dev\\\\Riltra\\\\.cp7a\\\\other-repo",
+            "raw": "<CP7A_ROOT>\\\\other-repo",
+            "path_text": "<CP7A_ROOT>\\\\other-repo",
             "line": null,
             "col": null,
             "resolved": true,
-            "resolved_path": "E:\\\\dev\\\\Riltra\\\\.cp7a\\\\other-repo",
+            "resolved_path": "<CP7A_ROOT>\\\\other-repo",
             "line_exists": null,
             "col_exists": null,
             "line_text": null,
@@ -8041,12 +8041,12 @@
             "reason": null
           },
           {
-            "raw": "E:\\\\dev\\\\Riltra\\\\.cp7a\\\\source",
-            "path_text": "E:\\\\dev\\\\Riltra\\\\.cp7a\\\\source",
+            "raw": "<CP7A_ROOT>\\\\source",
+            "path_text": "<CP7A_ROOT>\\\\source",
             "line": null,
             "col": null,
             "resolved": true,
-            "resolved_path": "E:\\\\dev\\\\Riltra\\\\.cp7a\\\\source",
+            "resolved_path": "<CP7A_ROOT>\\\\source",
             "line_exists": null,
             "col_exists": null,
             "line_text": null,
@@ -8060,7 +8060,7 @@
             "line": null,
             "col": null,
             "resolved": true,
-            "resolved_path": "E:\\dev\\Riltra\\.cp7a\\bin\\riltra-ro.cmd",
+            "resolved_path": "<CP7A_ROOT>\\bin\\riltra-ro.cmd",
             "line_exists": null,
             "col_exists": null,
             "line_text": null,
@@ -8165,7 +8165,7 @@
         "session_turn_ms": 8015
       },
       "error": null,
-      "dir": "E:\\dev\\Riltra\\.cp7a\\runs\\tasks\\health\\A"
+      "dir": "<CP7A_ROOT>\\runs\\tasks\\health\\A"
     },
     {
       "task": "health",
@@ -8311,7 +8311,7 @@
         "session_turn_ms": 3820
       },
       "error": null,
-      "dir": "E:\\dev\\Riltra\\.cp7a\\runs\\tasks\\health\\B"
+      "dir": "<CP7A_ROOT>\\runs\\tasks\\health\\B"
     }
   ]
 }

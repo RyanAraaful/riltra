@@ -1,0 +1,6 @@
+Synthetic fixture: environment placeholders must not be flagged.
+%APPDATA%\opencode\config.json
+${HOME}/.config/opencode
+<USER_HOME>/AppData/Local
+<RILTRA_REPO_ROOT>/target/debug
+<CP7A_ROOT>\gate\gate-test.log
