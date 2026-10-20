@@ -188,3 +188,18 @@ Notes:
 
 Used by the CI `security` job and the optional local hooks (`security/scan.sh`,
 `.githooks/`); it is not a build dependency and no code is vendored.
+
+## Pilot tooling: clangd and CMake (clangd semantic provider pilot, 2026-10-21)
+
+| Package | Version | License | Origin | Redistributable? |
+|---|---|---|---|---|
+| clangd (LLVM) | 23.1.4 | Apache-2.0 WITH LLVM-exception | https://github.com/llvm/llvm-project/releases | tool only - portable release archive, extracted into the pilot's own bench root by `docs/pilots/clangd/method/`; never compiled into or shipped with `riltra` |
+| CMake | 4.4.4 | BSD-3-Clause | https://github.com/Kitware/CMake/releases | tool only - portable release archive, extracted into the pilot's own bench root; never compiled into or shipped with `riltra` |
+
+Both are used by the M9 clangd pilot harness only (to run the language
+server and to generate a fixture compilation database). They are not build
+dependencies, not runtime dependencies, and nothing is vendored. The
+compiler that produces the pilot's ground truth is the Microsoft Visual
+Studio Build Tools already installed on the pilot host; it is not
+redistributed and not referenced by any build.
+
