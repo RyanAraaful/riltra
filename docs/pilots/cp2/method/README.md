@@ -73,13 +73,17 @@ the **resolved** path is strictly inside the benchmark root:
   starts with the benchmark root's name (`bench-evil` next to `bench`) is
   outside;
 - the benchmark root itself is never a mass-delete target;
-- junctions and symlinks are resolved first, so a link inside the root that
-  points outside it is outside;
+- the path is resolved **component by component**, so a junction or symlink
+  at *any* component — not only at the leaf — that points outside the root
+  makes the path outside;
 - the pilot snapshot may only be mutated through `Restore-Snapshot`, which
   first proves that it is a git repository inside the benchmark root and is
-  not the original repository.
+  not the original repository (both paths resolved, so a link cannot pose as
+  the snapshot).
 
-`test-path-safety.ps1` is the regression test for those rules.
+`test-path-safety.ps1` is the regression test for those rules: a valid
+path, a sibling, a parent, the root, a junction pointing outside, and a path
+*through* an intermediate junction.
 
 ## Comparisons fail loudly
 
@@ -87,12 +91,17 @@ A comparison never reports a match it did not measure:
 
 - a query that exits non-zero, prints nothing, or cannot be parsed aborts
   the step;
+- the incremental step also asserts that the one-file delta really changed
+  the tree and that exactly one file was re-parsed, so a parity over two
+  identical trees cannot be reported;
 - the fact parity needs a digest from both sides; a missing digest aborts
   the run instead of comparing two empty strings;
 - the grader distinguishes `PASS`, `FAIL`, `UNMET` (a capability gap) and
-  `UNAVAILABLE` (the evidence could not be obtained). A parse error is
-  never a `PASS`, an empty array is never proof of completeness, and an
-  impact verdict must be exactly `UNKNOWN`.
+  `UNAVAILABLE` (the evidence could not be obtained), and exits non-zero
+  when a check fails. A parse error is never a `PASS`, an empty array is
+  never proof of completeness, and an impact verdict must be exactly
+  `UNKNOWN`;
+- `run-all.ps1` grades **this run's** query directory, not the archived one.
 
 ## Redaction
 

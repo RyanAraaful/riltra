@@ -61,6 +61,27 @@ test("a missing output is not an answer", () => {
   assert.strictEqual(q.reason, "missing-output");
 });
 
+test("a missing CUDA output is not a clean failure", () => {
+  // The file was never written: nothing was observed, so the honesty check
+  // cannot pass.
+  const dir = writeQueries({});
+  const checks = grade(dir).checks;
+  const honesty = find(checks, "D3-H4");
+  assert.notStrictEqual(honesty.verdict, V.PASS);
+  assert.strictEqual(honesty.verdict, V.UNAVAILABLE);
+  assert.strictEqual(honesty.reason, "missing-output");
+});
+
+test("an unclassifiable error is not a clean failure", () => {
+  const dir = writeQueries({
+    "d3-2-trace-to-cuda": "something went wrong\n",
+  });
+  const checks = grade(dir).checks;
+  const honesty = find(checks, "D3-H4");
+  assert.strictEqual(honesty.verdict, V.UNAVAILABLE);
+  assert.strictEqual(honesty.reason, "unclassified-error");
+});
+
 // --- the honesty gates ---------------------------------------------------
 
 test("a parse error never becomes an honesty PASS", () => {
@@ -212,8 +233,39 @@ test("a blocked OpenCode session is not a passing agent session", () => {
   assert.strictEqual(check.reason, "provider-auth-403");
 });
 
-test("a workflow without an evidence check reports no evidence gate", () => {
+test("the impact honesty check inspects the whole answer, including the empty pilot shape", () => {
+  // CP1 D.4.5 pre-registers the empty path set as the expected pilot
+  // result, so the answer is fully inspected: no edge is claimed for the
+  // member read, the binding or the macro arguments.
   const dir = writeQueries({
+    "d4-1-impact-member": JSON.stringify({
+      verdict: "UNKNOWN",
+      completeness: { status: "partial", unresolved: ["graph-completeness-unproven", "empty-result-not-coverage-proof"] },
+      disclaimer: "plausible-impact-not-execution",
+      paths: [],
+      bridges: [],
+      visits: { nodes: 1, edges: 0 },
+    }),
+  });
+  const checks = grade(dir).checks;
+  assert.strictEqual(find(checks, "D4-H4").verdict, V.PASS);
+  // The capability gate stays unmet: the affected set is empty.
+  assert.strictEqual(find(checks, "D4-C5").verdict, V.UNMET);
+});
+
+test("a reported edge that is not a candidate fails the D.2 edge-label check", () => {
+  const dir = writeQueries({
+    "d2-5-callers-optmgr-binding": JSON.stringify({
+      edges: [{ kind: "CALLS", callee_name: "max_triangulation_angle", caller_path: "x.cc", caller_span: [1, 2] }],
+      anchor: {},
+      completeness: { unresolved: ["x"] },
+    }),
+  });
+  const checks = grade(dir).checks;
+  assert.strictEqual(find(checks, "D2-H5").verdict, V.FAIL);
+});
+
+test("a workflow without an evidence check reports no evidence gate", () => {  const dir = writeQueries({
     "d1-1-search-Print": JSON.stringify({
       repo: "mmsp-pin",
       freshness: { status: "fresh", reasons: [] },

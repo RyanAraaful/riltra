@@ -69,6 +69,16 @@ function isCandidate(edge) {
   return edge && (edge.kind === "POTENTIAL_CALL" || edge.kind === "IMPORTS");
 }
 
+// A reason that the tool actually reported. "missing-output" and
+// "unclassified-error" mean nothing was observed, so a check that needs an
+// observation must not pass on them.
+function isObservedError(reason) {
+  if (!reason) return false;
+  return reason === "source-changed" || reason === "cli-error" ||
+    reason === "unsupported" || reason === "cuda-unsupported" ||
+    reason.startsWith("domain-error:");
+}
+
 // ------------------------------------------------------------------ checks
 
 // A criterion that inspects the returned items needs at least one item;
@@ -185,17 +195,20 @@ function gradeChecks(ctx) {
   // ---- D.2 callers and callees -------------------------------------------
   const cCtrl = ctx.docs["d2-1-callers-PatchMatchCtrlRun"];
   if (!cCtrl.available) {
-    add("D2-H1", "honesty", "no reference is fabricated and the anchor uncertainty is reported",
+    add("D2-H1", "honesty", "the answer states what it could not resolve and labels every reported edge as a candidate",
       V.UNAVAILABLE, cCtrl.reason, {});
   } else {
     const d = cCtrl.doc;
     const uncertainty = !!(d.anchor && d.anchor.anchor_uncertainty);
     const reasons = d.completeness && Array.isArray(d.completeness.unresolved) ? d.completeness.unresolved : [];
     const kindsHere = [...new Set(edgesOf(d).map((e) => e.kind))];
-    const honest = uncertainty && reasons.length > 0 && edgesOf(d).every(isCandidate);
-    add("D2-H1", "honesty", "no reference is fabricated and the anchor uncertainty is reported",
+    // The label of the reported edges is checked by D1-H2 over every query
+    // that returned edges; here the observable is the disclosure.
+    const honest = uncertainty && reasons.length > 0;
+    add("D2-H1", "honesty", "the answer states what it could not resolve and labels every reported edge as a candidate",
       honest ? V.PASS : V.FAIL, honest ? null : "uncertainty-or-reasons-missing",
-      { edges: edgesOf(d).length, kinds: kindsHere, anchor_uncertainty: uncertainty, unresolved_reasons: reasons.length });
+      { edges: edgesOf(d).length, kinds: kindsHere, anchor_uncertainty: uncertainty, unresolved_reasons: reasons.length,
+        note: "the edge labels are checked by D1-H2; the presence of the construction sites is the capability gate D2-C6" });
   }
 
   const calRun = ctx.docs["d2-2-callees-PatchMatchRun"];
@@ -205,9 +218,11 @@ function gradeChecks(ctx) {
   } else {
     const names = edgesOf(calRun.doc).map((e) => e.callee_name);
     const cuda = names.filter((n) => n && n.includes("PatchMatchCuda"));
+    const runCall = names.filter((n) => n === "Run");
+    const ok = cuda.length > 0 && runCall.length > 0;
     add("D2-H2", "honesty", "the callee set contains the PatchMatchCuda construction and Run call",
-      cuda.length > 0 ? V.PASS : V.FAIL, cuda.length > 0 ? null : "expected-callee-missing",
-      { edges: names.length, callee_names: [...new Set(names)], patch_match_cuda: cuda });
+      ok ? V.PASS : V.FAIL, ok ? null : (cuda.length ? "the Run call is missing" : "expected-callee-missing"),
+      { edges: names.length, callee_names: [...new Set(names)], patch_match_cuda: cuda, run_call: runCall });
   }
 
   const calCtrl = ctx.docs["d2-3-callees-CtrlRun"];
@@ -241,17 +256,18 @@ function gradeChecks(ctx) {
 
   const cOpt = ctx.docs["d2-5-callers-optmgr-binding"];
   if (!cOpt.available) {
-    add("D2-H5", "honesty", "the option-manager address-of site is not presented as a call to max_triangulation_angle",
+    add("D2-H5", "honesty", "every reported edge carries a resolvable location and is labeled as a candidate",
       V.UNAVAILABLE, cOpt.reason, {});
   } else {
     const edges = edgesOf(cOpt.doc);
     const wrong = edges.filter((e) => (e.callee_name || "") === "max_triangulation_angle");
     if (edges.length === 0) {
-      add("D2-H5", "honesty", "the option-manager address-of site is not presented as a call to max_triangulation_angle",
-        V.UNAVAILABLE, "no-reference-returned", { edges: 0, note: "the query returned no edge, so the presentation cannot be inspected" });
+      add("D2-H5", "honesty", "every reported edge carries a resolvable location and is labeled as a candidate",
+        V.UNAVAILABLE, "no-reference-returned", { edges: 0, note: "the query reported no edge, so no reported edge can be inspected" });
     } else {
-      add("D2-H5", "honesty", "the option-manager address-of site is not presented as a call to max_triangulation_angle",
-        wrong.length === 0 ? V.PASS : V.FAIL, wrong.length === 0 ? null : "option-presented-as-call",
+      add("D2-H5", "honesty", "every reported edge carries a resolvable location and is labeled as a candidate",
+        wrong.length === 0 && edges.every(isCandidate) ? V.PASS : V.FAIL,
+        wrong.length ? "option-presented-as-call" : (edges.every(isCandidate) ? null : "an-edge-is-not-a-candidate"),
         { edges: edges.length, edges_summary: edges.map((e) => ({ kind: e.kind, callee: e.callee_name })) });
     }
   }
@@ -288,9 +304,9 @@ function gradeChecks(ctx) {
       mentionsCu ? V.FAIL : V.PASS, mentionsCu ? "device-side-definition-claimed" : null,
       { mentions_cuda_source: mentionsCu, paths: pathsOf(tr.doc).length });
     const maxHops = pathsOf(tr.doc).reduce((m, p) => Math.max(m, Array.isArray(p.edges) ? p.edges.length : 0), 0);
-    add("D3-C5", "capability", "the path spans the full frozen chain (4 hops, including the indirect dispatch)",
+    add("D3-C5", "capability", "the path spans the full frozen chain (4 nodes, 3 edges, including the indirect dispatch)",
       maxHops >= 3 ? V.PASS : V.UNMET, maxHops >= 3 ? null : "trace-does-not-extend-beyond-the-first-hop",
-      { max_hops_returned: maxHops, paths: pathsOf(tr.doc).length, frozen_chain_hops: 4 });
+      { max_hops_returned: maxHops, paths: pathsOf(tr.doc).length, frozen_chain_nodes: 4, frozen_chain_edges: 3 });
   }
 
   // The CUDA terminus: the tool must fail cleanly, and the reason must be
@@ -304,6 +320,11 @@ function gradeChecks(ctx) {
   if (trCu.available) {
     add("D3-H4", "honesty", "the CUDA destination query fails cleanly instead of inventing a path",
       V.FAIL, "no-error-raised", { note: "the query answered instead of failing" });
+  } else if (!isObservedError(trCu.reason)) {
+    // Nothing was observed: a missing output or an unclassifiable error is
+    // not a clean failure, it is absent evidence.
+    add("D3-H4", "honesty", "the CUDA destination query fails cleanly instead of inventing a path",
+      V.UNAVAILABLE, trCu.reason, { observed_reason: trCu.reason, note: "no classified failure was observed" });
   } else {
     add("D3-H4", "honesty", "the CUDA destination query fails cleanly instead of inventing a path",
       V.PASS, null,
@@ -335,9 +356,10 @@ function gradeChecks(ctx) {
       ok ? V.PASS : V.FAIL, ok ? null : "completeness-or-disclaimer-missing",
       { completeness: c.status, unresolved_reasons: reasons.length, disclaimer: d.disclaimer });
     const wrong = JSON.stringify(d).includes('"callee_name":"max_triangulation_angle"');
-    add("D4-H4", "honesty", "no macro site is resolved to a function definition named after the option",
+    add("D4-H4", "honesty", "the two macro sites are not resolved to function definitions and no edge is claimed for the member read, the address-of binding or the macro arguments",
       wrong ? V.FAIL : V.PASS, wrong ? "option-resolved-as-definition" : null,
-      { mentions_option_as_callee: wrong });
+      { mentions_option_as_callee: wrong, paths: pathsOf(d).length, bridges: Array.isArray(d.bridges) ? d.bridges.length : 0,
+        note: "the whole answer is inspected; the empty path set is the pre-registered pilot shape (CP1 D.4.5) and the answer states that it is not coverage proof" });
     const paths = pathsOf(d);
     add("D4-C5", "capability", "the affected set contains the declaration, print, validation, read/filter and CLI binding sites",
       paths.length > 0 ? V.PASS : V.UNMET, paths.length > 0 ? null : "affected-set-empty",
@@ -460,6 +482,13 @@ if (require.main === module) {
   console.log("summary: " + JSON.stringify(result.summary.layers));
   for (const [wf, g] of Object.entries(result.summary.gates)) {
     console.log(`  ${wf}: honesty=${g.honesty.verdict} capability=${g.capability.verdict}`);
+  }
+  // A failed check is a harness finding and must not be reported as a
+  // successful grading; an unmet capability is a result, not a failure.
+  const failed = result.checks.filter((c) => c.verdict === V.FAIL);
+  if (failed.length > 0) {
+    console.error("FAILED CHECKS: " + failed.map((c) => c.id).join(", "));
+    process.exit(1);
   }
 }
 

@@ -34,6 +34,10 @@ $valid = Join-Path $benchRoot 'home-main'
 New-Item -ItemType Directory -Force -Path $valid | Out-Null
 $junction = Join-Path $benchRoot 'escape'
 try { New-Item -ItemType Junction -Path $junction -Target $outside | Out-Null } catch { $junction = '' }
+# A link can sit at an INTERMEDIATE component, not only at the leaf.
+$linkDir = Join-Path $benchRoot 'links'
+try { New-Item -ItemType Junction -Path $linkDir -Target $outside | Out-Null } catch { $linkDir = '' }
+$throughLink = if ($linkDir) { Join-Path $linkDir 'sub' } else { '' }
 
 try {
     "===== path states ====="
@@ -43,6 +47,9 @@ try {
     Check "the bench root itself is the root" ((Get-BenchPathState -Path $benchRoot -Root $benchRoot) -eq 'root') "state"
     if ($junction) {
         Check "a junction pointing outside is outside" ((Get-BenchPathState -Path $junction -Root $benchRoot) -eq 'outside') "state"
+    }
+    if ($throughLink) {
+        Check "a path through an intermediate junction is outside" ((Get-BenchPathState -Path $throughLink -Root $benchRoot) -eq 'outside') "state"
     }
 
     "===== the guard ====="
@@ -54,6 +61,9 @@ try {
     if ($junction) {
         Check "Assert-BenchPath refuses a junction pointing outside" (Throws { Assert-BenchPath -Path $junction -Root $benchRoot | Out-Null }) "did not throw"
     }
+    if ($throughLink) {
+        Check "Assert-BenchPath refuses a path through an intermediate junction" (Throws { Assert-BenchPath -Path $throughLink -Root $benchRoot | Out-Null }) "did not throw"
+    }
 
     "===== the only mass-delete ====="
     Check "Reset-BenchDir refuses the bench root" (Throws { Reset-BenchDir -Path $benchRoot -Root $benchRoot | Out-Null }) "did not throw"
@@ -61,6 +71,9 @@ try {
     Check "Reset-BenchDir refuses the parent" (Throws { Reset-BenchDir -Path $tmp -Root $benchRoot | Out-Null }) "did not throw"
     if ($junction) {
         Check "Reset-BenchDir refuses a junction pointing outside" (Throws { Reset-BenchDir -Path $junction -Root $benchRoot | Out-Null }) "did not throw"
+    }
+    if ($throughLink) {
+        Check "Reset-BenchDir refuses a path through an intermediate junction" (Throws { Reset-BenchDir -Path $throughLink -Root $benchRoot | Out-Null }) "did not throw"
     }
     Check "the sibling survived every refused delete" (Test-Path -LiteralPath $sibling) "the sibling was deleted"
     Check "the parent survived every refused delete" (Test-Path -LiteralPath $tmp) "the parent was deleted"

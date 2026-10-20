@@ -15,24 +15,27 @@
 # machine-local path.
 
 function Resolve-RealPath {
-    # Full path with reparse points (junctions, symlinks) resolved. The
-    # deepest existing ancestor is resolved and the missing tail is appended.
+    # Full path with reparse points (junctions, symlinks) resolved. A link
+    # can sit at ANY component, not only at the leaf, so the path is walked
+    # component by component and every prefix is resolved before the next
+    # component is appended.
     param([Parameter(Mandatory = $true)][string]$Path)
 
     $full = [System.IO.Path]::GetFullPath($Path)
-    $missing = @()
-    $probe = $full
-    while (-not (Test-Path -LiteralPath $probe)) {
-        $parent = Split-Path -Parent $probe
-        if (-not $parent -or $parent -eq $probe) { break }
-        $missing = , $probe + $missing
-        $probe = $parent
-    }
+    $root = [System.IO.Path]::GetPathRoot($full)
+    if (-not $root) { return $full }
+    $rest = $full.Substring($root.Length).Split('\', [System.StringSplitOptions]::RemoveEmptyEntries)
+    if ($rest.Length -eq 0) { return $full }
 
-    $real = $probe
-    for ($hop = 0; $hop -lt 16; $hop++) {
-        $item = Get-Item -LiteralPath $real -Force -ErrorAction SilentlyContinue
-        if (-not $item) { break }
+    $resolved = $root
+    foreach ($part in $rest) {
+        $current = Join-Path $resolved $part
+        $item = Get-Item -LiteralPath $current -Force -ErrorAction SilentlyContinue
+        if (-not $item) {
+            # The component does not exist: keep it lexically.
+            $resolved = $current
+            continue
+        }
         $link = $null
         if ($item.PSObject.Properties['LinkTarget'] -and $item.LinkTarget) {
             $link = @($item.LinkTarget)[0]
@@ -40,17 +43,16 @@ function Resolve-RealPath {
         elseif ($item.PSObject.Properties['Target'] -and $item.Target) {
             $link = @($item.Target)[0]
         }
-        if (-not $link) { break }
-        if (-not [System.IO.Path]::IsPathRooted($link)) {
-            $link = Join-Path (Split-Path -Parent $real) $link
+        if (-not $link) {
+            $resolved = $current
+            continue
         }
-        $real = [System.IO.Path]::GetFullPath($link)
+        if (-not [System.IO.Path]::IsPathRooted($link)) {
+            $link = Join-Path (Split-Path -Parent $current) $link
+        }
+        $resolved = [System.IO.Path]::GetFullPath($link)
     }
-
-    foreach ($tail in $missing) {
-        $real = Join-Path $real (Split-Path -Leaf $tail)
-    }
-    return [System.IO.Path]::GetFullPath($real)
+    return [System.IO.Path]::GetFullPath($resolved)
 }
 
 function Get-BenchPathState {

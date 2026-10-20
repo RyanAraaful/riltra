@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-10-20T08:57:30.598Z",
+  "generated_at": "2026-10-20T09:13:48.417Z",
   "query_dir": "<CP2_BENCH>\\cp2\\raw-audit\\queries",
   "summary": {
     "layers": {
@@ -167,14 +167,15 @@
     {
       "id": "D2-H1",
       "layer": "honesty",
-      "criterion": "no reference is fabricated and the anchor uncertainty is reported",
+      "criterion": "the answer states what it could not resolve and labels every reported edge as a candidate",
       "verdict": "PASS",
       "reason": null,
       "evidence": {
         "edges": 0,
         "kinds": [],
         "anchor_uncertainty": true,
-        "unresolved_reasons": 10
+        "unresolved_reasons": 10,
+        "note": "the edge labels are checked by D1-H2; the presence of the construction sites is the capability gate D2-C6"
       }
     },
     {
@@ -193,6 +194,9 @@
         ],
         "patch_match_cuda": [
           "make_unique<PatchMatchCuda>"
+        ],
+        "run_call": [
+          "Run"
         ]
       }
     },
@@ -223,12 +227,12 @@
     {
       "id": "D2-H5",
       "layer": "honesty",
-      "criterion": "the option-manager address-of site is not presented as a call to max_triangulation_angle",
+      "criterion": "every reported edge carries a resolvable location and is labeled as a candidate",
       "verdict": "UNAVAILABLE",
       "reason": "no-reference-returned",
       "evidence": {
         "edges": 0,
-        "note": "the query returned no edge, so the presentation cannot be inspected"
+        "note": "the query reported no edge, so no reported edge can be inspected"
       }
     },
     {
@@ -267,13 +271,14 @@
     {
       "id": "D3-C5",
       "layer": "capability",
-      "criterion": "the path spans the full frozen chain (4 hops, including the indirect dispatch)",
+      "criterion": "the path spans the full frozen chain (4 nodes, 3 edges, including the indirect dispatch)",
       "verdict": "UNMET",
       "reason": "trace-does-not-extend-beyond-the-first-hop",
       "evidence": {
         "max_hops_returned": 1,
         "paths": 21,
-        "frozen_chain_hops": 4
+        "frozen_chain_nodes": 4,
+        "frozen_chain_edges": 3
       }
     },
     {
@@ -324,11 +329,14 @@
     {
       "id": "D4-H4",
       "layer": "honesty",
-      "criterion": "no macro site is resolved to a function definition named after the option",
+      "criterion": "the two macro sites are not resolved to function definitions and no edge is claimed for the member read, the address-of binding or the macro arguments",
       "verdict": "PASS",
       "reason": null,
       "evidence": {
-        "mentions_option_as_callee": false
+        "mentions_option_as_callee": false,
+        "paths": 0,
+        "bridges": 0,
+        "note": "the whole answer is inspected; the empty path set is the pre-registered pilot shape (CP1 D.4.5) and the answer states that it is not coverage proof"
       }
     },
     {

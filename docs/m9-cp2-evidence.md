@@ -127,14 +127,19 @@ The audit corrected the grader (`pilots/cp2/method/grade.cjs`, with
 
 - a parse error is **never** a `PASS`; the verdict becomes `UNAVAILABLE` and
   records the reason the tool gave;
+- a **missing** output or an **unclassifiable** error is not a clean
+  failure either: the check is `UNAVAILABLE`, not `PASS`;
 - an error is classified by its **actual** reason. The CUDA terminus is
   unavailable because CUDA sources are not indexed (`cuda-unsupported`), not
   because the source changed (`source-changed` is what the tool's own message
   says);
 - an impact verdict must be **exactly** `UNKNOWN`, not merely "not SAFE";
 - an empty array is **never** proof of completeness: a criterion that
-  inspects the returned items needs at least one item, otherwise the verdict
-  is `UNAVAILABLE` with the reason `no-reference-returned`;
+  inspects the **reported edges** needs at least one edge, otherwise the
+  verdict is `UNAVAILABLE` with the reason `no-reference-returned`. A
+  criterion that inspects the **whole answer** (the impact answer, whose
+  empty path set CP1 §D.4.5 pre-registers as the expected pilot shape) is
+  judged on that answer;
 - a capability gap is `UNMET`, an unavailable piece of evidence is
   `UNAVAILABLE`, and the two are never mixed.
 
@@ -150,9 +155,9 @@ Totals over the 24 checks: **17 honesty PASS, 1 honesty UNAVAILABLE, 4
 capability UNMET, 2 evidence UNAVAILABLE** — and **no check is a vacuous
 `PASS`**.
 
-The one honesty check that is `UNAVAILABLE` is D2-H5 ("the option-manager
-address-of site is not presented as a call to `max_triangulation_angle`"): the
-query returns **no** edge at all, so there is nothing to inspect. The
+The one honesty check that is `UNAVAILABLE` is D2-H5 ("every reported edge
+carries a resolvable location and is labeled as a candidate"): the query
+reports **no** edge at all, so no reported edge can be inspected. The
 criterion is neither confirmed nor refuted, and the earlier `PASS` was
 vacuous. The underlying behaviour is unchanged and correct (no edge names the
 option), but the honest verdict for *that criterion alone* is `UNAVAILABLE`.
@@ -506,8 +511,8 @@ callee endpoint stays unresolved.
 |---|---|---|
 | `files.calls` on the pilot | 89 819 | **91 025** (+1 206) |
 | Other fact classes | — | unchanged (definitions 12 105, imports 6 680, errors 1 991, files 1 438) |
-| Regression tests | — | **11** C++ unit tests in `syntax.rs` |
-| `cargo test --locked` | 648 passed | **652 passed / 0 failed** (8 suites) |
+| Regression tests | — | **13** C++ unit tests in `syntax.rs` |
+| `cargo test --locked` | 648 passed | **654 passed / 0 failed** (8 suites) |
 | `cargo fmt --check`, `cargo clippy -D warnings` | clean | clean |
 
 The M2/M6 goldens are **byte-unchanged**: the frozen C++ fixtures contain
@@ -567,6 +572,20 @@ position`); the audit did not add a new field, a new edge kind or a new
 label, so the schema and the edge taxonomy are unchanged. Closing this gap
 needs a name lookup — i.e. the semantic provider that E1/E7 already mark as
 owner-gated.
+
+### 9.6 Known limits of the retained form
+
+The retained form is the right *shape*; three limits are recorded in the
+code and here, and none of them produces a wrong fact:
+
+| Limit | Behaviour | Why |
+|---|---|---|
+| a **typedef** is indistinguishable from a class | `size_t n(0);` is recorded as a call to `size_t` although C++ may perform a functional cast | a name lookup would settle it (gap E12) |
+| a **multi-declarator** declaration | `Widget a(1), b(2);` records the fact for the first declarator only | the grammar attaches one declarator field; the omission is conservative |
+| a **template type** | `std::vector<int> v(10);` is recorded, with the terminal `vector<int>` | the template arguments stay in the terminal (the known terminal-mangling limit) |
+
+The first two are over-approximations and omissions of the same class as
+E12; the third is already recorded in the pilot's template-call measurement.
 
 ---
 
@@ -689,4 +708,24 @@ digest (`method/fact-digest.cjs`): the five fact tables are byte-identical
 between the incremental home and an independent full rebuild (§5). The
 superseded line stays in the preserved `raw/cp2-suite.txt` transcript; the
 harness no longer contains the pattern, and `incremental.ps1` now aborts when
-a query errors, prints nothing, or differs.
+a query errors, prints nothing, differs, when the one-file delta did not
+change the tree, or when an index run exits non-zero.
+
+### 11.2 The review round
+
+An independent review of the audit diff found three defects that the audit
+itself had introduced; all three are corrected and covered by regression
+tests:
+
+| Finding | Correction |
+|---|---|
+| the path guard resolved only the **leaf** component, so a path *through* an intermediate junction escaped the benchmark root | the path is now resolved component by component; the test covers a path through an intermediate junction |
+| the grader awarded a `PASS` to the CUDA check when the output was **missing** or **unclassifiable** | only an observed failure passes; a missing or unclassifiable output is `UNAVAILABLE` |
+| two checks accepted less than their criterion: the callee check did not require the `Run` call, and the trace check compared against a hop count the criterion did not state | the callee check now requires both names, and the trace criterion states the frozen chain as 4 nodes / 3 edges, matching CP1 §B.3 |
+
+The review also reported that a template type is not captured; the claim was
+checked against the grammar and **refuted** — `std::vector<int> v(10);` is
+recorded, with the terminal `vector<int>`. The two limits that remain (a
+typedef is indistinguishable from a class, and a multi-declarator
+declaration records its first declarator only) are recorded in §9.6 and in
+the code.

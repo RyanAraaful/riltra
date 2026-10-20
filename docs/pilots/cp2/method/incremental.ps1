@@ -34,6 +34,7 @@ $noop = & $cfg.Bin index --repo mmsp-pin 2>&1 | Out-String
 $noopCode = $LASTEXITCODE
 $sw.Stop()
 "exit=$noopCode wall_ms=$($sw.ElapsedMilliseconds)"
+if ($noopCode -ne 0) { throw "the no-op refresh failed with exit $noopCode" }
 [System.IO.File]::WriteAllText((Join-Path $out 'noop.json'), $noop, (New-Object System.Text.UTF8Encoding($false)))
 $noop
 
@@ -42,14 +43,21 @@ $noop
 Restore-Snapshot -Snapshot $snap -Root $cfg.BenchRoot -Pin $Pin -MmspRoot $cfg.MmspRoot | Out-Null
 $p = Join-Path $snap 'colmap/src/colmap/mvs/patch_match_options.h'
 (Get-Content $p -Raw) -replace 'double max_triangulation_angle = -1\.0f;', 'double max_triangulation_angle = 60.0f;' | Set-Content -NoNewline $p
+# The delta must really exist: a pattern that no longer matches would make
+# this a second no-op, and the parity below would then prove nothing.
+$changed = (git -C $snap status --porcelain | Measure-Object -Line).Lines
+"delta tree state: $changed porcelain line(s)"
+if ($changed -lt 1) { throw "the one-file delta did not change the tree; the parity would prove nothing" }
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
 $delta = & $cfg.Bin index --repo mmsp-pin 2>&1 | Out-String
 $deltaCode = $LASTEXITCODE
 $sw.Stop()
 "exit=$deltaCode wall_ms=$($sw.ElapsedMilliseconds)"
+if ($deltaCode -ne 0) { throw "the one-file delta failed with exit $deltaCode" }
 [System.IO.File]::WriteAllText((Join-Path $out 'delta.json'), $delta, (New-Object System.Text.UTF8Encoding($false)))
 $delta
-"delta tree state: $(git -C $snap status --porcelain | Measure-Object -Line | ForEach-Object { $_.Lines }) porcelain line(s)"
+$deltaJson = $delta | ConvertFrom-Json
+if ($deltaJson.reparsed -ne 1) { throw "the delta re-parsed $($deltaJson.reparsed) files instead of 1" }
 
 # --- 3. independent full rebuild (oracle) on the SAME final tree, fresh home ---
 "===== oracle: independent full rebuild, fresh home, same final tree ====="
@@ -61,6 +69,7 @@ $oracle = & $cfg.Bin index --repo mmsp-pin --full 2>&1 | Out-String
 $oracleCode = $LASTEXITCODE
 $sw.Stop()
 "exit=$oracleCode wall_ms=$($sw.ElapsedMilliseconds)"
+if ($oracleCode -ne 0) { throw "the oracle rebuild failed with exit $oracleCode" }
 [System.IO.File]::WriteAllText((Join-Path $out 'oracle.json'), $oracle, (New-Object System.Text.UTF8Encoding($false)))
 $oracle
 "oracle db bytes = $((Get-ChildItem $oracleHome -Recurse -File -Filter *.db | Measure-Object -Property Length -Sum).Sum)"

@@ -43,7 +43,8 @@ Section "3. workflow queries (CP1 section D)"
 Section "4. grading"
 $env:CP2_QDIR = Join-Path $raw 'queries'
 $env:CP2_OUT = $raw
-node (Join-Path $method 'grade.cjs')
+# The grader must read THIS run's evidence, not the archived one.
+node (Join-Path $method 'grade.cjs') (Join-Path $raw 'queries') (Join-Path $raw 'grading.json')
 if ($LASTEXITCODE -ne 0) { throw "the grading script failed with exit $LASTEXITCODE" }
 
 Section "5. freshness F1-F5"
