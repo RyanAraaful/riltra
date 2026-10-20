@@ -439,71 +439,38 @@ fn push_call(facts: &mut FileFacts, node: tree_sitter::Node, src: &[u8]) {
     });
 }
 
-/// Whether `node` sits inside a function or lambda body. A declaration in
-/// such a scope is a local variable, never a function declaration: C++ does
-/// not allow declaring a function inside a block. Class bodies and
-/// namespace scope are excluded, and a preprocessor branch does not change
-/// the scope.
-fn inside_function_body(node: tree_sitter::Node) -> bool {
-    let mut parent = node.parent();
-    while let Some(p) = parent {
-        match p.kind() {
-            "compound_statement" => {}
-            "function_definition" | "lambda_expression" | "lambda" => return true,
-            "field_declaration_list"
-            | "class_specifier"
-            | "struct_specifier"
-            | "namespace_definition"
-            | "translation_unit" => return false,
-            _ => {}
-        }
-        parent = p.parent();
-    }
-    false
-}
-
 /// C++ direct initialization (`T var(args);`) has no `call_expression` node:
 /// the grammar models it as `declaration` -> `init_declarator` ->
 /// `argument_list`, with the called type in the declaration's type field.
-/// The grammar also applies C++'s most-vexing-parse rule: when every
-/// argument looks like a type, `T var(a, b);` is parsed as a
-/// `function_declarator` (a function prototype) instead. Inside a function
-/// body a function declaration is not legal C++, so that form is a
-/// constructor call too. Returns the called type node and the argument
-/// list node.
+/// Only that form is a constructor call: the argument list holds
+/// expressions, so C++ reads the declaration as a variable definition.
+///
+/// The grammar also models `T var(a, b);` as a `function_declarator`
+/// (C++'s most-vexing-parse shape). There the arguments are read as a
+/// parameter-type-list, and C++ reads the declaration as a function
+/// declaration when the argument names denote types and as a variable
+/// definition when they denote variables. Only name lookup can decide, so
+/// the syntax layer must not assert a constructor call for that form: a
+/// block-scope function declaration is legal C++, so the scope does not
+/// settle it either. Returns the called type node and the argument list.
 fn direct_init_parts(node: tree_sitter::Node) -> Option<(tree_sitter::Node, tree_sitter::Node)> {
     let decl = node.child_by_field_name("declarator")?;
-    let args = match decl.kind() {
-        // Direct initialization puts the argument list in the declarator's
-        // `value` field; copy initialization (`T v = T(args);`) puts a
-        // `call_expression` there, which is captured on its own.
-        "init_declarator" => {
-            let value = decl.child_by_field_name("value")?;
-            if value.kind() != "argument_list" {
-                return None;
-            }
-            value
-        }
-        // Most-vexing-parse form: only a local declaration, never a
-        // prototype, because a function cannot be declared in a block.
-        "function_declarator" => {
-            if !inside_function_body(node) {
-                return None;
-            }
-            let mut walker = decl.walk();
-            let list = decl
-                .named_children(&mut walker)
-                .find(|c| c.kind() == "parameter_list")?;
-            list
-        }
-        _ => return None,
-    };
+    // Direct initialization puts the argument list in the declarator's
+    // `value` field; copy initialization (`T v = T(args);`) puts a
+    // `call_expression` there, which is captured on its own.
+    if decl.kind() != "init_declarator" {
+        return None;
+    }
+    let value = decl.child_by_field_name("value")?;
+    if value.kind() != "argument_list" {
+        return None;
+    }
     let ty = node.child_by_field_name("type")?;
     // Only a named type can be a constructor: `int x(5);` is not a call.
     if !matches!(ty.kind(), "type_identifier" | "qualified_identifier") {
         return None;
     }
-    Some((ty, args))
+    Some((ty, value))
 }
 
 /// Record a C++ direct-initialization constructor call as a call fact. The
@@ -892,19 +859,69 @@ mod tests {
     }
 
     #[test]
-    fn cpp_most_vexing_parse_local_declaration_is_a_call() {
-        // `T v(a, b);` with identifier-like arguments is parsed as a
-        // function prototype by the grammar. Inside a function body a
-        // function declaration is not legal C++, so it is a constructor call.
+    fn cpp_most_vexing_parse_is_ambiguous_and_not_a_call() {
+        // `T v(a, b);` with identifier-like arguments is parsed by the
+        // grammar as a function declarator. C++ reads it as a function
+        // declaration when `a`/`b` denote types and as a variable
+        // definition when they denote variables; only name lookup can
+        // decide, so the syntax layer must not assert a constructor call.
         let src = b"void caller() {\n  Widget w(options, problem);\n}\n";
         let facts = parse_source(Language::Cpp, src);
-        assert_eq!(facts.calls.len(), 1);
-        let call = &facts.calls[0];
-        assert_eq!(call.name.as_deref(), Some("Widget"));
-        let callee = call.callee.as_ref().expect("callee span recorded");
-        assert_eq!(&src[callee.byte_start..callee.byte_end], b"Widget");
-        let terminal = call.tcallee.as_ref().expect("terminal span recorded");
-        assert_eq!(&src[terminal.byte_start..terminal.byte_end], b"Widget");
+        assert!(
+            facts.calls.is_empty(),
+            "an ambiguous most-vexing-parse form must not become a call fact"
+        );
+    }
+
+    #[test]
+    fn cpp_block_scope_type_argument_is_not_a_call() {
+        // `Widget w(int);` inside a function body declares the function
+        // `w` taking an int (MSVC: the type of `w` is `Widget(int)`), not
+        // a variable: a function declaration is legal C++ at block scope,
+        // so the declaration is not a constructor call.
+        let src = b"void caller() {\n  Widget w(int);\n}\n";
+        let facts = parse_source(Language::Cpp, src);
+        assert!(
+            facts.calls.is_empty(),
+            "a block-scope function declaration is not a constructor call"
+        );
+    }
+
+    #[test]
+    fn cpp_block_scope_function_declaration_is_not_a_call() {
+        // The same shape with a named return type is the canonical
+        // block-scope function declaration, which C++ accepts.
+        let src = b"void caller() {\n  Widget helper(int);\n}\n";
+        let facts = parse_source(Language::Cpp, src);
+        assert!(
+            facts.calls.is_empty(),
+            "a block-scope function declaration is not a constructor call"
+        );
+    }
+
+    #[test]
+    fn cpp_block_scope_empty_parentheses_is_not_a_call() {
+        // `Widget w();` declares the function `w` (MSVC: the type of `w` is
+        // `Widget(void)`), never a default-constructed variable.
+        let src = b"void caller() {\n  Widget w();\n}\n";
+        let facts = parse_source(Language::Cpp, src);
+        assert!(
+            facts.calls.is_empty(),
+            "an empty argument list declares a function, not a call"
+        );
+    }
+
+    #[test]
+    fn cpp_block_scope_function_type_argument_is_not_a_call() {
+        // `Widget w(T());` is the classic most-vexing parse: `T()` is a
+        // function type, so the declaration is a function declaration
+        // (MSVC: the type of `w` is `Widget(T(void))`).
+        let src = b"struct T {};\nvoid caller() {\n  Widget w(T());\n}\n";
+        let facts = parse_source(Language::Cpp, src);
+        assert!(
+            facts.calls.is_empty(),
+            "a function-type argument declares a function, not a call"
+        );
     }
 
     #[test]
@@ -921,8 +938,8 @@ mod tests {
     #[test]
     fn cpp_local_declaration_in_a_preprocessor_branch_is_a_call() {
         // A preprocessor branch does not change the scope: the declaration is
-        // still local, so it is a constructor call.
-        let src = b"void caller() {\n#if defined(X)\n  Widget w(options, problem);\n#endif\n}\n";
+        // still local, so a direct initialization is a constructor call.
+        let src = b"void caller() {\n#if defined(X)\n  Widget w(1);\n#endif\n}\n";
         let facts = parse_source(Language::Cpp, src);
         assert_eq!(facts.calls.len(), 1);
         assert_eq!(facts.calls[0].name.as_deref(), Some("Widget"));
