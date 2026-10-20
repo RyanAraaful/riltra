@@ -115,14 +115,17 @@ Riltra's classifier (`crates/cli/src/syntax.rs:62-80`, verified against the
 current source at `96a57f8`): `.py` → Python; `.js/.mjs/.cjs` → JavaScript;
 `.ts/.mts/.cts` → TypeScript; `.tsx` → Tsx; `.rs` → Rust; `.c` → C;
 `.h/.hh/.hpp/.hxx` and `.cc/.cpp/.cxx` → C++ (headers parse as C++ **by
-policy**, `syntax.rs:58-60`); `.cu/.cuh` → `CudaExperimental`, "explicitly
-experimental/unsupported; never force-parsed" (`syntax.rs:53-54`, `:77`);
-everything else → `UnsupportedExtension` (`:78`).
+policy** — the rationale is the comment at `syntax.rs:58-61`, the mapping is
+`syntax.rs:75-76`); `.cu/.cuh` → `CudaExperimental`, "explicitly
+experimental/unsupported; never force-parsed" (the variant at `syntax.rs:54`,
+the policy comment at `:53`, the mapping at `:77`); everything else →
+`UnsupportedExtension` (the variant at `syntax.rs:55`, the catch-all arm at
+`:78`).
 
 | Class at the pin | Files | Detail |
 |---|---|---|
 | Riltra-parsed extensions | **1 438** | `.h` 817, `.cc` 439, `.py` 114, `.c` 34, `.ts` 18, `.cpp` 14, `.js` 2 |
-| CUDA, **unsupported** | **489** | 482 third-party `.cu` + 2 third-party `.cuh` (generated) + 5 first-party `.cu` |
+| CUDA, **unsupported** | **489** | 487 `.cu` (482 third-party + 5 first-party) + 2 `.cuh` (both third-party, generated) |
 | Other extensions, unsupported | **350** | `.ps1` 75, `.svg` 37, `.inl` 37, `.txt` 34, `.md` 34, `.rst` 23, `.sh` 17, `.cmake` 12, `.m` 10, `.glsl` 10, `.json` 9, … |
 
 The five first-party CUDA translation units (all unsupported, all in `mvs/` or
@@ -140,7 +143,7 @@ files.
 | Item | Value |
 |---|---|
 | OS | Microsoft Windows 11 IoT Enterprise LTSC, build 26100 |
-| CPU / RAM | Intel Core i5-8250U @ 1.60 GHz / 19.9 GiB |
+| CPU / RAM | Intel Core i5-8250U @ 1.60 GHz / 19.9 GiB (OS-reported `TotalPhysicalMemory`; the design gate's CP7-A record quotes 21.3 GiB for the same CPU — two measurements of the same host, not two hosts) |
 | Filesystem | NTFS |
 | git | 2.45.1.windows.1 |
 | rustc / cargo | 1.99.1 (58cf8f9c3 2026-10-13) / 1.99.1 (5f94df478 2026-08-27) |
@@ -203,20 +206,35 @@ same translation unit.
 
 Evidence: the source lines quoted above; the definition body is
 `patch_match.cc:118-128` and ends at `:128`. The **complete** set of
-`.Print()` call sites in `colmap/src/colmap` is three: `patch_match.cc:667`
-(this symbol), `patch_match.cc:668` (`patch_match_options.Print();` →
+`.Print()` call sites in `colmap/src/colmap` is three, established by
+`git grep -n "\.Print()" -- 'colmap/src/colmap/*'` over the pinned tree,
+which returns exactly `fusion.cc:144`, `patch_match.cc:667` and
+`patch_match.cc:668`: `patch_match.cc:667` (this symbol),
+`patch_match.cc:668` (`patch_match_options.Print();` →
 `PatchMatchOptions::Print`, defined `patch_match_options.cc:45`) and
 `fusion.cc:144` (`options_.Print();` → `StereoFusionOptions::Print`,
 declared `fusion.h:100`, called from `StereoFusion::Run()` at
 `fusion.cc:137`). The latter two are **different** symbols and must not be
 conflated with `PatchMatch::Problem::Print`.
 
-Riltra must report: the definition with its exact span, and the reference
-count. If the reference set is not exactly `{patch_match.cc:667}`, or if
-`patch_match.cc:668` or `fusion.cc:144` is attributed to
-`PatchMatch::Problem::Print`, the answer is **FAIL** (wrong citation). If
-the reference is only a heuristic match, it must stay labeled
-`POTENTIAL_CALL` and must not be reported as a verified `CALLS` edge.
+Riltra must report: the definition with its exact span.
+
+- **Required (honesty gate).** The three call sites are reported as
+  *candidates* whose terminal name is `Print`, each labeled
+  `POTENTIAL_CALL` / `precision:"Heuristic"` / `verification:"Unverified"`
+  — never as three proven references to `PatchMatch::Problem::Print`.
+  Riltra's syntax layer matches by terminal name and has no C++ overload
+  resolution (§B.9), so all three sites are indistinguishable to it.
+- **Expected limitation.** A pilot answer that lists all three call sites
+  as `Print` candidates, and states that the method identity cannot be
+  resolved without a semantic provider, is the **correct** answer. So is an
+  answer that names only `patch_match.cc:667` **provided** it does not
+  claim the other two do not call anything named `Print`.
+- **FAIL conditions.** Reporting `fusion.cc:144` or `patch_match.cc:668`
+  as a reference to `PatchMatch::Problem::Print` (wrong citation /
+  fabricated relation); reporting a `POTENTIAL_CALL` as a verified `CALLS`
+  edge; or presenting the candidate set as a complete, resolved reference
+  list for one specific method.
 
 **Anchor B2 — `CreateWorkspace` (C++ function with internal linkage)**
 
@@ -234,7 +252,11 @@ namespace and is called once, at `:284`.
 
 Evidence: the anonymous-namespace block spans `patch_match.cc:50-111`; the
 three call sites were enumerated by `git grep -n "CreateWorkspace"` over the
-pinned tree, which returned only `patch_match.cc:54, 255, 278, 323`.
+pinned tree, which returned only `patch_match.cc:54, 255, 278, 323` — the
+definition plus exactly three call sites, no occurrence anywhere else in the
+repository. The sibling helper `UpsamplePyramidSeeds` is defined at
+`patch_match.cc:80` and, by the same enumeration, called exactly once, at
+`patch_match.cc:284`.
 
 Riltra must report: the definition and the three references. It must **not**
 present `CreateWorkspace` as a cross-file or public symbol, and must not
@@ -375,10 +397,23 @@ qualification. An impact verdict of `UNKNOWN` with the affected files listed
 is **acceptable** (M6 policy forbids SAFE/LOW verdicts). An impact answer
 that claims a small or safe blast radius, that omits
 `option_manager.cc:1018-1019`, or that claims the geometric consistency path
-is affected, is a **FAIL** (false-safe impact result). The `PrintOption(...)`
-site at `patch_match_options.cc:58` is a **macro invocation**
-(`#define PrintOption(option) …`, `patch_match.cc:45`), not a function call —
-resolving it to a function definition would be a **FAIL**.
+is affected, is a **FAIL** (false-safe impact result). The two macro sites
+must not be resolved to function definitions:
+`patch_match_options.cc:58` is `PrintOption(max_triangulation_angle);` and
+`patch_match_options.cc:92` is `CHECK_OPTION_LE(max_triangulation_angle,
+180.0f);`. Both are **macro invocations**, not calls to a function named after
+the option, and both macros are opaque to a syntax extractor.
+
+**Macro hazard (re-verified at CP1).** The macro `PrintOption` is defined
+**four times** in the pilot, each in a different translation unit with a
+different body — `fusion.cc:78`, `patch_match.cc:45`,
+`patch_match_options.cc:43`, `texture_mapping.cc:1034` (established by
+`git grep -n "#define PrintOption"`, which returns exactly these four). The
+site that matters for this option is `patch_match_options.cc:58`, whose macro
+is defined at **`patch_match_options.cc:43`** — *not* at `patch_match.cc:45`,
+which is a different macro with a different body in a different file.
+Resolving either macro invocation to a function definition is a **FAIL**
+(fabricated relation).
 
 ### B.5 Header and C++/CUDA boundaries
 
@@ -388,7 +423,7 @@ resolving it to a function definition would be a **FAIL**.
 | CUDA class declaration | `colmap/src/colmap/mvs/patch_match_cuda.h:49` | `class PatchMatchCuda { … }`, `Run()` declared at `:54:8` |
 | CUDA definitions | `colmap/src/colmap/mvs/patch_match_cuda.cu` | `Run()` `:1326`, `RunWithWindowSizeAndStep()` `:1416`, `ComputeCudaConfig()` `:1567`, `BindRefImageTexture()` `:1584`, `InitRefImage()` `:1597`, `InitSourceImages()` `:1614`, `InitTransforms()` `:1724`, `InitWorkspaceMemory()` `:1840`, `Rotate()` `:1904` |
 | Device-side identifiers | `patch_match_cuda.cu` | `PhotoConsistencyCostComputer` `:454`, `ComputeNCCProb` `:741`, `SweepFromTopToBottom` kernel `:945` — **all three exist only in the `.cu` file**; none appears in any header |
-| Header guard asymmetry | `colmap/src/colmap/mvs/patch_match.h:36`, `:127`, `:159` | `#ifndef __CUDACC__` hides `colmap/util/base_controller.h`, `colmap/util/threading.h` and the whole `PatchMatchController` class from an nvcc compilation |
+| Header guard asymmetry | `colmap/src/colmap/mvs/patch_match.h:36` and `:127` (the only two `#ifndef __CUDACC__` guards in the file, closed at `:39` and `:159`) | The first guard hides `colmap/util/base_controller.h` and `colmap/util/threading.h`; the second hides the whole `PatchMatchController` class — from an nvcc compilation |
 
 Expected factual answer: the C++/CUDA boundary is crossed only in the
 declaration direction. The C++ side can see `PatchMatchCuda`'s public
@@ -414,7 +449,7 @@ relation / unsupported claim).
 | 3 | `&PatchMatchController::ProcessProblem` | Address-of a member function; the invocation happens inside `ThreadPool` | At most a `POTENTIAL_CALL` candidate; never `CALLS` |
 | 4 | `PrintOption(max_triangulation_angle)` | Macro expansion; the macro body is opaque to a syntax extractor | Either not reported as a call, or reported as an unresolved macro reference with the macro labeled. Resolving it to a function definition is a **FAIL** |
 | 5 | Three distinct `Print()` methods share one bare name | `PatchMatch::Problem::Print` (`patch_match.h:74`), `PatchMatchOptions::Print` (`patch_match_options.cc:45`), `StereoFusionOptions::Print` (`fusion.h:100`) | Each call site must resolve to its own method: `patch_match.cc:667`, `patch_match.cc:668`, `fusion.cc:144` respectively. Merging them into one symbol, or mis-attributing a call site, is a **FAIL** (wrong citation) |
-| 6 | Template-heavy code | `colmap/src/colmap/estimators/cost_functions/reprojection_error.h` declares templates at lines 50, 61, 147, 216, 260, 311, 343, 388, 425, 432, 441, 448 (`template <typename CameraModel, …>`) | Template identity preserved (parameterization visible); call targets inside templates reported as candidates; no claim of overload resolution |
+| 6 | Template-heavy code | `colmap/src/colmap/estimators/cost_functions/reprojection_error.h` declares **13** templates, at lines 50, 61, 147, 216, 260, 311, 343, 388, 425, 432, 441, 448 and 455 (the last one a template-template parameter, `template <template <typename> class CostFunctor, typename... Args>`) | Template identity preserved (parameterization visible); call targets inside templates reported as candidates; no claim of overload resolution |
 | 7 | Anonymous-namespace helper | `UpsamplePyramidSeeds` (`patch_match.cc:80`), one call site `:284` | Definition reported with file-local scope; no external attribution |
 
 For every one of these, the honest-but-partial answer is a PASS; the
@@ -435,8 +470,10 @@ source it cites.
 `colmap/util/misc.h`, `colmap/util/threading.h`.
 
 Expected factual answer: the include graph of these two files, exactly as
-listed — 6 edges for the header (4 unconditional, 2 conditional) and 10 for
-the implementation unit.
+listed — **9** `#include` directives in the header, of which **6** are
+project includes (4 unconditional, 2 under the `__CUDACC__` guard) and 3 are
+standard-library; and **12** in the implementation unit, of which **10** are
+project includes and 2 are standard-library.
 
 Riltra must report the include edges with the target paths; include
 resolution is deliberately conservative (design gate §4 G-SYN "Gaps"), so an
@@ -452,6 +489,65 @@ freshness verdict with its reasons, and the edge kind (`CALLS` vs
 `POTENTIAL_CALL`, `Unverified`/`Stale` vs semantic verification). A citation
 that does not resolve to the expected construct in §B is a FAIL, and an
 answer without a freshness verdict is a FAIL (no silent freshness).
+
+### B.9 What a syntax-only index can and cannot attribute
+
+This section is the root cause behind the acceptance criteria in §D, and it
+is read from Riltra's own current source, not assumed.
+
+**What the syntax layer records.** Definitions, imports, and **calls** —
+and a call is recorded only from a call expression
+(`crates/cli/src/syntax.rs:400-429` `push_call`, dispatched from the
+`call_expression` arms at `syntax.rs:499-538`). A call fact stores the whole
+callee text plus a *terminal* span: the identifier after the last `.`, `::`
+or `->` (`syntax.rs:436-469`).
+
+**What edges are derived.** `derive_syntax_edges`
+(`crates/cli/src/edges.rs:167-205`) builds only two kinds of syntax edge:
+`IMPORTS` (precision `Exact`) and `POTENTIAL_CALL` candidates
+(`precision:"Heuristic"`, `verification:"Unverified"`, `callee: null`,
+`unresolved:"no-overlap"` when the target is not proven to overlap).
+A `CALLS` or `REFERENCES` edge requires a semantic provider
+(`scip-import` / `lsp-subprocess`); the MMSP pilot has **none** (D-M9-2,
+§E1).
+
+**Consequence 1 — data members have no incoming edges.** A member *read*
+(`options_.max_triangulation_angle`), an address-of binding
+(`&patch_match_stereo->max_triangulation_angle`) and a macro argument
+(`PrintOption(max_triangulation_angle)`) are not call expressions. The
+symbol `max_triangulation_angle` therefore has **no** reverse edge in a
+syntax-only index, and an impact anchored at its declaration has no path to
+traverse.
+
+**Consequence 2 — call sites are matched by terminal name.** `Print`,
+`Run` and `PatchMatchController` are matched as bare terminal names, so
+distinct methods that share a name, overloads, and types passed as template
+arguments are indistinguishable to the syntax layer. The `callee` of a
+syntax edge is `null`; the target is never resolved to a definition.
+
+**Consequence 3 — the honest verdict is `UNKNOWN`.** `impact_verdict`
+(`crates/cli/src/edges.rs:1377-1406`) returns `UNKNOWN` for any non-`Exact`
+or unresolved edge, `HIGH` only for proven `CALLS`, `MEDIUM` only for proven
+`REFERENCES`, and never `SAFE`/`LOW`.
+
+**Frozen evidence of that shape (CP7-A, do not edit).**
+`docs/pilots/cp7a/goldens-raw/impact-validate-id.json` records
+`"paths":[]`, `"covered":0,"total":0`, `verdict:"UNKNOWN"`,
+`completeness.status:"partial"` and the unresolved reasons
+`insufficient-impact-evidence`, `syntax-anchor-uncertain`,
+`empty-result-not-coverage-proof`, `unresolved_target`;
+`docs/pilots/cp7a/goldens-raw/callers-validate-id.json` records four
+`POTENTIAL_CALL` edges with `precision:"Heuristic"`,
+`verification:"Unverified"`, `callee: null`, `unresolved:"no-overlap"`.
+
+**Therefore, for the pilot:** the honest answer to workflow 4 is an empty
+or partial impact with an `UNKNOWN` verdict, and the honest answer to
+workflows 1–2 is a name-matched candidate set that cannot separate overloads
+or member references. These are the **expected** pilot outputs. They are the
+evidence for the gaps in §E1 and §E7, not tool defects, and not grounds for
+lowering the release requirement: the release requirement is stated
+separately in §D as the *capability gate*, and §D records that the
+capability gate is currently **UNMET** on a syntax-only pilot.
 
 ---
 
@@ -492,7 +588,21 @@ integrated LLM is required inside Riltra.
 
 ### D.0 Common failure conditions (apply to all five workflows)
 
-A workflow **FAILS** if any of the following occurs:
+Every workflow is judged in two layers.
+
+- **Honesty gate** — what the answer must do to be *trustworthy*: no
+  fabrication, correct repository identity, resolvable citations, freshness
+  stated, verified calls distinguishable from candidates. This layer is
+  judgeable on the syntax-only pilot; it is the PASS/FAIL that CP2 records.
+- **Capability gate** — what the answer must *cover* to count as a practical
+  GitNexus alternative for that workflow. **This layer is not lowered.** It
+  is the release requirement, and on the syntax-only pilot it is expected to
+  be **UNMET** where the coverage needs C++ identity or member-reference
+  resolution (§B.9, §E1, §E7). CP2 records the unmet gate as *evidence for
+  the owner decision*; an unmet gate never becomes a PASS, and it is never
+  "fixed" by reporting less.
+
+A workflow **FAILS the honesty gate** if any of the following occurs:
 
 - a relation is reported that the cited source does not contain
   (fabricated relation);
@@ -505,10 +615,11 @@ A workflow **FAILS** if any of the following occurs:
 - a heuristic edge is presented as a verified `CALLS` edge;
 - freshness is not stated, or `fresh` is reported while the inputs differ.
 
-Common PASS requirements for every workflow: the answer names the repository
-it answered for; every cited fact resolves to the pinned source; a freshness
-verdict with reasons is present; verified calls and `POTENTIAL_CALL`
-candidates are distinguishable.
+Common honesty-gate requirements for every workflow: the answer names the
+repository it answered for; every cited fact resolves to the pinned source;
+a freshness verdict with reasons is present; verified calls and
+`POTENTIAL_CALL` candidates are distinguishable; and the answer states what
+it could not resolve instead of implying completeness.
 
 ### D.1 Workflow 1 — Find a symbol and its references
 
@@ -520,19 +631,30 @@ Expected operations: `riltra search --repo mmsp-pin --symbol Print` (or
 --path colmap/src/colmap/mvs/patch_match.cc --line 118 --col 27` (or
 `riltra_code_callers`).
 
-Objective PASS criteria:
+Objective criteria:
+
+*Honesty gate (PASS required).*
 
 1. The search returns the definition at `patch_match.h:74` and/or
-   `patch_match.cc:118` with the correct symbol kind (method of
-   `colmap::mvs::PatchMatch::Problem`).
-2. The reference set for that symbol is exactly `patch_match.cc:667`; it must
-   not include `patch_match.cc:668` (that is `PatchMatchOptions::Print`) nor
-   `fusion.cc:144` (that is `StereoFusionOptions::Print`).
+   `patch_match.cc:118:27`, with a resolvable anchor.
+2. The reference candidates are labeled `POTENTIAL_CALL` / heuristic; no
+   candidate is presented as a proven reference to one specific method.
 3. A search for `normalize_vec` returns the Python definition
-   `colmap/benchmark/reconstruction/evaluation/geometry.py:34` and no C++
+   `colmap/benchmark/reconstruction/evaluation/geometry.py:34`; no C++
    `normalize_vec` is reported.
 4. A search for the bare name `Run` returns **multiple** distinct `Run`
-   identities (§B.6 #1) with distinct locations, not a single merged symbol.
+   identities with distinct locations, not one merged symbol.
+5. The repository identity and a freshness verdict are present.
+
+*Capability gate (release requirement; expected **UNMET** on the pilot).*
+
+6. The answer distinguishes `patch_match.cc:667` from `patch_match.cc:668`
+   and `fusion.cc:144` — i.e. it resolves the C++ method identity of the
+   single true reference (§B.1). §B.9 explains why a syntax-only index
+   cannot: it matches the terminal name `Print`, so all three sites are
+   indistinguishable to it (gap E7). The gate stays as stated; the pilot is
+   expected not to meet it, and workflow 1 does **not** count as a
+   demonstrated GitNexus replacement until it is met.
 
 ### D.2 Workflow 2 — Identify callers and callees
 
@@ -544,17 +666,32 @@ Expected operations: `riltra callers` / `riltra_code_callers` anchored at
 declaration) and at `colmap/src/colmap/mvs/patch_match.cc:191` (`PatchMatch::Run`
 definition); `riltra callees` / `riltra_code_callees` at the same anchors.
 
-Objective PASS criteria:
+Objective criteria:
 
-1. The caller set of `PatchMatchController` contains the three external
-   construction sites `exe/mvs.cc:271`, `controllers/automatic_reconstruction.cc:431`,
-   `ui/dense_reconstruction_widget.cc:397-398`.
-2. The callee set of `PatchMatch::Run` contains the `PatchMatchCuda`
-   construction and `patch_match_cuda_->Run()` call at `patch_match.cc:196-197`.
+*Honesty gate (PASS required).*
+
+1. The caller candidates of `PatchMatchController` include the two direct
+   construction calls `exe/mvs.cc:271` and
+   `controllers/automatic_reconstruction.cc:431`, and the candidate set
+   contains no site outside the source truth of §B.2.
+2. The callee candidates of `PatchMatch::Run` include the `PatchMatchCuda`
+   construction and the `patch_match_cuda_->Run()` call at
+   `patch_match.cc:196-197`.
 3. The `ThreadPool` dispatch to `ProcessProblem` is either absent or labeled
    `POTENTIAL_CALL`; a verified `CALLS` edge here is a FAIL.
 4. Every reported edge carries a file/line/column that resolves to the
-   construct in §B.2.
+   construct in §B.2, and every edge is labeled as a candidate.
+
+*Capability gate (release requirement; expected **UNMET** on the pilot).*
+
+5. The caller set is complete **and** identity-resolved: all three
+   construction sites — including the factory-template site
+   `ui/dense_reconstruction_widget.cc:397-398` — are attributed to the class
+   `PatchMatchController` rather than to the `make_shared` / `make_unique`
+   template, and each is distinguished from the same-named symbols in
+   §B.6. §B.9 explains why a syntax-only index cannot do this (the callee of
+   a syntax edge is `null`; the target is never resolved to a definition):
+   gap E7. The gate stays as stated; the pilot is expected not to meet it.
 
 ### D.3 Workflow 3 — Trace a call path
 
@@ -566,15 +703,25 @@ colmap/src/colmap/mvs/patch_match.cc --line 233 --col 28 --depth 4` (or
 `riltra_code_trace` with `depth`), optionally with `--to` anchored at
 `colmap/src/colmap/mvs/patch_match_cuda.cu:1326`.
 
-Objective PASS criteria:
+Objective criteria:
 
-1. The returned path is a subset of the frozen chain in §B.3; every hop
-   resolves to the cited construct.
+*Honesty gate (PASS required).*
+
+1. The returned path is a **subset** of the frozen chain in §B.3; every hop
+   that is present resolves to the cited construct.
 2. The plausibility disclaimer `plausible-path-not-execution` is present.
 3. The path does not claim to reach a device-side definition; the CUDA
    terminus is labeled unsupported.
 4. If the thread-pool hop is missing, the answer states that the dispatch is
    indirect — a complete-looking chain with a silently dropped hop is a FAIL.
+
+*Capability gate (release requirement; expected **UNMET** on the pilot).*
+
+5. The path spans the full chain of §B.3, including the indirect
+   thread-pool dispatch. §B.9: the dispatch is an address-of reference, not
+   a call, so a syntax-only index cannot traverse it, and the CUDA terminus
+   lives in an unsupported file (gaps E4, E2). The gate stays as stated; the
+   pilot is expected to return a shorter path.
 
 ### D.4 Workflow 4 — Analyze the impact of a change
 
@@ -586,23 +733,37 @@ colmap/src/colmap/mvs/patch_match_options.h --line 56 --col 10` (or
 `riltra_code_impact`), cross-checked with `riltra callers` at
 `colmap/src/colmap/controllers/option_manager.cc:1019:41`.
 
-Objective PASS criteria:
+Objective criteria:
 
-1. The affected set includes `patch_match_options.h:56`,
+*Honesty gate (PASS required).*
+
+1. The impact is anchored at the declared member
+   `patch_match_options.h:56:10` and the anchor resolves.
+2. The verdict is `UNKNOWN` — the expected syntax-only outcome (§B.9,
+   `edges.rs:1377-1406`) — and never `SAFE`/`LOW` and never "no impact".
+3. `completeness.status` is `partial` with the `graph-completeness-unproven`
+   reason, the completeness disclaimer is present, and the unresolved
+   reasons are reported.
+4. The two macro sites are not resolved to function definitions, and no edge
+   is claimed for the member read, the address-of binding, or the macro
+   arguments.
+
+*Capability gate (release requirement; expected **UNMET** on the pilot).*
+
+5. The affected set includes `patch_match_options.h:56`,
    `patch_match_options.cc` (print at `:58`, validation at `:91-93`),
    `patch_match.cc` (read at `:361-366`, filter at `:443-447`) and the CLI
    binding `option_manager.cc:1018-1019`.
-2. The verdict is `UNKNOWN`, `MEDIUM` or `HIGH`. A `SAFE`/`LOW` verdict, or
-   any "no impact" claim, is a FAIL. **On the syntax-only MMSP pilot the
-   expected verdict is `UNKNOWN`**: `impact_verdict`
-   (`crates/cli/src/edges.rs:1377-1406`) returns `UNKNOWN` for any heuristic
-   or unresolved edge, and MMSP has no semantic provider (D-M9-2), so
-   `HIGH`/`MEDIUM` would require evidence the pilot cannot produce. A `HIGH`
-   verdict claimed from syntax-only edges would itself be a FAIL.
-3. `completeness.status` is `partial` with the `graph-completeness-unproven`
-   reason, and the completeness disclaimer is present.
-4. The macro site `patch_match_options.cc:58` is not resolved to a function
-   definition.
+   §B.9 explains why this needs a reference-level graph and not a call
+   graph: a member read, an address-of binding and a macro argument are not
+   call expressions, so the member has no incoming edge at all (gaps E1,
+   E7). **The expected pilot result is an empty path set** — the same shape
+   as the frozen CP7-A golden
+   `docs/pilots/cp7a/goldens-raw/impact-validate-id.json` (`"paths":[]`,
+   `"covered":0,"total":0`). This gate is therefore expected to be
+   **UNMET**; CP2 records the evidence, and workflow 4 does **not** count as
+   a demonstrated GitNexus replacement until a reference-level capability
+   exists. **The requirement is not lowered — it is recorded as unmet.**
 
 ### D.5 Workflow 5 — Natural-language code question through OpenCode
 
@@ -616,11 +777,14 @@ Expected operations: a real OpenCode session against `riltra mcp`, using
 `riltra_code_trace`/`riltra_code_impact` and `riltra_repo_list` /
 `riltra_repo_status` on the `mmsp-pin` repository.
 
-Objective PASS criteria:
+Objective criteria:
 
-1. The session answers with repository-qualified, source-grounded facts that
-   match §B.4 (declaration, CLI binding, read site, filter site, and the
-   "affects `__auto__` selection only" qualification).
+*Honesty gate (PASS required).*
+
+1. Every claim in the answer is one the tools actually support, and the
+   answer states the limits it hit (no C++ identity resolution, no member
+   reference graph, CUDA unsupported). A confident, complete-sounding
+   answer that the tools cannot back is a FAIL.
 2. Every fact carries a resolvable citation and a freshness verdict.
 3. The answer does not assert C++ semantic resolution, CUDA support, or a
    complete call graph.
@@ -631,15 +795,25 @@ Objective PASS criteria:
 5. No cross-repository contamination: the answer's facts come only from
    `mmsp-pin`, and the repository identity is stated.
 
+*Capability gate (release requirement; expected **UNMET** on the pilot).*
+
+6. The answer carries the full chain of §B.4 — declaration, CLI binding,
+   read site, filter site — and the "affects `__auto__` source selection
+   only" qualification. This inherits the capability gate of D.4: the
+   syntax-only tools cannot attribute the read and filter sites to the
+   member, so the session is expected to answer with the declaration, the
+   binding-as-candidate, and an explicit statement of what it could not
+   resolve. The gate stays as stated.
+
 ### D.6 Release-readiness matrix (status at CP1, before any CP2 measurement)
 
-| Workflow | Implemented (capability exists) | Verified by evidence | Unverified / blocked |
-|---|---|---|---|
-| 1. Find symbol + references | yes — `search`, `callers` (M2/M3/M6) | CP7-A goldens on the M6 corpus | MMSP-scale accuracy, C++ identity, `POTENTIAL_CALL` ratio on the pilot |
-| 2. Callers / callees | yes — `callers`, `callees` (M6) | CP7-A G2 zero unresolved citations | cross-TU C++ resolution on the pilot; indirect-dispatch honesty at scale |
-| 3. Trace | yes — bounded `trace` (M6) | CP7-A fixture traces | the 4-hop `mvs/` chain; CUDA terminus labeling |
-| 4. Impact | yes — conservative `impact` (M6) | CP7-A `impact` fixture | `max_triangulation_angle` blast radius; `UNKNOWN`-first behavior on the pilot |
-| 5. NL question via OpenCode | yes — `riltra mcp`, 11 tools (M8/CP7-A) | CP7-A revised G6 (real OpenCode session) | the five pilot questions end-to-end; natural-language framing is OpenCode's, not Riltra's |
+| Workflow | Implemented (capability exists) | Verified by evidence | Unverified / blocked | Honesty gate (pilot) | Capability gate (release) |
+|---|---|---|---|---|---|
+| 1. Find symbol + references | yes — `search`, `callers` (M2/M3/M6) | CP7-A goldens on the M6 corpus | MMSP-scale accuracy, C++ identity | judgeable | **UNMET** (E7) |
+| 2. Callers / callees | yes — `callers`, `callees` (M6) | CP7-A G2 zero unresolved citations | cross-TU C++ resolution at scale; indirect-dispatch honesty | judgeable | **UNMET** (E4, E7) |
+| 3. Trace | yes — bounded `trace` (M6) | CP7-A fixture traces | the 4-hop `mvs/` chain; CUDA terminus labeling | judgeable | **UNMET** (E2, E4) |
+| 4. Impact | yes — conservative `impact` (M6) | CP7-A `impact` fixture | `max_triangulation_angle` blast radius; `UNKNOWN`-first behavior on the pilot | judgeable | **UNMET** (E1, E7) |
+| 5. NL question via OpenCode | yes — `riltra mcp`, 11 tools (M8/CP7-A) | CP7-A revised G6 (real OpenCode session) | the five pilot questions end-to-end; natural-language framing is OpenCode's, not Riltra's | judgeable | **UNMET** (E1, E7) |
 
 ---
 
@@ -650,12 +824,13 @@ it. Each requires an owner decision; none may be silently downgraded.
 
 | # | Gap | Evidence | Severity for `v0.1.0` |
 |---|---|---|---|
-| E1 | **C++ semantics are absent.** No provider covers C++; clangd is deferred by D-M9-2 and no compilation database exists in MMSP. All C++ answers are syntax-level candidates. | Design gate §1.5/§2.3/§4 G-SEM; §A.6 | **Release-blocking for the "verified caller" reading of workflows 2–4.** Mitigation within scope: the acceptance criteria demand `POTENTIAL_CALL` vs verified `CALLS` separation, so a syntax-only tool can still pass if it never overstates. If MMSP's real-world use requires resolved C++ call edges, this is the gap that decides `v0.1.0` |
+| E1 | **C++ semantics are absent.** No provider covers C++; clangd is deferred by D-M9-2 and no compilation database exists in MMSP. All C++ answers are syntax-level candidates. | Design gate §1.5/§2.3/§4 G-SEM; §A.6 | **Release-blocking for the "verified caller" reading of workflows 2–5.** The honesty gate still passes on a syntax-only pilot, but every capability gate that needs resolved C++ edges is **UNMET** (§D). If MMSP's real-world use requires resolved C++ call edges, this is the gap that decides `v0.1.0` |
 | E2 | **CUDA is unsupported by policy** (489 files at the pin, including all five first-party `.cu`). | §A.5; `syntax.rs:53-54`, `:77` | **Release-blocking for any workflow that must reason about the photogrammetry CUDA kernels.** The `mvs/` call chain terminates in CUDA (§B.3) |
-| E3 | **Macro interiors and templates are opaque** — `PrintOption`, `CHECK_OPTION_LE`, the 12 template sites in `reprojection_error.h`. | §B.4, §B.6 #4, #5 | Not release-blocking, but it caps accuracy: some edges can only be candidates |
+| E3 | **Macro interiors and templates are opaque** — `PrintOption` (defined 4× in the pilot), `CHECK_OPTION_LE`, the 13 template sites in `reprojection_error.h`. | §B.4, §B.6 #4, #6 | Not release-blocking, but it caps accuracy: some edges can only be candidates |
 | E4 | **Indirect dispatch is invisible** to a syntax-level extractor (`ThreadPool::AddTask(&Class::Method, …)`). | §B.2, §B.3 | Not release-blocking; it constrains how complete a trace may honestly be |
 | E5 | **The Riltra branch's own history carries unsanitized local paths.** Measured on the synchronized M9 branch (`96a57f8`, isolated clone, `.gitleaksignore` deleted, `--log-opts=--all`): **1 068 path findings in 9 commits / 184 files, 0 credential-rule findings** (959 `local-absolute-path`, 94 `windows-user-path`, 15 `unix-home-path`). The 9 affected commits are `6449a42`, `cabfb9fc`, `2538e69`, `4746fff6`, `02151230`, `9953b0cf`, `b7f41157`, `bcbd1c6a`, `d1af7577` — 8 were already in the M9 branch, and `2538e69` arrived with the synchronization merge. The two `.gitleaksignore` pins are keyed to `2538e69` and suppress exactly 2 of those findings. The rewrite is not performed and not authorized (owner-gated; the `protect-master` ruleset blocks the non-fast-forward push). | `security/history-rewrite-plan.md`; `.gitleaksignore`; measured 2026-10-20 on the merged branch | Not a functional gap, but it blocks a clean `v0.1.0` provenance story and must stay in the release notes as an open risk |
 | E6 | **No release artifacts exist yet**: no native per-OS archives, checksums, SBOM, or updated `NOTICE`. | Design gate §4 G-LIC/G-NAT | Release-blocking for publication, not for CP1/CP2 |
+| E7 | **Reference-level (not call-level) resolution is absent.** A data member such as `max_triangulation_angle` has **no incoming edge at all** in a syntax-only index: a member read, an address-of binding and a macro argument are not call expressions, and a syntax edge's `callee` is never resolved to a definition. The impact workflow therefore returns an empty path set on the pilot — the same shape as the frozen CP7-A golden (`"paths":[]`, `"covered":0`). | §B.9; `crates/cli/src/edges.rs:167-205`; `docs/pilots/cp7a/goldens-raw/impact-validate-id.json` | **Release-blocking for workflow 4** (and for the D.5 capability gate): D.4's capability gate is **UNMET** and the expected pilot output is empty. Closing it needs either a C++ semantic provider (D-M9-2, deferred) or a new reference-extraction capability — each with its own evidence and its own OWNER GO |
 
 No new semantic provider, SCIP producer, language support, repository, LLM,
 embedding store, graph database, daemon or benchmark is required by CP1, and
@@ -674,11 +849,14 @@ Ordered by what the evidence above actually requires, highest value first.
 2. **Workflow 1 + 2 against anchors B1, B2 and §B.6** — definition/reference
    accuracy, cross-TU callers, and the honesty checks (`POTENTIAL_CALL`
    separation, macro and anonymous-namespace handling). These are the cheapest
-   cases with the sharpest FAIL conditions.
+   cases with the sharpest FAIL conditions. Record **both** gates: the
+   honesty-gate result and whether the capability gate was met.
 3. **Workflow 3 against the frozen chain in §B.3** — trace, including the
    CUDA terminus and the indirect-dispatch limitation.
 4. **Workflow 4 against `max_triangulation_angle` (§B.4)** — impact, with the
-   `UNKNOWN`-first and `partial` completeness checks.
+   `UNKNOWN`-first and `partial` completeness checks. The **expected** pilot
+   result is an empty path set; the run must confirm that the answer is
+   honest about it, and the unmet capability gate is recorded as evidence.
 5. **Freshness scenarios F1–F5 (§C)** — pre-registered verdicts, executed
    unchanged.
 6. **Workflow 5: a real OpenCode session against the pilot index** — the
@@ -687,6 +865,13 @@ Ordered by what the evidence above actually requires, highest value first.
    correctness, G-INC.
 8. **Isolation assertions after every measured command** (§A.2) — the
    MMSP-untouched invariant, G-SEC.
+9. **Owner decision package** — one table listing, per workflow, the
+   honesty-gate result and the capability-gate result, and, for every
+   unmet capability gate, the measured evidence and the options (a C++
+   semantic provider under D-M9-2, a new reference-extraction capability, or
+   an explicit scope decision that the workflow stays syntax-level). The
+   package is what lets the owner decide whether `v0.1.0` may be described
+   as a practical GitNexus alternative; it does not decide it.
 
 CP2 is not authorized by this document. It needs its own OWNER GO.
 
@@ -719,3 +904,33 @@ CP2 is not authorized by this document. It needs its own OWNER GO.
   `git merge-base --is-ancestor` against the pre-merge M9 tip `a097e2d`.
   The clone and the scan ran outside the working tree; the Riltra working
   tree was not modified.
+- An independent review pass (2026-10-20) was executed against the two
+  documents. Its findings were validated one by one against the pinned
+  source and the current Riltra source before anything was changed:
+  - **Applied** — the `PrintOption` macro was attributed to the wrong file:
+    the site `patch_match_options.cc:58` uses the macro defined at
+    `patch_match_options.cc:43`, not `patch_match.cc:45`. The review also
+    surfaced that `PrintOption` is defined in **four** translation units
+    (`fusion.cc:78`, `patch_match.cc:45`, `patch_match_options.cc:43`,
+    `texture_mapping.cc:1034`) with different bodies; that hazard is now
+    part of the ground truth (§B.4).
+  - **Applied** — the acceptance criteria in §D required coverage that a
+    syntax-only index cannot produce (a member read, an address-of binding
+    and a macro argument are not call expressions). The criteria were split
+    into an honesty gate and a capability gate, the capability gate is
+    explicitly recorded as **UNMET** on the pilot, and the root cause is now
+    stated in the new §B.9 with the frozen CP7-A goldens as evidence. The
+    release requirement is **not lowered** — it is recorded as unmet and
+    carried into §E1/§E7.
+  - **Applied** — small precision fixes: the `syntax.rs` variant/arm line
+    references, the explicit CUDA arithmetic, the RAM figure's provenance,
+    and the enumeration commands behind the "exactly N" claims.
+  - **Rejected** — the reported column errors at `patch_match.cc:118:27`
+    and `:667:11`. The columns were re-derived independently
+    (`[regex]::Match` on the raw lines): `118:27` (indent 0) and `667:11`
+    (indent 2) are correct; the file is 2-space indented, not 4.
+  - **Not independently verifiable by the review** (its sandbox denied
+    access outside the repository): the MMSP source anchors themselves. They
+    were re-read directly in the isolated snapshot for this revision —
+    including the `PrintOption` definitions, the `.Print()` and `Run` call
+    sites, and the columns of the `patch_match.cc` anchors.
