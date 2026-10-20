@@ -15,11 +15,11 @@
       "riltra": {
         "type": "local",
         "command": [
-          "E:\\dev\\Riltra\\target\\debug\\riltra.exe",
+          "<RILTRA_REPO_ROOT>\\target\\debug\\riltra.exe",
           "mcp"
         ],
         "environment": {
-          "RILTRA_HOME": "E:\\dev\\Riltra\\.cp7a\\home-template"
+          "RILTRA_HOME": "<CP7A_ROOT>\\home-template"
         },
         "codemode": false
       }

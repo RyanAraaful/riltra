@@ -32,7 +32,7 @@ report.
 | Model | `opencode/deepseek-v4.1-flash-free` (free tier; no paid call; remote backend revision unverifiable from the client) |
 | Harness | OpenCode v2.0.32, primary agent `cp7a-bench`, snapshots disabled |
 | Source | Riltra `m8-unified-cli-mcp` at `0fd22a1134274c1e92f741fc0d4e3b4886ceeaf3` (isolated worktree `.cp7a/source`) |
-| Corpus | 16 tasks, 12–20 requirement met; SHA-256 `D9F33A765A98723B0ACFD314865C976FB8BD58A680C911932B64C83E8530C824`, frozen `2026-10-18T18:05:37.264Z` |
+| Corpus | 16 tasks, 12–20 requirement met; SHA-256 `4FB9A77E49F10340E6804A6ACFBD966302E4E1C126868A18F9216D2999FF7A56` (sanitized derivative; pre-redaction `D9F33A765A98723B0ACFD314865C976FB8BD58A680C911932B64C83E8530C824` frozen `2026-10-18T18:05:37.264Z`; see `SANITIZATION.md`) |
 | Token rule | SHA-256 `F14C339C76DC916D4E3E09C164AB8F28B2DD14844EA691902352720A24AD7C56`, frozen before measured results |
 | Measurement window | `2026-10-18T18:18:50.302Z` → `2026-10-18T18:25:53.661Z` |
 | Runs | 32 measured sessions (16 tasks × 2 arms), zero retries, `repo-list` pilot included |
@@ -46,16 +46,17 @@ report.
   tool access, enforced by location plugins rather than prompt wording. Both
   arms ran under one global OpenCode config with context7 disabled and one
   `riltra` local stdio server (`target/debug/riltra.exe mcp`,
-  `RILTRA_HOME=<home-template>`, `codemode: false`), archived byte-exact at
-  `method/global-opencode.cp7a.jsonc` (SHA-256
-  `1E9671EC34F536F9E6070F0F791BE466A3ECB025BD2D5EDECE3081552047F93C`,
-  matching the `global_config_sha256` frozen in `method/environment.json`
-  before measurement). The pre-benchmark original and the two recorded edits
-  required to derive the benchmark config are archived as well
+  `RILTRA_HOME=<home-template>`, `codemode: false`), archived at
+  `method/global-opencode.cp7a.jsonc`; the pre-redaction SHA-256
+  `1E9671EC34F536F9E6070F0F791BE466A3ECB025BD2D5EDECE3081552047F93C`
+  matches the `global_config_sha256` frozen in `method/environment.json`
+  before measurement, while the committed copy is a path-sanitized derivative
+  (see `SANITIZATION.md`). The pre-benchmark original and the two recorded
+  edits required to derive the benchmark config are archived as well
   (`method/global-opencode.original-backup.jsonc`); running
-  `node harness/verify-global-config.cjs` re-derives it byte-exact.
+  `node harness/verify-global-config.cjs` re-derives the archived derivative byte-exact.
   - **Arm A (CLI):** `read` + `shell`; shell is allowed only for the wrapper
-    `E:\dev\Riltra\.cp7a\bin\riltra-ro.cmd` with a read-only argument
+    `<CP7A_ROOT>\bin\riltra-ro.cmd` with a read-only argument
     allowlist (no `;`, `|`, `&`, globs, redirection, or nested shells).
   - **Arm B (MCP):** `read` + the eleven `riltra_riltra_*` MCP tools; no
     `shell`. `read` remains in the tool list only because removing it made the
@@ -275,7 +276,7 @@ An independent post-measurement check (`harness/verify.cjs`; output
 ## Reproduction
 
 All harness scripts are archived here. Paths in the archived scripts are the
-absolute paths used on the measurement host (`E:\dev\Riltra\.cp7a`), so
+absolute paths used on the measurement host (`<CP7A_ROOT>`), so
 re-running on another machine requires adjusting them first. From the
 repository root:
 

@@ -1,0 +1,5 @@
+Synthetic fixture: OS-owned, CI-runner and extended system paths are not personal.
+system: C:\Windows\System32\drivers\etc\hosts
+program: C:\Program Files\Git\bin\bash.exe
+runner: D:/a/_work/checkout
+extended: \\?\C:\Windows\System32\notepad.exe

@@ -2,8 +2,9 @@
 # CP7-A G7 local gate. Runs the repository checks in order and records raw logs.
 $ErrorActionPreference = "Continue"
 $ProgressPreference = "SilentlyContinue"
-$root = "E:\dev\Riltra"
-$out = "E:\dev\Riltra\.cp7a"
+$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..\..\..")).Path
+$root = $repoRoot
+$out = Join-Path $repoRoot ".cp7a"
 $steps = @(
   @{ name = "fmt";    args = @("fmt", "--all", "--", "--check") },
   @{ name = "check";  args = @("check", "--locked") },

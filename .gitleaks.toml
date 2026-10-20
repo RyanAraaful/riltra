@@ -1,0 +1,123 @@
+# Secret and local-path scanning for this repository.
+# Pinned scanner: gitleaks 8.30.1 (see security/README.md). The CI `security`
+# job and the optional local hooks (security/scan.sh) run this config. Custom
+# rules cover local machine paths (user profiles and absolute drive/UNC
+# workspace paths); all other detection uses the bundled default rules.
+#
+# Allowlists are deliberately narrow: verified synthetic fixture files
+# (individually listed, not their directory), CI-runner paths, verified
+# synthetic unit-test literals, and reviewed false positives. Do not add
+# broad path or rule allowlists (whole directories, *.log, *.json globs, ...).
+
+title = "riltra scan"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "windows-user-path"
+description = "Local Windows user-profile path (privacy)"
+regex = '''(?i)[a-z]:[\\/]+users[\\/]+[a-z0-9._-]+[\\/]'''
+tags = ["privacy", "local-path"]
+
+# The username is captured on purpose: gitleaks' default global allowlist
+# suppresses path-shaped secrets under /home, /tmp, /usr, ... so the finding
+# must key on the username, not on the full path.
+[[rules]]
+id = "unix-home-path"
+description = "Local unix/macOS home directory path (privacy)"
+regex = '''(?i)/(?:home|users)/([a-z0-9._-]+)/'''
+tags = ["privacy", "local-path"]
+
+# Absolute workspace paths outside user profiles: Windows drive letters
+# (either slash direction, including JSON-escaped forms) and UNC shares.
+# Segments allow spaces, but must start with a name character, so prose such
+# as "C:\ drive" does not match. Raw UNC paths use single separators; the
+# JSON-escaped form doubles both the leading slashes and the separators, which
+# keeps escaped relative paths (\\target\\debug) from matching.
+[[rules]]
+id = "local-absolute-path"
+description = "Absolute local workspace path outside user profiles (drive letter or UNC share)"
+regex = '''(?i)(?:\b[a-z]:[\\/]+[a-z0-9._$][a-z0-9._$ -]*[\\/]+[a-z0-9._$][a-z0-9._$ -]*|\\\\[a-z0-9._-]+(?:[\\/][a-z0-9$._ -]+){2,}|\\\\\\\\[a-z0-9._-]+(?:\\\\[a-z0-9$._ -]+){2,})'''
+tags = ["privacy", "local-path"]
+
+# Known blocker fixtures, listed individually: a new file under
+# security/testdata/ is still scanned (scan-tests proves this).
+[[allowlists]]
+description = "Verified synthetic blocker fixtures; scan-tests copies them outside this path to prove the rules fire"
+paths = [
+  '''^security/testdata/blocked/local-drive-path\.txt$''',
+  '''^security/testdata/blocked/local-drive-path-alt-slash\.txt$''',
+  '''^security/testdata/blocked/local-drive-path-json\.txt$''',
+  '''^security/testdata/blocked/synthetic-token\.txt$''',
+  '''^security/testdata/blocked/unc-path\.txt$''',
+  '''^security/testdata/blocked/unix-home-path\.txt$''',
+  '''^security/testdata/blocked/win-user-path\.txt$''',
+  '''^security/testdata/blocked/win-user-path-alt-slash\.txt$''',
+  '''^security/testdata/blocked/win-user-path-json\.txt$''',
+]
+
+[[allowlists]]
+description = "CI runner paths (runner-generated, not personal)"
+targetRules = ["windows-user-path", "unix-home-path", "local-absolute-path"]
+regexes = [
+  '''(?i)^[a-z]:[\\/]+users[\\/]+runner(admin)?(?:[\\/]|$)''',
+  '''(?i)^runner(admin)?$''',
+  '''(?i)^[a-z]:[\\/]+a[\\/]''',
+  '''(?i)^[a-z]:[\\/]+(?:actions-runner|hostedtoolcache)(?:[\\/]|$)''',
+]
+
+[[allowlists]]
+description = "Windows user-profile paths are already reported by windows-user-path; avoid duplicate findings"
+targetRules = ["local-absolute-path"]
+regexes = ['''(?i)^[a-z]:[\\/]+users[\\/]''']
+
+[[allowlists]]
+description = "OS-owned Windows directories (system files, not workspace data)"
+targetRules = ["local-absolute-path"]
+regexes = [
+  '''(?i)^[a-z]:[\\/]+(?:windows|program files(?: \(x86\))?|programdata|system32)(?:[\\/]|$)''',
+]
+
+[[allowlists]]
+description = "Verified synthetic Windows path examples in doctor/json unit tests"
+targetRules = ["local-absolute-path"]
+condition = "AND"
+paths = ['''^crates/cli/src/(?:doctor|json)\.rs$''']
+regexes = [
+  '''^C:\\\\stale\\\\root$''',
+  '''^C:\\{2,4}repos\\{2,4}riltra-1_2\.0$''',
+]
+
+[[allowlists]]
+description = "Verified synthetic uri_path examples in semantic.rs unit tests"
+targetRules = ["local-absolute-path"]
+condition = "AND"
+paths = ['''^crates/cli/src/semantic\.rs$''']
+regexes = [
+  '''(?i)^c:/r/a$''',
+  '''(?i)^c:/r/a b\.py$''',
+  '''(?i)^c:/r/a\.py$''',
+]
+
+[[allowlists]]
+description = "Reviewed false positive: escaped protobuf bytes in generated SCIP code"
+targetRules = ["local-absolute-path"]
+condition = "AND"
+paths = ['''^crates/cli/src/scip_proto\.rs$''']
+regexes = ['''^\\\\x12\\x06\\n\\x02Go$''']
+
+[[allowlists]]
+description = "Synthetic unit-test fixtures in crates/cli/src/semantic.rs (uri_path tests, verified test data)"
+targetRules = ["unix-home-path"]
+condition = "AND"
+paths = ['''^crates/cli/src/semantic\.rs$''']
+regexes = ['''^u$''']
+
+[[allowlists]]
+description = "Reviewed false positives: 40-hex commit SHAs (sourcegraph heuristic) and SHA-256 integrity constants (generic key heuristic)"
+targetRules = ["sourcegraph-access-token", "generic-api-key"]
+regexes = [
+  '''^[0-9a-f]{40}$''',
+  '''^F14C339C76DC916D4E3E09C164AB8F28B2DD14844EA691902352720A24AD7C56$''',
+]

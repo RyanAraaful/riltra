@@ -2,8 +2,8 @@
 # CP7-A paired OpenCode runner. Writes raw sessions, home hashes, plugin evidence,
 # and timing metadata. The corpus and rubrics are frozen; this script never edits them.
 param(
-  [string]$Root = "E:\dev\Riltra\.cp7a",
-  [string]$Runs = "E:\dev\Riltra\.cp7a\runs",
+  [string]$Root = "",
+  [string]$Runs = "",
   [string[]]$Only = @(),
   [switch]$Resume,
   [switch]$WarmOnly,
@@ -14,13 +14,17 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
+$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..\..\..")).Path
+if (-not $Root) { $Root = Join-Path $RepoRoot ".cp7a" }
+if (-not $Runs) { $Runs = Join-Path $Root "runs" }
 $CorpusPath = Join-Path $Root "corpus\corpus.json"
 $PluginLog = Join-Path $Root "plugin-events.jsonl"
 $HomeLive = Join-Path $Root "home-template"
 $HomePristine = Join-Path $Root "home-pristine"
+$ArmTmp = Join-Path ([System.IO.Path]::GetTempPath()) "opencode\cp7a"
 $ArmDir = @{
-  A = "C:\Users\ryan\AppData\Local\Temp\opencode\cp7a\arm-a"
-  B = "C:\Users\ryan\AppData\Local\Temp\opencode\cp7a\arm-b"
+  A = Join-Path $ArmTmp "arm-a"
+  B = Join-Path $ArmTmp "arm-b"
 }
 $McpTools = @(
   "riltra_riltra_code_callees", "riltra_riltra_code_callers", "riltra_riltra_code_impact",

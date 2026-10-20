@@ -9,7 +9,7 @@
     "id": "deepseek-v4.1-flash-free",
     "providerID": "opencode"
   },
-  "location": "C:\\Users\\ryan\\AppData\\Local\\Temp\\opencode\\cp7a\\arm-a",
+  "location": "<CP7A_ARM_ROOT>\\arm-a",
   "session": "ses_eafc36ab9ffevccMEdtoUOucuX",
   "prompt": "Reply READY. Do not call any tools.",
   "started_utc": "2026-10-18T18:18:29.7871839Z",

@@ -1,0 +1,2 @@
+Synthetic fixture (no real data): repository-relative paths must not be flagged.
+See docs/pilots/cp7a/README.md and crates/cli/src/main.rs.

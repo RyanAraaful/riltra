@@ -19,7 +19,7 @@
         { "action": "execute", "resource": "*", "effect": "deny" },
         { "action": "read", "resource": "C:/*", "effect": "deny" },
         { "action": "read", "resource": "E:/*", "effect": "deny" },
-        { "action": "external_directory", "resource": "E:/dev/Riltra/*", "effect": "allow" }
+        { "action": "external_directory", "resource": "<RILTRA_REPO_ROOT>/*", "effect": "allow" }
       ]
     }
   }

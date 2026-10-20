@@ -1,0 +1,2 @@
+Synthetic fixture (no real data): Windows user-profile path, backslash form.
+Backup landed in C:\Users\alice\Documents\notes.txt during the test run.

@@ -8,8 +8,10 @@ const R = String.raw;
 const shell = (command, output) => ({ tool: R`^shell$`, command, output });
 const mcp = (name, output) => ({ tool: R`^riltra_riltra_${name}$`, output });
 
+const CP7A_ROOT = process.env.RILTRA_CP7A_ROOT || "<CP7A_ROOT>";
+
 const access = {
-  A: R`Access: use only the shell tool, running the read-only wrapper E:\dev\Riltra\.cp7a\bin\riltra-ro.cmd. Run that wrapper with --help once if you need CLI syntax. Do not use read or any other tool. Answer the question with the requested values and the evidence you observed.`,
+  A: R`Access: use only the shell tool, running the read-only wrapper ${CP7A_ROOT}\bin\riltra-ro.cmd. Run that wrapper with --help once if you need CLI syntax. Do not use read or any other tool. Answer the question with the requested values and the evidence you observed.`,
   B: R`Access: use only the direct Riltra MCP tools named riltra_riltra_*. Their input schemas describe the arguments. Do not use read, shell, or any other tool. Answer the question with the requested values and the evidence you observed.`
 };
 

@@ -1,7 +1,7 @@
 {
   "schema": "cp7a-direct-mcp-v1",
   "started_at": "2026-10-18T18:46:42.065Z",
-  "binary": "E:\\dev\\Riltra\\target\\debug\\riltra.exe",
+  "binary": "<RILTRA_REPO_ROOT>\\target\\debug\\riltra.exe",
   "binary_sha256": "46678765A1D9257D5EAC5CA7E22D7D25B12821467D6ECEE9B3537267EC126341",
   "protocol_requested": "2024-11-05",
   "protocol_negotiated": "2024-11-05",
@@ -557,23 +557,23 @@
       "elapsed_ms": 4,
       "isError": false,
       "error": null,
-      "text": "{\"repos\":[{\"added_unix\":1792343752,\"name\":\"empty\",\"root\":\"\\\\\\\\?\\\\E:\\\\dev\\\\Riltra\\\\.cp7a\\\\empty-repo\"},{\"added_unix\":1792343570,\"name\":\"other\",\"root\":\"\\\\\\\\?\\\\E:\\\\dev\\\\Riltra\\\\.cp7a\\\\other-repo\"},{\"added_unix\":1792343570,\"name\":\"riltra\",\"root\":\"\\\\\\\\?\\\\E:\\\\dev\\\\Riltra\\\\.cp7a\\\\source\"}]}",
+      "text": "{\"repos\":[{\"added_unix\":1792343752,\"name\":\"empty\",\"root\":\"\\\\\\\\?\\\\<CP7A_ROOT>\\\\empty-repo\"},{\"added_unix\":1792343570,\"name\":\"other\",\"root\":\"\\\\\\\\?\\\\<CP7A_ROOT>\\\\other-repo\"},{\"added_unix\":1792343570,\"name\":\"riltra\",\"root\":\"\\\\\\\\?\\\\<CP7A_ROOT>\\\\source\"}]}",
       "json": {
         "repos": [
           {
             "added_unix": 1792343752,
             "name": "empty",
-            "root": "\\\\?\\E:\\dev\\Riltra\\.cp7a\\empty-repo"
+            "root": "\\\\?\\<CP7A_ROOT>\\empty-repo"
           },
           {
             "added_unix": 1792343570,
             "name": "other",
-            "root": "\\\\?\\E:\\dev\\Riltra\\.cp7a\\other-repo"
+            "root": "\\\\?\\<CP7A_ROOT>\\other-repo"
           },
           {
             "added_unix": 1792343570,
             "name": "riltra",
-            "root": "\\\\?\\E:\\dev\\Riltra\\.cp7a\\source"
+            "root": "\\\\?\\<CP7A_ROOT>\\source"
           }
         ]
       },
@@ -582,17 +582,17 @@
           {
             "added_unix": 1792343752,
             "name": "empty",
-            "root": "\\\\?\\E:\\dev\\Riltra\\.cp7a\\empty-repo"
+            "root": "\\\\?\\<CP7A_ROOT>\\empty-repo"
           },
           {
             "added_unix": 1792343570,
             "name": "other",
-            "root": "\\\\?\\E:\\dev\\Riltra\\.cp7a\\other-repo"
+            "root": "\\\\?\\<CP7A_ROOT>\\other-repo"
           },
           {
             "added_unix": 1792343570,
             "name": "riltra",
-            "root": "\\\\?\\E:\\dev\\Riltra\\.cp7a\\source"
+            "root": "\\\\?\\<CP7A_ROOT>\\source"
           }
         ]
       },
@@ -600,7 +600,7 @@
         "content": [
           {
             "type": "text",
-            "text": "{\"repos\":[{\"added_unix\":1792343752,\"name\":\"empty\",\"root\":\"\\\\\\\\?\\\\E:\\\\dev\\\\Riltra\\\\.cp7a\\\\empty-repo\"},{\"added_unix\":1792343570,\"name\":\"other\",\"root\":\"\\\\\\\\?\\\\E:\\\\dev\\\\Riltra\\\\.cp7a\\\\other-repo\"},{\"added_unix\":1792343570,\"name\":\"riltra\",\"root\":\"\\\\\\\\?\\\\E:\\\\dev\\\\Riltra\\\\.cp7a\\\\source\"}]}"
+            "text": "{\"repos\":[{\"added_unix\":1792343752,\"name\":\"empty\",\"root\":\"\\\\\\\\?\\\\<CP7A_ROOT>\\\\empty-repo\"},{\"added_unix\":1792343570,\"name\":\"other\",\"root\":\"\\\\\\\\?\\\\<CP7A_ROOT>\\\\other-repo\"},{\"added_unix\":1792343570,\"name\":\"riltra\",\"root\":\"\\\\\\\\?\\\\<CP7A_ROOT>\\\\source\"}]}"
           }
         ],
         "structuredContent": {
@@ -608,17 +608,17 @@
             {
               "added_unix": 1792343752,
               "name": "empty",
-              "root": "\\\\?\\E:\\dev\\Riltra\\.cp7a\\empty-repo"
+              "root": "\\\\?\\<CP7A_ROOT>\\empty-repo"
             },
             {
               "added_unix": 1792343570,
               "name": "other",
-              "root": "\\\\?\\E:\\dev\\Riltra\\.cp7a\\other-repo"
+              "root": "\\\\?\\<CP7A_ROOT>\\other-repo"
             },
             {
               "added_unix": 1792343570,
               "name": "riltra",
-              "root": "\\\\?\\E:\\dev\\Riltra\\.cp7a\\source"
+              "root": "\\\\?\\<CP7A_ROOT>\\source"
             }
           ]
         },
@@ -636,14 +636,14 @@
       "elapsed_ms": 548,
       "isError": false,
       "error": null,
-      "text": "{\"git\":{\"branch\":null,\"dirty\":false,\"head\":\"0fd22a1134274c1e92f741fc0d4e3b4886ceeaf3\",\"present\":true,\"toplevel\":\"\\\\\\\\?\\\\E:\\\\dev\\\\Riltra\\\\.cp7a\\\\source\",\"untracked\":0,\"valid\":true,\"worktree\":true},\"ignore\":{\"file\":false,\"rules\":0},\"index_status\":{\"freshness\":\"fresh\",\"fts\":true,\"reasons\":[],\"repo\":\"riltra\",\"root\":\"\\\\\\\\?\\\\E:\\\\dev\\\\Riltra\\\\.cp7a\\\\source\",\"snapshot\":{\"branch\":null,\"created_unix\":1792343570,\"dirty\":false,\"head\":\"0fd22a1134274c1e92f741fc0d4e3b4886ceeaf3\",\"id\":1,\"nonce\":\"7360-1792343570898653400-0\",\"status_at_write\":\"fresh\"}},\"name\":\"riltra\",\"root\":\"\\\\\\\\?\\\\E:\\\\dev\\\\Riltra\\\\.cp7a\\\\source\"}",
+      "text": "{\"git\":{\"branch\":null,\"dirty\":false,\"head\":\"0fd22a1134274c1e92f741fc0d4e3b4886ceeaf3\",\"present\":true,\"toplevel\":\"\\\\\\\\?\\\\<CP7A_ROOT>\\\\source\",\"untracked\":0,\"valid\":true,\"worktree\":true},\"ignore\":{\"file\":false,\"rules\":0},\"index_status\":{\"freshness\":\"fresh\",\"fts\":true,\"reasons\":[],\"repo\":\"riltra\",\"root\":\"\\\\\\\\?\\\\<CP7A_ROOT>\\\\source\",\"snapshot\":{\"branch\":null,\"created_unix\":1792343570,\"dirty\":false,\"head\":\"0fd22a1134274c1e92f741fc0d4e3b4886ceeaf3\",\"id\":1,\"nonce\":\"7360-1792343570898653400-0\",\"status_at_write\":\"fresh\"}},\"name\":\"riltra\",\"root\":\"\\\\\\\\?\\\\<CP7A_ROOT>\\\\source\"}",
       "json": {
         "git": {
           "branch": null,
           "dirty": false,
           "head": "0fd22a1134274c1e92f741fc0d4e3b4886ceeaf3",
           "present": true,
-          "toplevel": "\\\\?\\E:\\dev\\Riltra\\.cp7a\\source",
+          "toplevel": "\\\\?\\<CP7A_ROOT>\\source",
           "untracked": 0,
           "valid": true,
           "worktree": true
@@ -657,7 +657,7 @@
           "fts": true,
           "reasons": [],
           "repo": "riltra",
-          "root": "\\\\?\\E:\\dev\\Riltra\\.cp7a\\source",
+          "root": "\\\\?\\<CP7A_ROOT>\\source",
           "snapshot": {
             "branch": null,
             "created_unix": 1792343570,
@@ -669,7 +669,7 @@
           }
         },
         "name": "riltra",
-        "root": "\\\\?\\E:\\dev\\Riltra\\.cp7a\\source"
+        "root": "\\\\?\\<CP7A_ROOT>\\source"
       },
       "structuredContent": {
         "git": {
@@ -677,7 +677,7 @@
           "dirty": false,
           "head": "0fd22a1134274c1e92f741fc0d4e3b4886ceeaf3",
           "present": true,
-          "toplevel": "\\\\?\\E:\\dev\\Riltra\\.cp7a\\source",
+          "toplevel": "\\\\?\\<CP7A_ROOT>\\source",
           "untracked": 0,
           "valid": true,
           "worktree": true
@@ -691,7 +691,7 @@
           "fts": true,
           "reasons": [],
           "repo": "riltra",
-          "root": "\\\\?\\E:\\dev\\Riltra\\.cp7a\\source",
+          "root": "\\\\?\\<CP7A_ROOT>\\source",
           "snapshot": {
             "branch": null,
             "created_unix": 1792343570,
@@ -703,13 +703,13 @@
           }
         },
         "name": "riltra",
-        "root": "\\\\?\\E:\\dev\\Riltra\\.cp7a\\source"
+        "root": "\\\\?\\<CP7A_ROOT>\\source"
       },
       "result": {
         "content": [
           {
             "type": "text",
-            "text": "{\"git\":{\"branch\":null,\"dirty\":false,\"head\":\"0fd22a1134274c1e92f741fc0d4e3b4886ceeaf3\",\"present\":true,\"toplevel\":\"\\\\\\\\?\\\\E:\\\\dev\\\\Riltra\\\\.cp7a\\\\source\",\"untracked\":0,\"valid\":true,\"worktree\":true},\"ignore\":{\"file\":false,\"rules\":0},\"index_status\":{\"freshness\":\"fresh\",\"fts\":true,\"reasons\":[],\"repo\":\"riltra\",\"root\":\"\\\\\\\\?\\\\E:\\\\dev\\\\Riltra\\\\.cp7a\\\\source\",\"snapshot\":{\"branch\":null,\"created_unix\":1792343570,\"dirty\":false,\"head\":\"0fd22a1134274c1e92f741fc0d4e3b4886ceeaf3\",\"id\":1,\"nonce\":\"7360-1792343570898653400-0\",\"status_at_write\":\"fresh\"}},\"name\":\"riltra\",\"root\":\"\\\\\\\\?\\\\E:\\\\dev\\\\Riltra\\\\.cp7a\\\\source\"}"
+            "text": "{\"git\":{\"branch\":null,\"dirty\":false,\"head\":\"0fd22a1134274c1e92f741fc0d4e3b4886ceeaf3\",\"present\":true,\"toplevel\":\"\\\\\\\\?\\\\<CP7A_ROOT>\\\\source\",\"untracked\":0,\"valid\":true,\"worktree\":true},\"ignore\":{\"file\":false,\"rules\":0},\"index_status\":{\"freshness\":\"fresh\",\"fts\":true,\"reasons\":[],\"repo\":\"riltra\",\"root\":\"\\\\\\\\?\\\\<CP7A_ROOT>\\\\source\",\"snapshot\":{\"branch\":null,\"created_unix\":1792343570,\"dirty\":false,\"head\":\"0fd22a1134274c1e92f741fc0d4e3b4886ceeaf3\",\"id\":1,\"nonce\":\"7360-1792343570898653400-0\",\"status_at_write\":\"fresh\"}},\"name\":\"riltra\",\"root\":\"\\\\\\\\?\\\\<CP7A_ROOT>\\\\source\"}"
           }
         ],
         "structuredContent": {
@@ -718,7 +718,7 @@
             "dirty": false,
             "head": "0fd22a1134274c1e92f741fc0d4e3b4886ceeaf3",
             "present": true,
-            "toplevel": "\\\\?\\E:\\dev\\Riltra\\.cp7a\\source",
+            "toplevel": "\\\\?\\<CP7A_ROOT>\\source",
             "untracked": 0,
             "valid": true,
             "worktree": true
@@ -732,7 +732,7 @@
             "fts": true,
             "reasons": [],
             "repo": "riltra",
-            "root": "\\\\?\\E:\\dev\\Riltra\\.cp7a\\source",
+            "root": "\\\\?\\<CP7A_ROOT>\\source",
             "snapshot": {
               "branch": null,
               "created_unix": 1792343570,
@@ -744,7 +744,7 @@
             }
           },
           "name": "riltra",
-          "root": "\\\\?\\E:\\dev\\Riltra\\.cp7a\\source"
+          "root": "\\\\?\\<CP7A_ROOT>\\source"
         },
         "isError": false
       },
@@ -761,7 +761,7 @@
       "elapsed_ms": 283,
       "isError": false,
       "error": null,
-      "text": "{\"freshness\":\"fresh\",\"query\":{\"limit\":50,\"offset\":0,\"symbol\":\"validate_id\"},\"reasons\":[],\"repo\":\"riltra\",\"results\":[{\"bytes\":[3696,4286],\"kind\":\"function\",\"name\":\"validate_id\",\"path\":\"crates/cli/src/knowledge.rs\",\"provenance\":{\"grammar\":\"rust:0.24.2\",\"language\":\"rust\",\"provider\":\"syntax\"},\"snapshot\":1,\"span\":{\"end_col\":2,\"end_line\":104,\"start_col\":1,\"start_line\":89}}],\"root\":\"\\\\\\\\?\\\\E:\\\\dev\\\\Riltra\\\\.cp7a\\\\source\",\"snapshot\":{\"branch\":null,\"created_unix\":1792343570,\"dirty\":false,\"head\":\"0fd22a1134274c1e92f741fc0d4e3b4886ceeaf3\",\"id\":1,\"nonce\":\"7360-1792343570898653400-0\",\"status_at_write\":\"fresh\"},\"total\":1,\"truncated\":false}",
+      "text": "{\"freshness\":\"fresh\",\"query\":{\"limit\":50,\"offset\":0,\"symbol\":\"validate_id\"},\"reasons\":[],\"repo\":\"riltra\",\"results\":[{\"bytes\":[3696,4286],\"kind\":\"function\",\"name\":\"validate_id\",\"path\":\"crates/cli/src/knowledge.rs\",\"provenance\":{\"grammar\":\"rust:0.24.2\",\"language\":\"rust\",\"provider\":\"syntax\"},\"snapshot\":1,\"span\":{\"end_col\":2,\"end_line\":104,\"start_col\":1,\"start_line\":89}}],\"root\":\"\\\\\\\\?\\\\<CP7A_ROOT>\\\\source\",\"snapshot\":{\"branch\":null,\"created_unix\":1792343570,\"dirty\":false,\"head\":\"0fd22a1134274c1e92f741fc0d4e3b4886ceeaf3\",\"id\":1,\"nonce\":\"7360-1792343570898653400-0\",\"status_at_write\":\"fresh\"},\"total\":1,\"truncated\":false}",
       "json": {
         "freshness": "fresh",
         "query": {
@@ -794,7 +794,7 @@
             }
           }
         ],
-        "root": "\\\\?\\E:\\dev\\Riltra\\.cp7a\\source",
+        "root": "\\\\?\\<CP7A_ROOT>\\source",
         "snapshot": {
           "branch": null,
           "created_unix": 1792343570,
@@ -839,7 +839,7 @@
             }
           }
         ],
-        "root": "\\\\?\\E:\\dev\\Riltra\\.cp7a\\source",
+        "root": "\\\\?\\<CP7A_ROOT>\\source",
         "snapshot": {
           "branch": null,
           "created_unix": 1792343570,
@@ -856,7 +856,7 @@
         "content": [
           {
             "type": "text",
-            "text": "{\"freshness\":\"fresh\",\"query\":{\"limit\":50,\"offset\":0,\"symbol\":\"validate_id\"},\"reasons\":[],\"repo\":\"riltra\",\"results\":[{\"bytes\":[3696,4286],\"kind\":\"function\",\"name\":\"validate_id\",\"path\":\"crates/cli/src/knowledge.rs\",\"provenance\":{\"grammar\":\"rust:0.24.2\",\"language\":\"rust\",\"provider\":\"syntax\"},\"snapshot\":1,\"span\":{\"end_col\":2,\"end_line\":104,\"start_col\":1,\"start_line\":89}}],\"root\":\"\\\\\\\\?\\\\E:\\\\dev\\\\Riltra\\\\.cp7a\\\\source\",\"snapshot\":{\"branch\":null,\"created_unix\":1792343570,\"dirty\":false,\"head\":\"0fd22a1134274c1e92f741fc0d4e3b4886ceeaf3\",\"id\":1,\"nonce\":\"7360-1792343570898653400-0\",\"status_at_write\":\"fresh\"},\"total\":1,\"truncated\":false}"
+            "text": "{\"freshness\":\"fresh\",\"query\":{\"limit\":50,\"offset\":0,\"symbol\":\"validate_id\"},\"reasons\":[],\"repo\":\"riltra\",\"results\":[{\"bytes\":[3696,4286],\"kind\":\"function\",\"name\":\"validate_id\",\"path\":\"crates/cli/src/knowledge.rs\",\"provenance\":{\"grammar\":\"rust:0.24.2\",\"language\":\"rust\",\"provider\":\"syntax\"},\"snapshot\":1,\"span\":{\"end_col\":2,\"end_line\":104,\"start_col\":1,\"start_line\":89}}],\"root\":\"\\\\\\\\?\\\\<CP7A_ROOT>\\\\source\",\"snapshot\":{\"branch\":null,\"created_unix\":1792343570,\"dirty\":false,\"head\":\"0fd22a1134274c1e92f741fc0d4e3b4886ceeaf3\",\"id\":1,\"nonce\":\"7360-1792343570898653400-0\",\"status_at_write\":\"fresh\"},\"total\":1,\"truncated\":false}"
           }
         ],
         "structuredContent": {
@@ -891,7 +891,7 @@
               }
             }
           ],
-          "root": "\\\\?\\E:\\dev\\Riltra\\.cp7a\\source",
+          "root": "\\\\?\\<CP7A_ROOT>\\source",
           "snapshot": {
             "branch": null,
             "created_unix": 1792343570,
@@ -5054,7 +5054,7 @@
       "elapsed_ms": 1,
       "isError": false,
       "error": null,
-      "text": "{\"freshness\":\"unknown\",\"query\":{\"limit\":50,\"offset\":0,\"symbol\":\"main\"},\"reasons\":[\"no-index\"],\"repo\":\"empty\",\"results\":[],\"root\":\"\\\\\\\\?\\\\E:\\\\dev\\\\Riltra\\\\.cp7a\\\\empty-repo\",\"snapshot\":null,\"total\":0,\"truncated\":false}",
+      "text": "{\"freshness\":\"unknown\",\"query\":{\"limit\":50,\"offset\":0,\"symbol\":\"main\"},\"reasons\":[\"no-index\"],\"repo\":\"empty\",\"results\":[],\"root\":\"\\\\\\\\?\\\\<CP7A_ROOT>\\\\empty-repo\",\"snapshot\":null,\"total\":0,\"truncated\":false}",
       "json": {
         "freshness": "unknown",
         "query": {
@@ -5067,7 +5067,7 @@
         ],
         "repo": "empty",
         "results": [],
-        "root": "\\\\?\\E:\\dev\\Riltra\\.cp7a\\empty-repo",
+        "root": "\\\\?\\<CP7A_ROOT>\\empty-repo",
         "snapshot": null,
         "total": 0,
         "truncated": false
@@ -5084,7 +5084,7 @@
         ],
         "repo": "empty",
         "results": [],
-        "root": "\\\\?\\E:\\dev\\Riltra\\.cp7a\\empty-repo",
+        "root": "\\\\?\\<CP7A_ROOT>\\empty-repo",
         "snapshot": null,
         "total": 0,
         "truncated": false
@@ -5093,7 +5093,7 @@
         "content": [
           {
             "type": "text",
-            "text": "{\"freshness\":\"unknown\",\"query\":{\"limit\":50,\"offset\":0,\"symbol\":\"main\"},\"reasons\":[\"no-index\"],\"repo\":\"empty\",\"results\":[],\"root\":\"\\\\\\\\?\\\\E:\\\\dev\\\\Riltra\\\\.cp7a\\\\empty-repo\",\"snapshot\":null,\"total\":0,\"truncated\":false}"
+            "text": "{\"freshness\":\"unknown\",\"query\":{\"limit\":50,\"offset\":0,\"symbol\":\"main\"},\"reasons\":[\"no-index\"],\"repo\":\"empty\",\"results\":[],\"root\":\"\\\\\\\\?\\\\<CP7A_ROOT>\\\\empty-repo\",\"snapshot\":null,\"total\":0,\"truncated\":false}"
           }
         ],
         "structuredContent": {
@@ -5108,7 +5108,7 @@
           ],
           "repo": "empty",
           "results": [],
-          "root": "\\\\?\\E:\\dev\\Riltra\\.cp7a\\empty-repo",
+          "root": "\\\\?\\<CP7A_ROOT>\\empty-repo",
           "snapshot": null,
           "total": 0,
           "truncated": false
@@ -6255,7 +6255,7 @@
           "content": [
             {
               "type": "text",
-              "text": "{\"repos\":[{\"added_unix\":1792343752,\"name\":\"empty\",\"root\":\"\\\\\\\\?\\\\E:\\\\dev\\\\Riltra\\\\.cp7a\\\\empty-repo\"},{\"added_unix\":1792343570,\"name\":\"other\",\"root\":\"\\\\\\\\?\\\\E:\\\\dev\\\\Riltra\\\\.cp7a\\\\other-repo\"},{\"added_unix\":1792343570,\"name\":\"riltra\",\"root\":\"\\\\\\\\?\\\\E:\\\\dev\\\\Riltra\\\\.cp7a\\\\source\"}]}"
+              "text": "{\"repos\":[{\"added_unix\":1792343752,\"name\":\"empty\",\"root\":\"\\\\\\\\?\\\\<CP7A_ROOT>\\\\empty-repo\"},{\"added_unix\":1792343570,\"name\":\"other\",\"root\":\"\\\\\\\\?\\\\<CP7A_ROOT>\\\\other-repo\"},{\"added_unix\":1792343570,\"name\":\"riltra\",\"root\":\"\\\\\\\\?\\\\<CP7A_ROOT>\\\\source\"}]}"
             }
           ],
           "structuredContent": {
@@ -6263,17 +6263,17 @@
               {
                 "added_unix": 1792343752,
                 "name": "empty",
-                "root": "\\\\?\\E:\\dev\\Riltra\\.cp7a\\empty-repo"
+                "root": "\\\\?\\<CP7A_ROOT>\\empty-repo"
               },
               {
                 "added_unix": 1792343570,
                 "name": "other",
-                "root": "\\\\?\\E:\\dev\\Riltra\\.cp7a\\other-repo"
+                "root": "\\\\?\\<CP7A_ROOT>\\other-repo"
               },
               {
                 "added_unix": 1792343570,
                 "name": "riltra",
-                "root": "\\\\?\\E:\\dev\\Riltra\\.cp7a\\source"
+                "root": "\\\\?\\<CP7A_ROOT>\\source"
               }
             ]
           },
@@ -6306,7 +6306,7 @@
           "content": [
             {
               "type": "text",
-              "text": "{\"git\":{\"branch\":null,\"dirty\":false,\"head\":\"0fd22a1134274c1e92f741fc0d4e3b4886ceeaf3\",\"present\":true,\"toplevel\":\"\\\\\\\\?\\\\E:\\\\dev\\\\Riltra\\\\.cp7a\\\\source\",\"untracked\":0,\"valid\":true,\"worktree\":true},\"ignore\":{\"file\":false,\"rules\":0},\"index_status\":{\"freshness\":\"fresh\",\"fts\":true,\"reasons\":[],\"repo\":\"riltra\",\"root\":\"\\\\\\\\?\\\\E:\\\\dev\\\\Riltra\\\\.cp7a\\\\source\",\"snapshot\":{\"branch\":null,\"created_unix\":1792343570,\"dirty\":false,\"head\":\"0fd22a1134274c1e92f741fc0d4e3b4886ceeaf3\",\"id\":1,\"nonce\":\"7360-1792343570898653400-0\",\"status_at_write\":\"fresh\"}},\"name\":\"riltra\",\"root\":\"\\\\\\\\?\\\\E:\\\\dev\\\\Riltra\\\\.cp7a\\\\source\"}"
+              "text": "{\"git\":{\"branch\":null,\"dirty\":false,\"head\":\"0fd22a1134274c1e92f741fc0d4e3b4886ceeaf3\",\"present\":true,\"toplevel\":\"\\\\\\\\?\\\\<CP7A_ROOT>\\\\source\",\"untracked\":0,\"valid\":true,\"worktree\":true},\"ignore\":{\"file\":false,\"rules\":0},\"index_status\":{\"freshness\":\"fresh\",\"fts\":true,\"reasons\":[],\"repo\":\"riltra\",\"root\":\"\\\\\\\\?\\\\<CP7A_ROOT>\\\\source\",\"snapshot\":{\"branch\":null,\"created_unix\":1792343570,\"dirty\":false,\"head\":\"0fd22a1134274c1e92f741fc0d4e3b4886ceeaf3\",\"id\":1,\"nonce\":\"7360-1792343570898653400-0\",\"status_at_write\":\"fresh\"}},\"name\":\"riltra\",\"root\":\"\\\\\\\\?\\\\<CP7A_ROOT>\\\\source\"}"
             }
           ],
           "structuredContent": {
@@ -6315,7 +6315,7 @@
               "dirty": false,
               "head": "0fd22a1134274c1e92f741fc0d4e3b4886ceeaf3",
               "present": true,
-              "toplevel": "\\\\?\\E:\\dev\\Riltra\\.cp7a\\source",
+              "toplevel": "\\\\?\\<CP7A_ROOT>\\source",
               "untracked": 0,
               "valid": true,
               "worktree": true
@@ -6329,7 +6329,7 @@
               "fts": true,
               "reasons": [],
               "repo": "riltra",
-              "root": "\\\\?\\E:\\dev\\Riltra\\.cp7a\\source",
+              "root": "\\\\?\\<CP7A_ROOT>\\source",
               "snapshot": {
                 "branch": null,
                 "created_unix": 1792343570,
@@ -6341,7 +6341,7 @@
               }
             },
             "name": "riltra",
-            "root": "\\\\?\\E:\\dev\\Riltra\\.cp7a\\source"
+            "root": "\\\\?\\<CP7A_ROOT>\\source"
           },
           "isError": false
         }
@@ -6373,7 +6373,7 @@
           "content": [
             {
               "type": "text",
-              "text": "{\"freshness\":\"fresh\",\"query\":{\"limit\":50,\"offset\":0,\"symbol\":\"validate_id\"},\"reasons\":[],\"repo\":\"riltra\",\"results\":[{\"bytes\":[3696,4286],\"kind\":\"function\",\"name\":\"validate_id\",\"path\":\"crates/cli/src/knowledge.rs\",\"provenance\":{\"grammar\":\"rust:0.24.2\",\"language\":\"rust\",\"provider\":\"syntax\"},\"snapshot\":1,\"span\":{\"end_col\":2,\"end_line\":104,\"start_col\":1,\"start_line\":89}}],\"root\":\"\\\\\\\\?\\\\E:\\\\dev\\\\Riltra\\\\.cp7a\\\\source\",\"snapshot\":{\"branch\":null,\"created_unix\":1792343570,\"dirty\":false,\"head\":\"0fd22a1134274c1e92f741fc0d4e3b4886ceeaf3\",\"id\":1,\"nonce\":\"7360-1792343570898653400-0\",\"status_at_write\":\"fresh\"},\"total\":1,\"truncated\":false}"
+              "text": "{\"freshness\":\"fresh\",\"query\":{\"limit\":50,\"offset\":0,\"symbol\":\"validate_id\"},\"reasons\":[],\"repo\":\"riltra\",\"results\":[{\"bytes\":[3696,4286],\"kind\":\"function\",\"name\":\"validate_id\",\"path\":\"crates/cli/src/knowledge.rs\",\"provenance\":{\"grammar\":\"rust:0.24.2\",\"language\":\"rust\",\"provider\":\"syntax\"},\"snapshot\":1,\"span\":{\"end_col\":2,\"end_line\":104,\"start_col\":1,\"start_line\":89}}],\"root\":\"\\\\\\\\?\\\\<CP7A_ROOT>\\\\source\",\"snapshot\":{\"branch\":null,\"created_unix\":1792343570,\"dirty\":false,\"head\":\"0fd22a1134274c1e92f741fc0d4e3b4886ceeaf3\",\"id\":1,\"nonce\":\"7360-1792343570898653400-0\",\"status_at_write\":\"fresh\"},\"total\":1,\"truncated\":false}"
             }
           ],
           "structuredContent": {
@@ -6408,7 +6408,7 @@
                 }
               }
             ],
-            "root": "\\\\?\\E:\\dev\\Riltra\\.cp7a\\source",
+            "root": "\\\\?\\<CP7A_ROOT>\\source",
             "snapshot": {
               "branch": null,
               "created_unix": 1792343570,
@@ -8116,7 +8116,7 @@
           "content": [
             {
               "type": "text",
-              "text": "{\"freshness\":\"unknown\",\"query\":{\"limit\":50,\"offset\":0,\"symbol\":\"main\"},\"reasons\":[\"no-index\"],\"repo\":\"empty\",\"results\":[],\"root\":\"\\\\\\\\?\\\\E:\\\\dev\\\\Riltra\\\\.cp7a\\\\empty-repo\",\"snapshot\":null,\"total\":0,\"truncated\":false}"
+              "text": "{\"freshness\":\"unknown\",\"query\":{\"limit\":50,\"offset\":0,\"symbol\":\"main\"},\"reasons\":[\"no-index\"],\"repo\":\"empty\",\"results\":[],\"root\":\"\\\\\\\\?\\\\<CP7A_ROOT>\\\\empty-repo\",\"snapshot\":null,\"total\":0,\"truncated\":false}"
             }
           ],
           "structuredContent": {
@@ -8131,7 +8131,7 @@
             ],
             "repo": "empty",
             "results": [],
-            "root": "\\\\?\\E:\\dev\\Riltra\\.cp7a\\empty-repo",
+            "root": "\\\\?\\<CP7A_ROOT>\\empty-repo",
             "snapshot": null,
             "total": 0,
             "truncated": false

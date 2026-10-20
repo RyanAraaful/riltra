@@ -1,7 +1,8 @@
 import { Plugin } from "@opencode/plugin"
 import { appendFileSync } from "node:fs"
+import { join } from "node:path"
 
-const LOG = "E:\\dev\\Riltra\\.cp7a\\plugin-events.jsonl"
+const LOG = process.env.RILTRA_CP7A_LOG || join(process.cwd(), ".cp7a", "plugin-events.jsonl")
 const ALLOWED = new Set([
   "riltra_riltra_repo_list",
   "riltra_riltra_repo_status",
