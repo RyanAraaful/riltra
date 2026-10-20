@@ -12,6 +12,7 @@ param(
   [string]$OutDir = '',
   [string]$Repo = 'RyanAraaful/riltra',
   [string]$Run = '39438093811',
+  [string]$SuccessRun = '',
   [int]$RunCount = 40,
   [string]$JobIds = ''
 )
@@ -62,6 +63,29 @@ foreach ($id in $ids) {
   $file = Join-Path $OutDir ("cancelled-macos-job-$id.json")
   [System.IO.File]::WriteAllText($file, ($payload | ConvertTo-Json -Depth 6), (New-Object System.Text.UTF8Encoding($false)))
   "archived $file"
+}
+
+# --- the macOS job of the post-change run (the runner that was used) ------
+if ($SuccessRun) {
+  $sj = Get-Api "repos/$Repo/actions/runs/$SuccessRun/jobs?per_page=20"
+  foreach ($j in @($sj.jobs | Where-Object { $_.name -like '*macos*' })) {
+    $payload = [ordered]@{
+      run = $SuccessRun
+      job_id = $j.id
+      job_name = $j.name
+      status = $j.status
+      conclusion = $j.conclusion
+      labels = $j.labels
+      runner_name = $j.runner_name
+      steps_executed = @($j.steps).Count
+      step_names = @($j.steps | ForEach-Object { $_.name })
+      started_at = $j.started_at
+      completed_at = $j.completed_at
+    }
+    $file = Join-Path $OutDir "post-change-macos-job-$($j.id).json"
+    [System.IO.File]::WriteAllText($file, ($payload | ConvertTo-Json -Depth 6), (New-Object System.Text.UTF8Encoding($false)))
+    "archived $file"
+  }
 }
 
 # --- the macOS job history over the repository's recent runs ---------------

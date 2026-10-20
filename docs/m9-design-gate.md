@@ -478,7 +478,10 @@ Matrix summary (release-gate status at M9 entry; details per gate below):
   passed; **no macOS job ever failed a test**. The macOS **runner** is now
   `macos-15-intel` (the same macOS 15 release on the x64 pool); the macOS
   **job name** stays `check (macos-15)` because the `protect-master` ruleset
-  requires that status-check context. **macOS ARM64 is therefore no longer
+  requires that status-check context. The move is **verified**: run
+  39448700227 ran the macOS job on the `macos-15-intel` runner, it was
+  assigned a runner, it executed every step and it passed.
+  **macOS ARM64 is therefore no longer
   covered by the CI matrix** and must be restored as a separate,
   non-required workflow once the ARM64 pool recovers, or the native-macOS
   claim must be read as x64-only. Evidence:

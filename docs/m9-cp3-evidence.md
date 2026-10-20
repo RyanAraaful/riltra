@@ -31,6 +31,9 @@ clone**; the original MMSP and Riltra working trees were never modified.
 | `54c7d26` | `fix(edges): widen the C/C++ caller candidate scope by unique include suffix` |
 | `95265bd` | `test(m9): archive the E8 before/after re-measurement` |
 | `d657abf` | `test(m9): archive the multi-repository isolation matrix` |
+| `4f9d197` | `test(m9): archive the remaining CP3 gate evidence and add the CP3 report` |
+| `b9c3d7e` | `test(m9): cover the anchor-name filter and correct the E8 evidence` |
+| `469d8cd` | `ci: run the macOS check on the x64 pool without renaming the job` |
 
 ### Host toolchain
 
@@ -47,10 +50,11 @@ clone**; the original MMSP and Riltra working trees were never modified.
 
 ### CI verification
 
-| Run | URL | Commit | windows-latest | ubuntu-latest | macos-15 (pre-change label) | security |
+| Run | URL | Commit | windows-latest | ubuntu-latest | macOS job | security |
 |---|---|---|---|---|---|---|
 | 39438093811 | <https://github.com/RyanAraaful/riltra/actions/runs/39438093811> | `b9c3d7e` | success | success | **cancelled** | success |
 | 39432405437 | <https://github.com/RyanAraaful/riltra/actions/runs/39432405437> | `4f9d197` | success | success | success | success |
+| **39448700227** | <https://github.com/RyanAraaful/riltra/actions/runs/39448700227> | `469d8cd` | success | success | **success** (runner `macos-15-intel`) | success |
 
 The macOS job of run 39438093811 was **cancelled after 15m01s with no runner
 assigned**, and so was its re-run (attempt 2). The archived job payloads
@@ -69,6 +73,13 @@ passed. Across the repository's last 40 macOS jobs: **33 succeeded, 7 were
 cancelled, and 0 ever failed a test**
 (`docs/pilots/cp3/raw/ci/macos-job-history.json`).
 
+**The fix and its verification.** The macOS **runner** moved to
+`macos-15-intel`; the macOS **job name** stayed `check (macos-15)`. Run
+39448700227 is the verification: the job's labels are `macos-15-intel`, it
+was assigned a runner, it executed all 11 steps and passed
+(`docs/pilots/cp3/raw/ci/post-change-macos-job-*.json`). The other three
+jobs of the same run are unchanged and green.
+
 **A second constraint shaped the fix.** The `protect-master` ruleset
 requires three status-check contexts, one of them **`check (macos-15)`**
 (`docs/pilots/cp3/raw/ci/ruleset-protect-master.json`). A renamed context is
@@ -76,7 +87,7 @@ never reported, so renaming the matrix entry would have left every pull
 request to master blocked. The fix therefore keeps the three job **names**
 and moves only the macOS **runner**. The ruleset was not modified.
 
-See §9 for the diagnosis and the fix.
+See §9 for the diagnosis and the remaining decision.
 
 ---
 
@@ -631,7 +642,7 @@ not provide. It is recorded as unresolved rather than guessed.
 | E9 | Warm-query SLO missed | **diagnostic, now measured** | **Decide.** The fixed cost is ~472 ms of a ~760 ms invocation and is dominated by the `git` fingerprint subprocess (~272 ms). The owner's CP2 instruction was "profile first, then either the target or the fixed cost"; the profiling is done. |
 | E10 | The agent side of workflow 5 | **no longer blocked** — measured in CP3 | **No change.** One session is evidence that the gate is measurable, not a repeated measurement. |
 | E11 | The repository's history carries unsanitised local paths | open risk, unchanged from CP1 | **Owner-gated** (history rewrite). Untouched by CP3. |
-| **new** | **macOS CI ran on the ARM64 hosted pool, which GitHub could not supply** | **infrastructure defect, diagnosed and fixed in CP3** | **Decide the architecture.** `macos-15` and the earlier `macos-latest` are **both ARM64**, so the earlier pin (commit `4c47625`) did not escape the constraint; 7 of the repository's last 40 macOS jobs were cancelled for lack of a runner and **none ever failed a test**. The macOS **runner** was moved to `macos-15-intel` (the same macOS 15 release on the x64 pool) while the **job names** stay `check (macos-15)`, because the `protect-master` ruleset requires that context and the brief forbids touching rulesets. Two consequences the owner must accept: (i) **macOS ARM64 is no longer covered by the CI matrix** — restore it as a **separate, non-required workflow** once the ARM64 pool recovers (a `continue-on-error` matrix entry would report a cancelled job as a pass, which is not acceptable evidence); (ii) the x64 pool's capacity is **expected** to be better but is not yet observed on this label — verify it on the first run. |
+| **new** | **macOS CI ran on the ARM64 hosted pool, which GitHub could not supply** | **infrastructure defect, diagnosed and fixed in CP3** | **Decide the architecture.** `macos-15` and the earlier `macos-latest` are **both ARM64**, so the earlier pin (commit `4c47625`) did not escape the constraint; 7 of the repository's last 40 macOS jobs were cancelled for lack of a runner and **none ever failed a test**. The macOS **runner** was moved to `macos-15-intel` (the same macOS 15 release on the x64 pool) while the **job names** stay `check (macos-15)`, because the `protect-master` ruleset requires that context and the brief forbids touching rulesets. **Verified**: run 39448700227 ran the macOS job on `macos-15-intel`, got a runner, executed every step and passed (§1). The remaining decision: **macOS ARM64 is no longer covered by the CI matrix** — restore it as a **separate, non-required workflow** once the ARM64 pool recovers (a `continue-on-error` matrix entry would report a cancelled job as a pass, which is not acceptable evidence). |
 
 ---
 
@@ -705,6 +716,7 @@ new coverage gap (`.inl`) that must be decided before G-SYN can close.
 | `docs/pilots/cp3/method/opencode-summary.cjs` | the OpenCode session summary |
 | `docs/pilots/cp3/method/ci-history.ps1` | the CI runner evidence collector |
 | `docs/pilots/cp3/raw/ci/cancelled-macos-job-*.json` | the cancelled macOS job payloads, with GitHub's annotations |
+| `docs/pilots/cp3/raw/ci/post-change-macos-job-*.json` | the post-change macOS job: runner `macos-15-intel`, every step executed, success |
 | `docs/pilots/cp3/raw/ci/macos-job-history.json` | the macOS job history: 40 jobs, 33 succeeded, 7 cancelled, 0 failed |
 | `docs/pilots/cp3/raw/ci/ruleset-protect-master.json` | the required status-check contexts of the `protect-master` ruleset |
 | `docs/pilots/cp3/raw/e8/SAMPLE.md` | the verified E8 sample, every class |

@@ -1,5 +1,18 @@
 [
   {
+    "run_id": 39448700227,
+    "head_branch": "m9-multirepo-release-candidate",
+    "head_sha": "469d8cd892db66704808f74ffe911413eefc728f",
+    "job_name": "check (macos-15)",
+    "label": "macos-15-intel",
+    "conclusion": "success",
+    "runner_name": "GitHub Actions 1000000421",
+    "runner_id": 1000000421,
+    "steps_executed": 12,
+    "started_at": "2026-10-20T15:28:22Z",
+    "completed_at": "2026-10-20T15:34:42Z"
+  },
+  {
     "run_id": 39438093811,
     "head_branch": "m9-multirepo-release-candidate",
     "head_sha": "b9c3d7ee8e2153ed91fed857e3d4253bde1533e0",
@@ -505,18 +518,5 @@
     "steps_executed": 12,
     "started_at": "2026-10-19T04:11:43Z",
     "completed_at": "2026-10-19T04:13:37Z"
-  },
-  {
-    "run_id": 39196063479,
-    "head_branch": "m8-unified-cli-mcp",
-    "head_sha": "68d00c9c409b675377736439c7360876fd2659b5",
-    "job_name": "check (macos-latest)",
-    "label": "macos-latest",
-    "conclusion": "success",
-    "runner_name": "GitHub Actions 1000000227",
-    "runner_id": 1000000227,
-    "steps_executed": 12,
-    "started_at": "2026-10-19T03:43:55Z",
-    "completed_at": "2026-10-19T03:45:27Z"
   }
 ]
