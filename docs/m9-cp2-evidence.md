@@ -146,7 +146,7 @@ The audit corrected the grader (`pilots/cp2/method/grade.cjs`, with
 | 4. Impact of a change | **PASS** (3/3) | **UNMET** | — |
 | 5. Natural-language question via OpenCode/MCP | **PASS** (server side, §7) | **UNAVAILABLE** (agent side blocked) | **UNAVAILABLE** (provider-auth-403) |
 
-Totals over the 23 checks: **17 honesty PASS, 1 honesty UNAVAILABLE, 4
+Totals over the 24 checks: **17 honesty PASS, 1 honesty UNAVAILABLE, 4
 capability UNMET, 2 evidence UNAVAILABLE** — and **no check is a vacuous
 `PASS`**.
 
@@ -507,6 +507,7 @@ callee endpoint stays unresolved.
 | `files.calls` on the pilot | 89 819 | **91 025** (+1 206) |
 | Other fact classes | — | unchanged (definitions 12 105, imports 6 680, errors 1 991, files 1 438) |
 | Regression tests | — | **11** C++ unit tests in `syntax.rs` |
+| `cargo test --locked` | 648 passed | **652 passed / 0 failed** (8 suites) |
 | `cargo fmt --check`, `cargo clippy -D warnings` | clean | clean |
 
 The M2/M6 goldens are **byte-unchanged**: the frozen C++ fixtures contain
