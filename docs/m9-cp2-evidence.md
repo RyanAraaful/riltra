@@ -69,7 +69,7 @@ tracked source at the pin.
 | post-fix (first capture, superseded) | debug | 155.8 s / 156.8 s | — | 50 462 720 | 91 957 |
 | post-fix (release, first capture, superseded) | release | 46.7 s | 121.1 MiB | 50 462 720 | 91 957 |
 | **corrected capture (audit)** | debug | **160.0 s** | — | 50 238 592 | **91 025** |
-| **corrected capture (audit)** | release | **23.8 s** | 120.3 MiB | 50 238 592 | **91 025** |
+| **corrected capture (audit)** | release | **23.8 s / 26.1 s** | 120.3 MiB | 50 238 592 | **91 025** |
 
 Two independent cold runs (D-M9-3) were made after the first fix; a third
 independent run measured the indexer's own peak working set (the harness
@@ -338,31 +338,33 @@ re-measured them on an idle host with the corrected binary, which is **not
 comparable** to the debug column of the same table either. Both are given,
 with the load condition, because the difference is the measurement itself:
 
-| Query | release p50 / p95 (idle host, audit) | release p50 / p95 (CP2, under load) | vs 500 ms p95 (audit) |
-|---|---|---|---|
-| `search --symbol PatchMatch` | 536 / **544** ms | 752 / 1 103 ms | missed by 1.09× |
-| `search --symbol Run` | 534 / **537** ms | 765 / 1 049 ms | missed by 1.07× |
-| `callers` (Print definition) | 856 / **1 001** ms | 1 152 / 1 186 ms | missed by 2.00× |
-| `callees` (PatchMatch::Run) | 897 / **989** ms | 1 116 / 1 149 ms | missed by 1.98× |
-| `trace --depth 4` | 884 / **1 007** ms | 1 191 / 1 222 ms | missed by 2.01× |
-| `impact` (option member) | 723 / **738** ms | 1 104 / 1 141 ms | missed by 1.48× |
-| `index status` | 517 / **522** ms | 786 / 881 ms | missed by 1.04× |
-| `repo status` | 309 / **315** ms | 879 / 1 135 ms | met |
+| Query | release p95, audit run 1 | release p95, audit run 2 | release p95, CP2 (under load) | vs 500 ms p95 (audit) |
+|---|---|---|---|---|
+| `search --symbol PatchMatch` | 544 ms | 564 ms | 1 103 ms | missed by 1.09–1.13× |
+| `search --symbol Run` | 537 ms | 579 ms | 1 049 ms | missed by 1.07–1.16× |
+| `callers` (Print definition) | 1 001 ms | 901 ms | 1 186 ms | missed by 1.80–2.00× |
+| `callees` (PatchMatch::Run) | 989 ms | 879 ms | 1 149 ms | missed by 1.76–1.98× |
+| `trace --depth 4` | 1 007 ms | 1 090 ms | 1 222 ms | missed by 2.01–2.18× |
+| `impact` (option member) | 738 ms | 1 007 ms | 1 141 ms | missed by 1.48–2.01× |
+| `index status` | 522 ms | 621 ms | 881 ms | missed by 1.04–1.24× |
+| `repo status` | 315 ms | 368 ms | 1 135 ms | met |
 
-**Diagnostic finding: the warm-query p95 target is missed by 1.04× to 2.01×
+**Diagnostic finding: the warm-query p95 target is missed by 1.04× to 2.18×
 even in the release profile on an idle host.** The earlier CP2 figures
 (2.1×–2.4×) were inflated by host contention and must not be quoted as the
-product's cost.
+product's cost. The two idle-host runs still differ by up to 36 % on the
+same query, so the numbers are a range, not a mean.
 
 The cause is **a hypothesis, not a measured fact**. The measurements are
 consistent with a large fixed per-invocation cost: `repo status`, which only
-reads the git fingerprint, costs 0.31 s at p50, and `index status` 0.52 s,
-while the graph queries cost 0.72–0.90 s at p50. That *suggests* process
-start-up, the `git` subprocess and the database open dominate, rather than
-the graph traversal — but the audit did **not** profile the query path, so
-the split between the fixed cost and the traversal is unmeasured. What is
-measured: the cold index takes 23.8 s in release, a no-op refresh 52.1 s in
-debug, and every warm query costs 0.54–1.01 s at p95 in release.
+reads the git fingerprint, costs 0.31–0.36 s at p50, and `index status`
+0.52–0.56 s, while the graph queries cost 0.55–0.97 s at p50. That
+*suggests* process start-up, the `git` subprocess and the database open
+dominate, rather than the graph traversal — but the audit did **not**
+profile the query path, so the split between the fixed cost and the
+traversal is unmeasured. What is measured: the cold index takes 23.8–26.1 s
+in release, a no-op refresh 52.1 s in debug, and every warm query costs
+0.52–1.09 s at p95 in release.
 
 No release gate is proposed from these numbers. The options are an owner
 decision: (a) accept the current cost and document it, (b) profile the
@@ -605,7 +607,7 @@ E12; the third is already recorded in the pilot's template-call measurement.
 | Incremental parity | **PASS** | n/a | §5; `raw-audit/incremental/` |
 | MCP surface / purity / error / isolation | **PASS** | n/a | §7.1; `raw-audit/mcp/` |
 | OpenCode session (agent side) | **BLOCKED** | **UNAVAILABLE** | §7.3 |
-| Warm-query SLO (diagnostic) | — | **MISSED** (1.04–2.01×, idle host) | §6 |
+| Warm-query SLO (diagnostic) | — | **MISSED** (1.04–2.18×, idle host) | §6 |
 
 **Riltra is not yet a practical GitNexus alternative for these workflows on
 a C++ repository of this size.** Nothing is fabricated — every answer reports

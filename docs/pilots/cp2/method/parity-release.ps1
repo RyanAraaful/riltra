@@ -49,8 +49,10 @@ $o = $full | ConvertFrom-Json
 "  mode=$($o.mode) reused=$($o.reused) reparsed=$($o.reparsed) reason=$($o.fallback_reason) wall_s=$([math]::Round($sw.Elapsed.TotalSeconds,2))"
 
 "===== 4. same-tree fact parity (order-independent digests) ====="
-$incJson = Join-Path $cfg.BenchRoot 'inc-facts.json'
-$orcJson = Join-Path $cfg.BenchRoot 'oracle-facts.json'
+# The digests are archived with the run, so the parity can be re-verified
+# from the archive alone.
+$incJson = Join-Path $raw 'inc-facts.json'
+$orcJson = Join-Path $raw 'oracle-facts.json'
 node $digest (Join-Path $HomeDir 'index\mmsp-pin.db') $incJson | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "the fact digest script failed" }
 node $digest (Join-Path $oracleDir 'index\mmsp-pin.db') $orcJson | Out-Null
