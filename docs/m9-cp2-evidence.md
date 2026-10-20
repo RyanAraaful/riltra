@@ -385,32 +385,32 @@ re-measured them on an idle host with the corrected binary, which is **not
 comparable** to the debug column of the same table either. Both are given,
 with the load condition, because the difference is the measurement itself:
 
-| Query | release p95, audit run 1 | release p95, audit run 2 | release p95, CP2 (under load) | vs 500 ms p95 (audit) |
-|---|---|---|---|---|
-| `search --symbol PatchMatch` | 544 ms | 564 ms | 1 103 ms | missed by 1.09–1.13× |
-| `search --symbol Run` | 537 ms | 579 ms | 1 049 ms | missed by 1.07–1.16× |
-| `callers` (Print definition) | 1 001 ms | 901 ms | 1 186 ms | missed by 1.80–2.00× |
-| `callees` (PatchMatch::Run) | 989 ms | 879 ms | 1 149 ms | missed by 1.76–1.98× |
-| `trace --depth 4` | 1 007 ms | 1 090 ms | 1 222 ms | missed by 2.01–2.18× |
-| `impact` (option member) | 738 ms | 1 007 ms | 1 141 ms | missed by 1.48–2.01× |
-| `index status` | 522 ms | 621 ms | 881 ms | missed by 1.04–1.24× |
-| `repo status` | 315 ms | 368 ms | 1 135 ms | met |
+| Query | release p95, audit run 1 | release p95, audit run 2 | release p95, audit run 3 | release p95, CP2 (under load) | vs 500 ms p95 (audit) |
+|---|---|---|---|---|---|
+| `search --symbol PatchMatch` | 544 ms | 564 ms | 615 ms | 1 103 ms | missed by 1.09–1.23× |
+| `search --symbol Run` | 537 ms | 579 ms | 678 ms | 1 049 ms | missed by 1.07–1.36× |
+| `callers` (Print definition) | 1 001 ms | 901 ms | 990 ms | 1 186 ms | missed by 1.80–2.00× |
+| `callees` (PatchMatch::Run) | 989 ms | 879 ms | 946 ms | 1 149 ms | missed by 1.76–1.98× |
+| `trace --depth 4` | 1 007 ms | 1 090 ms | 922 ms | 1 222 ms | missed by 1.84–2.18× |
+| `impact` (option member) | 738 ms | 1 007 ms | 748 ms | 1 141 ms | missed by 1.48–2.01× |
+| `index status` | 522 ms | 621 ms | 516 ms | 881 ms | missed by 1.03–1.24× |
+| `repo status` | 315 ms | 368 ms | 307 ms | 1 135 ms | met |
 
-**Diagnostic finding: the warm-query p95 target is missed by 1.04× to 2.18×
+**Diagnostic finding: the warm-query p95 target is missed by 1.03× to 2.18×
 even in the release profile on an idle host.** The earlier CP2 figures
 (2.1×–2.4×) were inflated by host contention and must not be quoted as the
-product's cost. The two idle-host runs still differ by up to 36 % on the
+product's cost. The three idle-host runs still differ by up to 36 % on the
 same query, so the numbers are a range, not a mean.
 
 The cause is **a hypothesis, not a measured fact**. The measurements are
 consistent with a large fixed per-invocation cost: `repo status`, which only
-reads the git fingerprint, costs 0.31–0.36 s at p50, and `index status`
-0.52–0.56 s, while the graph queries cost 0.55–0.97 s at p50. That
+reads the git fingerprint, costs 0.30–0.36 s at p50, and `index status`
+0.50–0.56 s, while the graph queries cost 0.59–0.85 s at p50. That
 *suggests* process start-up, the `git` subprocess and the database open
 dominate, rather than the graph traversal — but the audit did **not**
 profile the query path, so the split between the fixed cost and the
 traversal is unmeasured. What is measured: the cold index takes 23.8–26.1 s
-in release, a no-op refresh 52.1 s in debug, and every warm query costs
+in release, a no-op refresh 48–52 s in debug, and every warm query costs
 0.52–1.09 s at p95 in release.
 
 No release gate is proposed from these numbers. The options are an owner
@@ -670,7 +670,7 @@ than assumed.
 | E1 | C++ semantics absent: no provider, no compilation database in MMSP | **unsupported capability** (owner-gated: clangd deferred by D-M9-2) | release-blocking for resolved C++ call edges |
 | E7 | Reference-level resolution absent: a data member, a member read and a macro argument produce no edge, so `impact` on a field is empty, a trace cannot exceed one hop, and the ambiguous most-vexing-parse form cannot be decided (a name lookup is needed) | **unsupported capability** (owner-gated) | release-blocking for workflow 4 |
 | E8 | C/C++ include-root resolution: the candidate-caller scope of an anchor is built from import texts that mention the anchor's *repository-relative* path, but MMSP's includes are rooted at `colmap/src/`. Measured: **0 of 4 009** quoted C/C++ includes resolve; a unique-suffix rule *would* match **2 993** of them, 969 are ambiguous and 47 have no match | **implementation defect** — diagnosed, measured, **not fixed here** (see 10.3) | release-blocking for cross-TU C++ callers (workflow 2) |
-| E9 | The warm-query p95 target (§14.3, ≤ 500 ms) is missed by **1.04×–2.18×** in the release profile on an idle host (the two idle-host runs of the audit; the earlier CP2 figure of 2.1×–2.4× was taken under host contention and is **superseded**). The **cause is a hypothesis**: the measurements are consistent with a large fixed per-invocation cost (process start, the `git` subprocess, the database open) rather than with the graph, but the query path was **not profiled**, so the split is unmeasured | **diagnostic**, not a gate | owner decision: profile first, then either the target or the fixed cost |
+| E9 | The warm-query p95 target (§14.3, ≤ 500 ms) is missed by **1.03×–2.18×** in the release profile on an idle host (the three idle-host runs of the audit; the earlier CP2 figure of 2.1×–2.4× was taken under host contention and is **superseded**). The **cause is a hypothesis**: the measurements are consistent with a large fixed per-invocation cost (process start, the `git` subprocess, the database open) rather than with the graph, but the query path was **not profiled**, so the split is unmeasured | **diagnostic**, not a gate | owner decision: profile first, then either the target or the fixed cost |
 | E10 | The OpenCode free tier refuses nested CLI sessions in this environment, so the agent side of workflow 5 could not be measured | **environmental block** | G-MCP re-verification deferred; CP7-A G6 remains the last agent-side evidence |
 | E11 | The repository's own history carries unsanitized local paths (1 068 findings in 9 commits / 184 files, 0 credential-rule findings), inherited from CP1 | **open risk**, unchanged | rewrite still owner-gated |
 | E12 | The C++ most-vexing-parse form cannot be decided from syntax: `T v(a, b);` is a function declaration when `a`/`b` denote types and a variable when they denote variables. Riltra therefore records **no** constructor call for that form (§9.4, §9.5) | **unsupported capability** (needs the name lookup of E1/E7) | the affected constructor calls are missing, not wrong |
