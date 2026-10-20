@@ -62,10 +62,31 @@ local absolute paths; the procedure below fixes *how* the snapshot is created
 rather than *where* it lives.
 
 ```powershell
-$env:GIT_CLONE_PROTECTION_ACTIVE = 'false'   # required: core.hooksPath breaks plain clone
 git clone https://github.com/RyanAraaful/mmsp.git $SNAPSHOT
 git -C $SNAPSHOT checkout --detach d62f06a576d8e76b705c8ecc57fc380f7ebc9c44
 ```
+
+**No protection override is used, and none is required.** CP1 audited the
+earlier claim that a plain `git clone` fails and that
+`GIT_CLONE_PROTECTION_ACTIVE=false` is needed. It does not reproduce: on
+2026-10-20 a plain `git clone https://github.com/RyanAraaful/mmsp.git`
+completed with exit 0 and produced a clean clone (`HEAD` = `7c1b1ce…`,
+`git status --porcelain` empty). The same plain clone of
+`RyanAraaful/riltra` also succeeded, so the earlier rationale — "a repo with
+`core.hooksPath` set breaks a plain clone" — is not reproducible either:
+`core.hooksPath` is a **local** config (`.git/config`) and is not propagated
+by a clone. The variable is not a documented Git or `gh` setting (checked
+against the Git and GitHub CLI manuals on 2026-10-20). The workaround is
+therefore removed: weakening clone protection is not a default here, and no
+step in this procedure needs it. If a future host does require it, the
+override must be scoped to that single command, justified with the exact
+error output, and recorded here — never set as a session-wide default.
+
+The snapshot in use was produced by exactly this procedure: a plain clone plus
+`checkout --detach` of the pin, with tree object
+`c5482ea00481675e0aa921538f560947b68dca12` — byte-identical to the tree the
+earlier clone produced and to the tree of the pinned commit in the original
+MMSP repository.
 
 A `git worktree` inside MMSP is **not** used, because it writes administrative
 metadata into `MMSP/.git`. The isolation invariant is proven, not assumed:
@@ -173,10 +194,39 @@ riltra index status --repo mmsp-pin
 Per run, record: wall time, `mode`/`reason`, `reused`/`reparsed`/`added`/`removed`
 counters, peak RSS, index size in bytes. Warm queries use the frozen query
 list of §B with ≥5 repetitions each, reporting p50/p95 and the exact
-commands. A one-file delta is measured on the snapshot, then an independent
-`--full` rebuild of the same final tree must produce **byte-identical**
-counters. Every measured command is bracketed by the isolation assertions of
+commands. Every measured command is bracketed by the isolation assertions of
 §A.2.
+
+**Incremental vs full-rebuild parity contract.** A one-file delta is measured
+on the snapshot, then an independent `--full` rebuild of the **same final
+tree** is built into a **fresh home** and compared. The contract is:
+
+1. Both runs use the same source tree and the same configuration.
+2. **Fact parity is required.** The indexed facts must be equivalent:
+   definitions, imports, call candidates (names, kinds, spans, byte offsets,
+   digests, provenance) and the relevant query outputs (search, callers,
+   callees, trace, impact) after volatile-field normalization. This mirrors
+   the M4 parity gate (`docs/m4-validation.md`: "files, definitions, imports,
+   unresolved call candidates (names, kinds, spans, byte offsets, digests,
+   provenance) — plus CLI search-output parity after volatile-field
+   normalization") and the in-repo guard test
+   `incremental_matches_independent_full_rebuild`
+   (`crates/cli/src/index.rs:2812-2997`, "incremental must equal full").
+3. The **total fact counters** are compared on the same basis — e.g.
+   `files.definitions`, `files.imports`, `files.calls`, `files.errors`,
+   `files.processed`, `files.discovered`.
+4. The **operational counters** (`mode`, `reused`, `reparsed`, `added`,
+   `removed`, `fallback_reason`) are recorded and validated **according to
+   each mode**, not forced to be identical. A full rebuild re-parses
+   everything (`mode:"full"`, `reused:0`, `reparsed` = files processed —
+   `index.rs:340-363`); an incremental run reuses the unchanged files
+   (`mode:"incremental"`, `reparsed` = changed files only —
+   `index.rs:664-709`). The M4 evidence records exactly this split: the
+   delta reported `reused` 11,764 / `reparsed` 1 while the full oracle
+   re-parsed the tree, and the *fact* counters were the ones that were
+   byte-identical (170,586 / 64,954 / 562,384 / 152,543).
+5. Any **unexplained fact difference** is a FAIL. An operational-counter
+   difference that is explained by the mode is not a difference at all.
 
 **Freshness scenarios (§C) run inside the snapshot only**, and the snapshot is
 restored to the pinned SHA between scenarios.
@@ -270,24 +320,52 @@ unsupported/unknown, not silently dropped.
 
 | | |
 |---|---|
-| Definition | `colmap/benchmark/reconstruction/evaluation/geometry.py:34:5` — `def normalize_vec(vec: npt.NDArray[np.floating], eps: float = 1e-10) -> npt.NDArray[np.floating]:` |
+| Definition | **1** — `colmap/benchmark/reconstruction/evaluation/geometry.py:34:5` — `def normalize_vec(vec: npt.NDArray[np.floating], eps: float = 1e-10) -> npt.NDArray[np.floating]:` |
 | Body | `geometry.py:37` — `return vec / max(eps, float(np.linalg.norm(vec)))` |
-| References | `geometry.py:43:31` (call, inside `vec_angular_dist_deg`); `colmap/benchmark/reconstruction/evaluation/geometry_test.py:32` (import), `:38`, `:44`, `:51` (calls); `colmap/benchmark/reconstruction/evaluation/utils.py:57` (re-export import) |
+| Call expressions | **5**, on **4** source lines — `geometry.py:43:31` (`normalize_vec(vec1)`) and `geometry.py:43:52` (`normalize_vec(vec2)`), both on the same line inside `vec_angular_dist_deg`; `colmap/benchmark/reconstruction/evaluation/geometry_test.py:38:22`, `:44:22`, `:51:22` |
+| Import references | **2** — `colmap/benchmark/reconstruction/evaluation/geometry_test.py:32:23` (`from .geometry import normalize_vec, vec_angular_dist_deg`) and `colmap/benchmark/reconstruction/evaluation/utils.py:57:23` (the same import, re-exported with `# noqa: F401`) |
 
 Expected factual answer: a module-level Python function in
 `colmap/benchmark/reconstruction/evaluation/geometry.py`, defined at line 34,
-with **four** call sites (`geometry.py:43`, `geometry_test.py:38`, `:44`,
-`:51`) and **two** import references (`geometry_test.py:32`, `utils.py:57`) —
-six locations in total.
+with **5 call expressions** on **4 lines** and **2 import references** — that
+is **7 reference facts** on **6 source lines**, plus the definition line.
 
-Evidence: read directly from the pinned file; `git grep -n "normalize_vec"`
-over the whole tree returns exactly the six locations above — **there is no
-C++ `normalize_vec` anywhere in the repository**.
+The three counts are different quantities and must not be conflated:
+
+| Quantity | Value | Meaning |
+|---|---|---|
+| Textual occurrences of `normalize_vec` | **8** | Every occurrence of the identifier in the tree, spread over the 7 source lines of the table above (1 definition + 4 call lines + 2 import lines) |
+| Source-line locations | **7** | 1 definition + 4 call lines + 2 import lines |
+| Call expressions | **5** | 4 call lines, because `geometry.py:43` contains **two** calls |
+| Import references | **2** | `geometry_test.py:32`, `utils.py:57` |
+| Reference facts (calls + imports) | **7** | 5 + 2 |
+
+`1 definition + 5 calls + 2 imports = 8` textual occurrences, so every
+occurrence in the tree is accounted for by exactly one of those three roles.
+
+Evidence: read directly from the pinned files.
+`git grep -n "normalize_vec"` over the whole tree returns exactly the 7 lines
+listed above, and counting the identifier per line yields the 8 occurrences
+(1 + 2 + 1 + 1 + 1 + 1 + 1). **There is no C++ `normalize_vec` anywhere in
+the repository** — the identifier exists only in these three Python files
+under `colmap/benchmark/reconstruction/evaluation/`.
 
 Riltra must report: the definition with the file/line, and the references
-including the import sites. Reporting a C++ `normalize_vec` is a **FAIL**
-(fabricated definition). This case also exercises the Python path end to end
-and must not be answered from the C++ index.
+including the import sites.
+
+- **Required (honesty gate).** The reference count is **7 facts**: 5 call
+  facts (`POTENTIAL_CALL`, heuristic) and 2 import facts. The two calls on
+  `geometry.py:43` are two distinct facts with distinct spans
+  (`43:31` and `43:52`) that happen to share one line; a tool that reports
+  one fact for that line has under-counted and is wrong.
+- **Expected limitation.** A pilot answer that reports 5 call candidates and
+  2 import references over 6 lines, and states that Python import
+  relationships are recorded as import facts rather than resolved
+  definitions, is the **correct** answer.
+- **FAIL conditions.** Reporting a C++ `normalize_vec` (fabricated
+  definition); reporting 4 call facts where 5 call expressions exist
+  (under-count caused by the two calls on one line); or reporting the
+  identifier's total occurrence count (8) as the reference count.
 
 ### B.2 Cross-file callers and callees around `PatchMatch`
 
@@ -641,7 +719,9 @@ Objective criteria:
    candidate is presented as a proven reference to one specific method.
 3. A search for `normalize_vec` returns the Python definition
    `colmap/benchmark/reconstruction/evaluation/geometry.py:34`; no C++
-   `normalize_vec` is reported.
+   `normalize_vec` is reported. Its reference set is **7 facts** — 5 call
+   facts (4 lines, because `geometry.py:43` holds two calls) and 2 import
+   facts — and not the 8 textual occurrences (§B.1 B3).
 4. A search for the bare name `Run` returns **multiple** distinct `Run`
    identities with distinct locations, not one merged symbol.
 5. The repository identity and a freshness verdict are present.
@@ -934,3 +1014,52 @@ CP2 is not authorized by this document. It needs its own OWNER GO.
     were re-read directly in the isolated snapshot for this revision —
     including the `PrintOption` definitions, the `.Print()` and `Run` call
     sites, and the columns of the `patch_match.cc` anchors.
+- A targeted CP1 correction round (2026-10-20), on owner instruction, with
+  the evidence for each change:
+  - **Python ground truth (§B.1 B3, §D.1).** The `normalize_vec` counts were
+    conflated. Re-measured in the pinned snapshot: **1** definition
+    (`geometry.py:34:5`), **5** call expressions on **4** source lines
+    (`geometry.py:43:31` and `geometry.py:43:52` are two calls on the *same*
+    line; `geometry_test.py:38:22`, `:44:22`, `:51:22`), **2** import
+    references (`geometry_test.py:32:23`, `utils.py:57:23`) — i.e. **8**
+    textual occurrences over **7** source lines in 3 files, and **7**
+    reference facts. The previous text said "four call sites … six
+    locations". The three quantities are now tabulated separately, and the
+    acceptance expectation states the reference count as 7 facts, with
+    under-counting the two-calls-on-one-line case named as a FAIL condition.
+    Evidence: `git grep -n "normalize_vec"` over the whole pinned tree
+    (7 lines) plus a per-line occurrence count (8).
+  - **Incremental/full parity contract (§A.7, and design gate §3.2).** The
+    requirement that a full rebuild produce "byte-identical counters" to the
+    incremental run was wrong: `mode`, `reused` and `reparsed` are
+    mode-specific by construction — a full build sets `reused: 0` and
+    `reparsed` = files processed (`crates/cli/src/index.rs:340-363`), an
+    incremental run reuses the unchanged files (`:664-709`). The M4 evidence
+    that the requirement cited is a *fact* parity gate
+    (`docs/m4-validation.md`: "files, definitions, imports, unresolved call
+    candidates (names, kinds, spans, byte offsets, digests, provenance) —
+    plus CLI search-output parity after volatile-field normalization. Any
+    unexplained fact difference would be FAIL"), and the byte-identical
+    counters recorded there are the fact counters (170,586 / 64,954 /
+    562,384 / 152,543), not the operational ones. The same holds for the
+    in-repo guard test `incremental_matches_independent_full_rebuild`
+    (`crates/cli/src/index.rs:2812-2997`, "incremental must equal full"),
+    which compares files, symbols, imports and calls. Both documents now
+    state the five-point contract: same tree and configuration; fact parity
+    (definitions, imports, call candidates, spans, digests, relevant query
+    results); total fact counters compared on the same basis; operational
+    counters recorded and validated per mode; any unexplained fact
+    difference is a FAIL. `docs/m4-validation.md` and the frozen M8/CP7-A
+    evidence were not modified.
+  - **Isolated-clone procedure (§A.2).** The `GIT_CLONE_PROTECTION_ACTIVE=false`
+    override was audited and removed. A plain
+    `git clone https://github.com/RyanAraaful/mmsp.git` completes with exit 0
+    and yields a clean clone (`HEAD` = `7c1b1ce…`, porcelain empty), and a
+    plain clone of `RyanAraaful/riltra` also succeeds — so the recorded
+    rationale ("a repo with `core.hooksPath` set breaks a plain clone") does
+    not reproduce; `core.hooksPath` is a local config and is not propagated
+    by a clone. The variable is not a documented Git or `gh` setting. The
+    procedure now uses a normal clone, and states that any future need for
+    an override must be scoped to the single command and justified with the
+    exact error output. The MMSP snapshot remains an isolated clone outside
+    both repositories, and the original MMSP repository was not modified.

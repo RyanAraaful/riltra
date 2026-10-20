@@ -371,7 +371,15 @@ M9 continues from the identical commit, which keeps the baseline continuous.
 - One-file incremental delta: time, `reparsed` = 1, fact parity vs the
   pre-edit state.
 - Full rebuild comparison after the delta: independent `--full` on the same
-  final tree; counters must be byte-identical to the incremental result.
+  final tree, same configuration, built into a fresh home. **Fact parity is
+  the requirement**: definitions, imports, call candidates (names, kinds,
+  spans, byte offsets, digests, provenance) and the relevant query outputs
+  must match after volatile-field normalization, and the total fact counters
+  must be equal on the same basis. The operational counters (`mode`,
+  `reused`, `reparsed`) are recorded and validated **per mode** — a full
+  rebuild re-parses everything, an incremental run reuses the unchanged
+  files — they are not expected to be identical. Any unexplained fact
+  difference is a FAIL.
 - Warm queries: frozen query list (search, index status, callers, callees,
   trace, impact) with ≥5 repetitions each; report p50/p95 and the exact
   commands; freshness-check cost included and noted.
@@ -618,7 +626,9 @@ Matrix summary (release-gate status at M9 entry; details per gate below):
   measurably faster; numbers are reproducible with recorded host/toolchain.
 - **Existing evidence.** M4 parity gate; MMSP numbers (~210.8 s full;
   15.3–15.8 s no-op ≈13.6×; one-file delta 15.3 s ≈13.5×; byte-identical
-  counters; isolated 18k-file copy; MMSP porcelain 0).
+  counters — the *fact* counters (definitions / imports / call candidates /
+  errors), not the operational `reused`/`reparsed` counters, which are
+  mode-specific (see §3.2); isolated 18k-file copy; MMSP porcelain 0).
 - **Provable via MMSP.** Yes — re-run the M4-style procedure per §3.2 on the
   M9 pin.
 - **Needs Riltra/fixtures.** Procedure doc; isolated copy; repetition policy.
