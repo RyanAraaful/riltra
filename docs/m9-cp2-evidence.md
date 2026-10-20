@@ -1,8 +1,8 @@
 # M9 CP2 — MMSP pilot validation and targeted correctness fix
 
-**Status: CP2 EXECUTED — AWAIT INDEPENDENT AUDIT AND OWNER GO.** Executed
-2026-10-20 on `m9-multirepo-release-candidate`, under the owner directive
-"Proceed to CP2 after independent CP1 PASS".
+**Status: CP2 EXECUTED — AUDIT CORRECTIONS APPLIED — AWAIT INDEPENDENT AUDIT
+AND OWNER GO.** Executed 2026-10-20 on `m9-multirepo-release-candidate`,
+under the owner directive "Proceed to CP2 after independent CP1 PASS".
 
 CP2 validates Riltra against the frozen MMSP pilot, grades the five CP1
 workflows for **honesty** and **capability** separately, and fixes one
@@ -10,16 +10,28 @@ reproducible defect. One further defect is **measured, specified and
 escalated** instead of implemented, because closing it changes the import
 graph rather than a single fact (§9, E8).
 
+**Audit corrections (2026-10-20, same branch).** An independent audit found
+that the C++ direct-initialization capture asserted a constructor call in
+cases where C++ reads the declaration as a function declaration, and that the
+grading script turned vacuous evidence into `PASS`. Both are corrected here:
+§9.4 (the corrected capture, with compiler and Tree-sitter evidence),
+§3 (the corrected grading), §10 (the corrected decision package). The
+original CP2 raw evidence is preserved unchanged in
+[`pilots/cp2/raw/`](pilots/cp2/raw/); the corrected measurements are in
+[`pilots/cp2/raw-audit/`](pilots/cp2/raw-audit/). Where the two differ, the
+audit numbers govern.
+
 - Branch: `m9-multirepo-release-candidate`
 - Pilot: MMSP `RyanAraaful/mmsp` at `d62f06a576d8e76b705c8ecc57fc380f7ebc9c44` (owner decision D-M9-1, unchanged)
 - Design gate: [`m9-design-gate.md`](m9-design-gate.md) Revision 3
-- CP1 spec: [`m9-cp1-pilot-spec.md`](m9-cp1-pilot-spec.md) (corrected)
+- CP1 spec: [`m9-cp1-pilot-spec.md`](m9-cp1-pilot-spec.md) (corrected, not reopened)
 - Raw evidence: [`pilots/cp2/`](pilots/cp2/) (redacted; no machine-local path, no credential)
 - CP3 was **not** started.
 
-Status vocabulary: **PASS / FAIL / BLOCKED / UNMET / NOT YET VERIFIED**.
-A correct `UNKNOWN`, `partial` or `POTENTIAL_CALL` is **evidence of honest
-behaviour, not evidence that a capability requirement has passed**.
+Status vocabulary: **PASS / FAIL / BLOCKED / UNMET / UNAVAILABLE**. A correct
+`UNKNOWN`, `partial` or `POTENTIAL_CALL` is **evidence of honest behaviour,
+not evidence that a capability requirement has passed**. `UNAVAILABLE` means
+the evidence itself could not be obtained; it is not a `PASS`.
 
 ---
 
@@ -54,15 +66,25 @@ tracked source at the pin.
 | pre-fix 1 | debug | 192.3 s | — | 49 225 728 | 89 819 |
 | pre-fix 2 | debug | 166.5 s | — | 49 225 728 | 89 819 |
 | pre-fix 3 | debug | 185.0 s | 121.6 MiB | 49 225 728 | 89 819 |
-| **post-fix 1** | debug | **155.8 s** | — | 50 462 720 | **91 957** |
-| **post-fix 2** | debug | **156.8 s** | — | 50 462 720 | **91 957** |
-| **post-fix (release)** | release | **46.7 s** | 121.1 MiB | 50 462 720 | 91 957 |
+| post-fix (first capture, superseded) | debug | 155.8 s / 156.8 s | — | 50 462 720 | 91 957 |
+| post-fix (release, first capture, superseded) | release | 46.7 s | 121.1 MiB | 50 462 720 | 91 957 |
+| **corrected capture (audit)** | debug | **160.0 s** | — | 50 238 592 | **91 025** |
+| **corrected capture (audit)** | release | **23.8 s** | 120.3 MiB | 50 238 592 | **91 025** |
 
-Two independent cold runs (D-M9-3) were made after the fix; a third
+Two independent cold runs (D-M9-3) were made after the first fix; a third
 independent run measured the indexer's own peak working set (the harness
 otherwise measures the child shell). Wall-time variance on this host is
 large — an independent debug rebuild in the same session took 336.5 s under
-contention — so the numbers are reported per run, never as a single mean.
+contention, and the release cold index measured 46.7 s under contention but
+**23.8 s on an idle host** — so the numbers are reported per run with their
+load condition, never as a single mean.
+
+The audit re-ran the cold index with the corrected capture (§9.4). The
+call count falls from 91 957 to **91 025**: the 932 facts that the first
+capture asserted from the most-vexing-parse form are withdrawn, because C++
+reads those declarations as function declarations unless a name lookup proves
+otherwise. Every other counter is unchanged. The corrected index is smaller
+by 224 128 bytes, consistent with the withdrawn facts.
 
 ### 2.2 Processing counters (identical in every run, pre- and post-fix)
 
@@ -72,7 +94,7 @@ contention — so the numbers are reported per run, never as a single mean.
 | `files.processed` | **1 438** | = CP1 §A.5 "Riltra-parsed extensions" |
 | `files.definitions` | 12 105 | — |
 | `files.imports` | 6 680 | — |
-| `files.calls` | **91 957** (89 819 pre-fix) | +2 138 from the §9 defect fix |
+| `files.calls` | **91 025** (89 819 pre-fix) | +1 206 from the §9 defect fix (the sound direct-initialization form only) |
 | `files.errors` | 1 991 | — |
 | `files.skipped_binary` | 4 | — |
 | `files.unsupported` | 835 | = (489 CUDA + 350 other) − 4 binary |
@@ -82,8 +104,8 @@ contention — so the numbers are reported per run, never as a single mean.
 
 | | Files | Definitions | Imports | Calls | Parse errors | Files with errors |
 |---|---|---|---|---|---|---|
-| First-party | 813 | 8 015 | 4 491 | 74 770 | 593 | **55 of 813** |
-| Third-party | 625 | 4 090 | 2 189 | 15 049 | 1 398 | 96 of 625 |
+| First-party | 813 | 8 015 | 4 491 | 75 900 | 593 | **55 of 813** |
+| Third-party | 625 | 4 090 | 2 189 | 15 125 | 1 398 | 96 of 625 |
 
 **55 first-party files with parse errors reproduces the M2 historical figure
 exactly** ("152,543 errors across 5,481 files, of which only 55 are
@@ -95,17 +117,45 @@ agree on the meaningful signal even though the tree is much smaller.
 ## 3. Ground-truth correctness — the five CP1 workflows
 
 Grading is mechanical (`pilots/cp2/method/grade.cjs`) against the frozen
-CP1 §D criteria. Each workflow carries an **honesty gate** (is the answer
-trustworthy?) and a **capability gate** (does the answer cover what a GitNexus
-alternative must cover?).
+CP1 §D criteria. Each workflow carries an
+**honesty gate** (is the answer trustworthy?), a **capability gate** (does the
+answer cover what a GitNexus alternative must cover?) and, where the evidence
+itself is missing, an **evidence verdict**.
 
-| Workflow | Honesty gate | Capability gate |
-|---|---|---|
-| 1. Find a symbol and its references | **PASS** (5/5) | **UNMET** |
-| 2. Callers and callees | **PASS** (5/5) | **UNMET** |
-| 3. Trace a call path | **PASS** (3/3) | **UNMET** |
-| 4. Impact of a change | **PASS** (3/3) | **UNMET** |
-| 5. Natural-language question via OpenCode/MCP | **PASS** (server side, §7) | **UNMET** |
+The audit corrected the grader (`pilots/cp2/method/grade.cjs`, with
+`grade.test.cjs` as its regression test). The corrections:
+
+- a parse error is **never** a `PASS`; the verdict becomes `UNAVAILABLE` and
+  records the reason the tool gave;
+- an error is classified by its **actual** reason. The CUDA terminus is
+  unavailable because CUDA sources are not indexed (`cuda-unsupported`), not
+  because the source changed (`source-changed` is what the tool's own message
+  says);
+- an impact verdict must be **exactly** `UNKNOWN`, not merely "not SAFE";
+- an empty array is **never** proof of completeness: a criterion that
+  inspects the returned items needs at least one item, otherwise the verdict
+  is `UNAVAILABLE` with the reason `no-reference-returned`;
+- a capability gap is `UNMET`, an unavailable piece of evidence is
+  `UNAVAILABLE`, and the two are never mixed.
+
+| Workflow | Honesty gate | Capability gate | Evidence |
+|---|---|---|---|
+| 1. Find a symbol and its references | **PASS** (5/5) | **UNMET** | — |
+| 2. Callers and callees | **UNAVAILABLE** (4 PASS, 1 UNAVAILABLE) | **UNMET** | — |
+| 3. Trace a call path | **PASS** (3/3) | **UNMET** | **UNAVAILABLE** (cuda-unsupported) |
+| 4. Impact of a change | **PASS** (3/3) | **UNMET** | — |
+| 5. Natural-language question via OpenCode/MCP | **PASS** (server side, §7) | **UNAVAILABLE** (agent side blocked) | **UNAVAILABLE** (provider-auth-403) |
+
+Totals over the 23 checks: **17 honesty PASS, 1 honesty UNAVAILABLE, 4
+capability UNMET, 2 evidence UNAVAILABLE** — and **no check is a vacuous
+`PASS`**.
+
+The one honesty check that is `UNAVAILABLE` is D2-H5 ("the option-manager
+address-of site is not presented as a call to `max_triangulation_angle`"): the
+query returns **no** edge at all, so there is nothing to inspect. The
+criterion is neither confirmed nor refuted, and the earlier `PASS` was
+vacuous. The underlying behaviour is unchanged and correct (no edge names the
+option), but the honest verdict for *that criterion alone* is `UNAVAILABLE`.
 
 ### 3.1 Workflow 1 — find a symbol and its references
 
@@ -135,7 +185,7 @@ endpoint (`callee: null`); C++ identity needs a semantic provider (E1/E7).
 
 ### 3.2 Workflow 2 — callers and callees
 
-Honesty **PASS**:
+Honesty **PASS** (4 of the 5 checks; the fifth is `UNAVAILABLE`, see §3):
 
 - `callees` at `patch_match.cc:191:18` (`PatchMatch::Run`) returns exactly
   the 4 expected candidates, including the `PatchMatchCuda` construction and
@@ -147,14 +197,17 @@ Honesty **PASS**:
 - The `ThreadPool` dispatch to `ProcessProblem` is never presented as a
   proven `CALLS` edge.
 - The `option_manager.cc:1019` address-of site is not presented as a call
-  to `max_triangulation_angle`.
+  to `max_triangulation_angle` — but the query returns **no** edge, so the
+  criterion is `UNAVAILABLE` rather than a vacuous `PASS`.
 
 Capability **UNMET**: the three external `PatchMatchController` construction
-sites are not attributed to the class. Two of them
-(`exe/mvs.cc:271`, `automatic_reconstruction.cc:431`) are now captured as
-call facts by the §9 fix, but the `callers` query still cannot reach them
-because the *candidate caller files* for an anchor are only the anchor's own
-file plus the files whose **import text mentions the anchor's
+sites are not attributed to the class. The corrected capture (§9.4) records
+the *sound* direct-initialization calls only, and all three construction
+sites use the most-vexing-parse form (`PatchMatch patch_match(patch_match_options, problem);`
+— the arguments are identifiers, so only a name lookup can say whether they
+are types or variables). The `callers` query could not reach them in any
+case, because the *candidate caller files* for an anchor are only the
+anchor's own file plus the files whose **import text mentions the anchor's
 repository-relative path** — and MMSP's C++ includes are rooted at
 `colmap/src/`, so that match never succeeds (E8). The third site
 (`dense_reconstruction_widget.cc:397-398`) is a `make_shared`/`make_unique`
@@ -168,6 +221,11 @@ is present, the path does not claim a device-side definition, and the
 query aimed at the CUDA terminus fails cleanly
 (`error: anchor unresolved: source-changed; reindex before syntax fallback`,
 exit 3) instead of inventing a path.
+
+Evidence **UNAVAILABLE** for the CUDA terminus, with the real reason: Riltra
+does not index CUDA sources (835 unsupported files, 489 of them CUDA), so the
+`.cu` anchor can never resolve. The tool's own message says `source-changed`;
+the actual cause is `cuda-unsupported`. The two are recorded separately.
 
 Capability **UNMET**: the trace returns 21 **single-edge** paths (the direct
 callees of the anchor) and cannot extend to the 4-hop frozen chain
@@ -195,9 +253,13 @@ symbol is safe.**
 
 ### 3.5 Workflow 5 — natural-language question via OpenCode/MCP
 
-Honesty **PASS** on the server side: see §7. Capability **UNMET**: the
-option's wiring is not discoverable through the tools, for the reasons in
-§3.2 and §3.4.
+Honesty **PASS** on the **server side** only: the MCP surface answers, the
+repository identity is present, and an unknown repository returns a
+classified error (§7). The **agent side is BLOCKED**: the OpenCode free tier
+refuses a nested CLI session, so no LLM ever interpreted the question
+through the tools (§7.3). The capability verdict is therefore
+`UNAVAILABLE`, not `UNMET`: the evidence was never produced. What the tools
+can and cannot show is in §3.2 and §3.4.
 
 ---
 
@@ -223,11 +285,13 @@ to the pin afterwards (HEAD `d62f06a…`, porcelain 0).
 
 ## 5. Incremental correctness (CP1 §A.7 five-point contract)
 
+The audit re-ran the whole step with the corrected capture:
+
 | Run | Mode | `reused` | `reparsed` | `fallback_reason` | Wall | Fact counters |
 |---|---|---|---|---|---|---|
-| no-op refresh | `incremental` | 1 438 | 0 | `none` | 51.9 s | 2 277 / 1 438 / 12 105 / 6 680 / 91 957 / 1 991 |
-| one-file delta | `incremental` | 1 437 | 1 | `none` | 52.8 s | identical |
-| independent full rebuild (fresh home, same tree) | `full` | 0 | 1 438 | `forced-full` | 336.5 s | identical |
+| no-op refresh | `incremental` | 1 438 | 0 | `none` | 52.1 s | 2 277 / 1 438 / 12 105 / 6 680 / 91 025 / 1 991 |
+| one-file delta | `incremental` | 1 437 | 1 | `none` | 65.0 s | identical |
+| independent full rebuild (fresh home, same tree) | `full` | 0 | 1 438 | `forced-full` | 166.5 s | identical |
 
 Same-tree fact parity, computed as order-independent digests over the index
 database (files with content digests, symbols, imports, calls with spans and
@@ -238,12 +302,15 @@ provenance, and the edge set):
 | `files` | 1 438 / 1 438 | **yes** |
 | `symbols` | 12 105 / 12 105 | **yes** |
 | `imports` | 6 680 / 6 680 | **yes** |
-| `calls` | 91 957 / 91 957 | **yes** |
-| `code_edges` | 98 637 / 98 637 | **yes** |
+| `calls` | 91 025 / 91 025 | **yes** |
+| `code_edges` | 97 705 / 97 705 | **yes** |
 
-The query outputs of the two homes are identical after normalizing the
-volatile snapshot fields (`id`, `nonce`, `revision`, `created_unix`); the
-only raw difference is the snapshot creation timestamp.
+The 12 query outputs of the two homes are identical after normalizing the
+volatile snapshot metadata (`id`, `created_unix`, `nonce`, `revision`,
+`added_unix`); the only raw difference is the snapshot creation timestamp.
+The comparison **aborts** if a query exits non-zero, prints nothing, or
+differs — the harness can no longer report a match it did not measure
+(§11.1).
 
 **Contract result:** same tree and configuration, fact parity, equal total
 fact counters, operational counters validated per mode, and no unexplained
@@ -261,31 +328,43 @@ symbol/relationship queries on a small/medium fixture set, explicitly as a
 The pilot here is the ~2 000-file MMSP repository, at the upper end of that
 range. Five repetitions per query, both profiles, on the same host.
 
-| Query | debug p50 / p95 | release p50 / p95 | vs 500 ms p95 |
-|---|---|---|---|
-| `search --symbol PatchMatch` | 1 266 / 1 455 ms | 752 / **1 103** ms | missed |
-| `search --symbol Run` | 1 382 / 1 443 ms | 765 / **1 049** ms | missed |
-| `callers` (Print definition) | 2 553 / 2 739 ms | 1 152 / **1 186** ms | missed |
-| `callees` (PatchMatch::Run) | 2 621 / 2 636 ms | 1 116 / **1 149** ms | missed |
-| `trace --depth 4` | 2 259 / 2 287 ms | 1 191 / **1 222** ms | missed |
-| `impact` (option member) | 2 123 / 2 182 ms | 1 104 / **1 141** ms | missed |
-| `index status` | 1 453 / 1 459 ms | 786 / 881 ms | missed |
-| `repo status` | 769 / 807 ms | 879 / 1 135 ms | missed |
+The CP2 release numbers were measured while the host was busy; the audit
+re-measured them on an idle host with the corrected binary, which is **not
+comparable** to the debug column of the same table either. Both are given,
+with the load condition, because the difference is the measurement itself:
 
-**Diagnostic finding: the warm-query p95 target is missed by roughly 2.1× to
-2.4× even in the release profile.** The cost is dominated by fixed
-per-invocation work, not by the graph: `repo status` — which only reads the
-git fingerprint — already costs 0.88 s at p50 in release, so process
-start-up, the `git` subprocess and the database open dominate every
-query. The index itself is not the bottleneck (the cold index is 46.7 s in
-release and a no-op refresh is 51.9 s in debug).
+| Query | release p50 / p95 (idle host, audit) | release p50 / p95 (CP2, under load) | vs 500 ms p95 (audit) |
+|---|---|---|---|
+| `search --symbol PatchMatch` | 536 / **544** ms | 752 / 1 103 ms | missed by 1.09× |
+| `search --symbol Run` | 534 / **537** ms | 765 / 1 049 ms | missed by 1.07× |
+| `callers` (Print definition) | 856 / **1 001** ms | 1 152 / 1 186 ms | missed by 2.00× |
+| `callees` (PatchMatch::Run) | 897 / **989** ms | 1 116 / 1 149 ms | missed by 1.98× |
+| `trace --depth 4` | 884 / **1 007** ms | 1 191 / 1 222 ms | missed by 2.01× |
+| `impact` (option member) | 723 / **738** ms | 1 104 / 1 141 ms | missed by 1.48× |
+| `index status` | 517 / **522** ms | 786 / 881 ms | missed by 1.04× |
+| `repo status` | 309 / **315** ms | 879 / 1 135 ms | met |
+
+**Diagnostic finding: the warm-query p95 target is missed by 1.04× to 2.01×
+even in the release profile on an idle host.** The earlier CP2 figures
+(2.1×–2.4×) were inflated by host contention and must not be quoted as the
+product's cost.
+
+The cause is **a hypothesis, not a measured fact**. The measurements are
+consistent with a large fixed per-invocation cost: `repo status`, which only
+reads the git fingerprint, costs 0.31 s at p50, and `index status` 0.52 s,
+while the graph queries cost 0.72–0.90 s at p50. That *suggests* process
+start-up, the `git` subprocess and the database open dominate, rather than
+the graph traversal — but the audit did **not** profile the query path, so
+the split between the fixed cost and the traversal is unmeasured. What is
+measured: the cold index takes 23.8 s in release, a no-op refresh 52.1 s in
+debug, and every warm query costs 0.54–1.01 s at p95 in release.
 
 No release gate is proposed from these numbers. The options are an owner
-decision: (a) accept the current cost and document it, (b) reduce the fixed
-per-invocation cost (e.g. avoid the git subprocess when the snapshot
-fingerprint can be reused), or (c) restate the §14.3 target for a ~2 000-file
-C++ repository. Changing the target is a blueprint decision, not a CP2
-decision.
+decision: (a) accept the current cost and document it, (b) profile the
+per-invocation cost and then reduce it (e.g. avoid the git subprocess when
+the snapshot fingerprint can be reused), or (c) restate the §14.3 target for
+a ~2 000-file C++ repository. Changing the target is a blueprint decision,
+not a CP2 decision.
 
 ---
 
@@ -310,7 +389,9 @@ wired from the command line into the source-image selection, and which files
 would I need to touch to change its default?"* — was turned into the tool
 sequence an agent would run, and that sequence was executed against the live
 MCP server (9 calls, archived verbatim in
-`pilots/cp2/raw/mcp/d5-tool-sequence.json`):
+`pilots/cp2/raw/mcp/d5-tool-sequence.json` for the CP2 run and in
+`pilots/cp2/raw-audit/mcp/d5-tool-sequence.json` for the audit run, with
+identical results):
 
 | Step | Tool | Result |
 |---|---|---|
@@ -395,18 +476,13 @@ both forms were invisible.
 
 `crates/cli/src/syntax.rs` only:
 
-- a C++ `declaration` is now examined for the direct-initialization shape,
-  and when it is a **local** declaration (inside a function or lambda body,
-  where C++ does not allow a function declaration) the constructor call is
-  recorded as a call fact: the call range runs from the called type to the
-  end of the argument list, the callee is the type, and the terminal is the
-  type's last name part;
+- a C++ `declaration` is now examined for the direct-initialization shape:
+  when the declarator is an `init_declarator` whose value is an
+  `argument_list`, the constructor call is recorded as a call fact — the
+  call range runs from the called type to the end of the argument list, the
+  callee is the type, and the terminal is the type's last name part;
 - the owner proof records the same range, so the new calls get a proven
   enclosing definition like every other call.
-
-Guards, each with a regression test: a primitive type (`int x(5);`) is not a
-call; a namespace-scope prototype is not a call; a class-member declaration
-is not a call; a declaration inside a `#if/#else` branch is a call.
 
 The fix adds **no** dependency, **no** schema change, **no** edge kind and
 **no** promotion: the new facts are `POTENTIAL_CALL` / `precision:"Heuristic"`
@@ -415,23 +491,70 @@ callee endpoint stays unresolved.
 
 ### 9.3 Effect (measured)
 
-| | Before | After |
+| | Before | After (corrected) |
 |---|---|---|
-| `files.calls` on the pilot | 89 819 | **91 957** (+2 138) |
+| `files.calls` on the pilot | 89 819 | **91 025** (+1 206) |
 | Other fact classes | — | unchanged (definitions 12 105, imports 6 680, errors 1 991, files 1 438) |
-| `exe/mvs.cc:271` | absent | `mvs::PatchMatchController` call fact |
-| `automatic_reconstruction.cc:431` | absent | `mvs::PatchMatchController` call fact |
-| `patch_match.cc:670` | absent | `PatchMatch` call fact |
-| Regression tests | — | **7** new unit tests in `syntax.rs` (3 fail before the fix) |
-| `cargo test --locked` | 641 passed | **647 passed / 0 failed** (8 suites) |
+| Regression tests | — | **11** C++ unit tests in `syntax.rs` |
 | `cargo fmt --check`, `cargo clippy -D warnings` | clean | clean |
 
 The M2/M6 goldens are **byte-unchanged**: the frozen C++ fixtures contain
 no direct-initialization form, so no golden was edited.
 
-The construction sites are now *present* as candidates. They are still not
-*attributed* to the class, because the candidate-caller scope of a C++
-include is empty (E8) and the third site is a template instantiation (E7).
+### 9.4 Audit correction — the most-vexing-parse form is not a constructor call
+
+The first version of this fix also recorded the `function_declarator` form
+(`T v(a, b);` with type-looking arguments) as a constructor call whenever the
+declaration was inside a function body, on the premise that "a function
+declaration is not legal C++ inside a block". **That premise is false, and
+the capture produced false facts.** The audit verified the C++ semantics
+with a compiler (MSVC 19.34, `/std:c++20`) and the grammar with Tree-sitter:
+
+| Source | C++ reading (compiler-verified) | Tree-sitter shape | First capture | Corrected |
+|---|---|---|---|---|
+| `Widget w(1);` | a variable, i.e. a constructor call | `init_declarator` → `argument_list(number_literal)` | call ✓ | call ✓ |
+| `Widget w(int);` | **a function declaration** (`w` has type `Widget(int)`) | `function_declarator` → `parameter_list(primitive_type)` | call ✗ | not a call ✓ |
+| `Widget w();` | **a function declaration** (`Widget(void)`) | `function_declarator` → empty `parameter_list` | call ✗ | not a call ✓ |
+| `Widget w(T());` | **a function declaration** (`Widget(T(void))`) | `function_declarator` → `parameter_declaration` + `abstract_function_declarator` | call ✗ | not a call ✓ |
+| `Widget w(options, problem);` | **ambiguous**: a function declaration if the names denote types, a variable if they denote variables | `function_declarator` → `parameter_list(type_identifier…)` | call ✗ | not a call (ambiguity reported, §9.5) |
+| `void helper(int);` in a block | legal C++ (a block-scope function declaration) | `function_declarator` | not a call ✓ | not a call ✓ |
+| `Widget w;` | a variable | plain `identifier` | not a call ✓ | not a call ✓ |
+| `Widget w{1};` | a variable (a constructor call) | `init_declarator` → `initializer_list` | not a call (missed) | not a call (missed) |
+
+The compiler check: taking the address of the declared name compiles only for
+a variable; `Widget w(int);` yields `error C2440: cannot convert from
+'Widget (__cdecl *)(int)' to 'Widget *'`, i.e. `w` is a function.
+
+**The rule the corrected code implements**: only the `init_declarator` form
+with an `argument_list` value is a constructor call, because there the
+arguments are *expressions* and C++ therefore reads the declaration as a
+variable definition. The `function_declarator` form is never asserted:
+
+- when a parameter is syntactically a type (`int`, `T()`), the declaration is
+  a function declaration (compiler-verified above);
+- when the parameters are plain identifiers, only a **name lookup** can tell a
+  variable definition from a function declaration — that is a semantic
+  question, and Riltra has no semantic provider (E1/E7).
+
+Effect of the correction on the pilot: the facts asserted from the
+ambiguous form (**932**) are withdrawn and the sound form is kept
+(**+1 206** over the pre-fix baseline). The three MMSP construction sites
+named in §9.1 use the ambiguous form, so they are **not** captured — the
+audit withdraws the earlier claim that they are "now present as candidates".
+
+The corrected code also removes the scope test it no longer needs: a
+block-scope function declaration is legal C++, so the scope never settled
+the question.
+
+### 9.5 The ambiguity is reported, not resolved
+
+Where the syntax cannot decide, Riltra records **no** constructor call and
+says so. The evidence is the absence of the fact plus the anchor uncertainty
+the queries already report (`syntax-only anchor: no semantic identity at this
+position`); the audit did not add a new field, a new edge kind or a new
+label, so the schema and the edge taxonomy are unchanged. Closing this gap
+needs a name lookup — i.e. the semantic provider that E1/E7 already mark as
+owner-gated.
 
 ---
 
@@ -441,50 +564,60 @@ include is empty (E8) and the third site is a template instantiation (E7).
 
 | Workflow | Honesty | Capability | Evidence |
 |---|---|---|---|
-| 1. Find a symbol + references | **PASS** | **UNMET** | §3.1; `raw/queries/d1-*.json` |
-| 2. Callers / callees | **PASS** | **UNMET** | §3.2; `raw/queries/d2-*.json` |
-| 3. Trace | **PASS** | **UNMET** | §3.3; `raw/queries/d3-*.json` |
-| 4. Impact | **PASS** | **UNMET** | §3.4; `raw/queries/d4-*.json` |
-| 5. NL question via OpenCode/MCP | **PASS** (server) | **UNMET** | §7; agent side BLOCKED |
+| 1. Find a symbol + references | **PASS** (5/5) | **UNMET** | §3.1; `raw-audit/queries/d1-*.json` |
+| 2. Callers / callees | **UNAVAILABLE** (4 PASS, 1 UNAVAILABLE) | **UNMET** | §3.2; `raw-audit/queries/d2-*.json` |
+| 3. Trace | **PASS** (3/3) | **UNMET** | **UNAVAILABLE** (cuda-unsupported); §3.3 |
+| 4. Impact | **PASS** (3/3) | **UNMET** | §3.4; `raw-audit/queries/d4-*.json` |
+| 5. NL question via OpenCode/MCP | **PASS** (server side only) | **UNAVAILABLE** | **UNAVAILABLE** (provider-auth-403); §7 |
 | Freshness F0–F5 | **PASS** (5/5) | n/a | §4; `raw/freshness/` |
-| Incremental parity | **PASS** | n/a | §5; `raw/incremental/` |
-| MCP surface / purity / error / isolation | **PASS** | n/a | §7.1; `raw/mcp/` |
-| OpenCode session (agent side) | **BLOCKED** | **NOT YET VERIFIED** | §7.3 |
-| Warm-query SLO (diagnostic) | — | **MISSED** (2.1–2.4×) | §6 |
+| Incremental parity | **PASS** | n/a | §5; `raw-audit/incremental/` |
+| MCP surface / purity / error / isolation | **PASS** | n/a | §7.1; `raw-audit/mcp/` |
+| OpenCode session (agent side) | **BLOCKED** | **UNAVAILABLE** | §7.3 |
+| Warm-query SLO (diagnostic) | — | **MISSED** (1.04–2.01×, idle host) | §6 |
 
 **Riltra is not yet a practical GitNexus alternative for these workflows on
-a C++ repository of this size.** The five workflows are *honest* — nothing
-is fabricated — but three of the five capability gates are unmet, and the
-gap is now measured rather than assumed.
+a C++ repository of this size.** Nothing is fabricated — every answer reports
+what it can support and what it cannot — but **all four capability gates are
+unmet**, the agent side of workflow 5 could not be measured at all, and one
+honesty criterion has no evidence to inspect. The gap is now measured rather
+than assumed.
 
 ### 10.2 Gap classification
 
 | # | Gap | Class | Severity |
 |---|---|---|---|
 | E1 | C++ semantics absent: no provider, no compilation database in MMSP | **unsupported capability** (owner-gated: clangd deferred by D-M9-2) | release-blocking for resolved C++ call edges |
-| E7 | Reference-level resolution absent: a data member, a member read and a macro argument produce no edge, so `impact` on a field is empty and a trace cannot exceed one hop | **unsupported capability** (owner-gated) | release-blocking for workflow 4 |
-| E8 | C/C++ include-root resolution: the candidate-caller scope of an anchor is built from import texts that mention the anchor's *repository-relative* path, but MMSP's includes are rooted at `colmap/src/`. Measured: **0 of 4 009** quoted C/C++ includes resolve; a unique-suffix rule would resolve **2 993**, 969 are ambiguous and 47 have no match | **implementation defect** — diagnosed, measured, **not fixed here** (see 10.3) | release-blocking for cross-TU C++ callers (workflow 2) |
-| E9 | The warm-query p95 target (§14.3, ≤ 500 ms) is missed by 2.1–2.4× in the release profile; the cost is fixed per-invocation work (git fingerprint, process start, database open), not the graph | **diagnostic**, not a gate | owner decision on the target or on the fixed cost |
-| E10 | The OpenCode free tier refuses nested CLI sessions in this environment, so the agent side of workflow 5 could not be re-measured | **environmental block** | G-MCP re-verification deferred; CP7-A G6 remains the last agent-side evidence |
+| E7 | Reference-level resolution absent: a data member, a member read and a macro argument produce no edge, so `impact` on a field is empty, a trace cannot exceed one hop, and the ambiguous most-vexing-parse form cannot be decided (a name lookup is needed) | **unsupported capability** (owner-gated) | release-blocking for workflow 4 |
+| E8 | C/C++ include-root resolution: the candidate-caller scope of an anchor is built from import texts that mention the anchor's *repository-relative* path, but MMSP's includes are rooted at `colmap/src/`. Measured: **0 of 4 009** quoted C/C++ includes resolve; a unique-suffix rule *would* match **2 993** of them, 969 are ambiguous and 47 have no match | **implementation defect** — diagnosed, measured, **not fixed here** (see 10.3) | release-blocking for cross-TU C++ callers (workflow 2) |
+| E9 | The warm-query p95 target (§14.3, ≤ 500 ms) is missed by 2.1–2.4× in the release profile. The **cause is a hypothesis**: the measurements are consistent with a large fixed per-invocation cost (process start, the `git` subprocess, the database open) rather than with the graph, but the query path was **not profiled**, so the split is unmeasured | **diagnostic**, not a gate | owner decision: profile first, then either the target or the fixed cost |
+| E10 | The OpenCode free tier refuses nested CLI sessions in this environment, so the agent side of workflow 5 could not be measured | **environmental block** | G-MCP re-verification deferred; CP7-A G6 remains the last agent-side evidence |
 | E11 | The repository's own history carries unsanitized local paths (1 068 findings in 9 commits / 184 files, 0 credential-rule findings), inherited from CP1 | **open risk**, unchanged | rewrite still owner-gated |
+| E12 | The C++ most-vexing-parse form cannot be decided from syntax: `T v(a, b);` is a function declaration when `a`/`b` denote types and a variable when they denote variables. Riltra therefore records **no** constructor call for that form (§9.4, §9.5) | **unsupported capability** (needs the name lookup of E1/E7) | the affected constructor calls are missing, not wrong |
 
 ### 10.3 E8 — the smallest defensible options (owner decision required)
 
 CP2 deliberately did **not** implement E8. The fix is small and would
 clearly improve the product, but it changes the **import graph** of every
 C++ repository, not a single fact, and CP1's E7 already classified
-reference-graph work as owner-gated. The options, with their measured
-effect on the pilot:
+reference-graph work as owner-gated.
+
+The numbers below are a **diagnostic projection, not a promise of correct
+resolution**: they count how many quoted includes a unique-suffix rule
+*would* match on this pilot, and they say nothing about whether the matched
+file is the file the compiler would open. The audit did not implement the
+rule and did not measure the resulting query answers, so the effect on the
+workflow gates is **unmeasured**.
 
 - **Option A — unique-suffix include resolution** (smallest): resolve a
   quoted C/C++ include against the indexed files by path suffix when exactly
   one file matches; leave ambiguous (969) and unmatched (47) includes
-  unresolved. Effect on the pilot: 2 993 of 4 009 quoted includes become
-  resolvable, so a header anchor's candidate caller set becomes non-empty
-  and the two direct-initialization construction sites become reachable.
-  Risk: a suffix match can pick the wrong file when the tree contains
-  same-suffix paths; the uniqueness rule bounds this, and the pilot's 969
-  ambiguous cases stay unresolved (honest, not wrong).
+  unresolved. Projection on the pilot: 2 993 of the 4 009 quoted includes
+  would gain a candidate file, so a header anchor's candidate caller set
+  would become non-empty for the first time. Risk: a suffix match can pick
+  the wrong file when the tree contains same-suffix paths; the uniqueness
+  rule bounds this, and the pilot's 969 ambiguous cases stay unresolved
+  (honest, not wrong). **Whether this improves the workflow answers is not
+  measured.**
 - **Option B — read the include roots from the build system** (correct, more
   work): parse `target_include_directories` from CMake, so `colmap/mvs/…`
   resolves against the real root rather than a suffix heuristic. Needs a
@@ -494,8 +627,9 @@ effect on the pilot:
   that cross-TU C++ callers are unavailable and that the workflows are
   limited to same-file relations plus Python-style import scopes.
 
-Any option leaves E1/E7 open: even with the include graph resolved, the
-tool still cannot say *which* `Print` method a call refers to.
+Any option leaves E1/E7/E12 open: even with the include graph resolved, the
+tool still cannot say *which* `Print` method a call refers to, and it still
+cannot decide the most-vexing-parse form without a name lookup.
 
 ### 10.4 Recommended CP3 scope (not started; needs its own OWNER GO)
 
@@ -503,8 +637,9 @@ tool still cannot say *which* `Print` method a call refers to.
    tests and re-measure the affected workflows.
 2. Re-measure the workflows that E8 unblocks (2 and 3 first) and re-grade the
    capability gates.
-3. Decide E9: restate the §14.3 warm-query target for a ~2 000-file C++
-   repository, or reduce the fixed per-invocation cost.
+3. Decide E9: profile the per-invocation cost first, then either restate the
+   §14.3 warm-query target for a ~2 000-file C++ repository or reduce the
+   fixed cost.
 4. Re-run the agent-side G-MCP smoke when the OpenCode free tier allows a
    nested session, or on a host with a paid provider.
 5. Re-baseline the release-readiness matrix for the pinned MMSP snapshot
@@ -517,15 +652,29 @@ tool still cannot say *which* `Print` method a call refers to.
 
 | Artefact | Content |
 |---|---|
-| `pilots/cp2/README.md` | how to reproduce the run |
-| `pilots/cp2/raw/queries/` | the 20 workflow queries, verbatim JSON, plus the class-anchor probes |
-| `pilots/cp2/raw/freshness/` | F0–F5 `index status` and `repo status` documents |
-| `pilots/cp2/raw/incremental/` | no-op, delta, oracle and the same-tree fact digests |
-| `pilots/cp2/raw/perf/` | warm-query timings, debug and release |
-| `pilots/cp2/raw/mcp/` | the MCP stdio smoke, the D.5 tool sequence, stdout capture |
+| `pilots/cp2/README.md` | the archive overview and how to reproduce the run |
+| `pilots/cp2/method/README.md` | how to run the harness, its parameters and its safety rules |
+| `pilots/cp2/method/` | the harness: the path-safety helpers and their tests, the step scripts, the grader and its tests, the digest implementation, the redaction |
+| `pilots/cp2/raw/` | **the original CP2 run, preserved unchanged** (queries, freshness, incremental, perf, MCP, cold index, the first grading) |
+| `pilots/cp2/raw-audit/` | **the audit's corrected run** (queries against the corrected index, the corrected grading, the incremental parity, the MCP smoke, the agent-side session summary) |
 | `pilots/cp2/raw/cold-index*.txt` | the cold-index runs (debug and release) |
-| `pilots/cp2/method/` | the harness scripts used, and the environment record |
+| `pilots/cp2/raw-audit/grading.json` | the corrected grading: 17 honesty PASS, 1 honesty UNAVAILABLE, 4 capability UNMET, 2 evidence UNAVAILABLE |
 
 All archived evidence is redacted: machine-local paths are replaced with
 `<CP2_BENCH>`, `<USERPROFILE>`, `<RILTRA_ROOT>` and `<MMSP_ROOT>`. No
-credential, token or key is present.
+credential, token or key is present. The redaction rule set is
+`pilots/cp2/method/redact.cjs`, which takes the paths to redact as
+arguments, so it carries no machine-local path of its own.
+
+### 11.1 The superseded claim in the original harness
+
+The original `run-all.ps1` compared two fact digests with
+`if ($inc -eq $orc) { "FACT PARITY: IDENTICAL" }`. The digest script it
+called crashed (`node:sqlite` returns row objects, not arrays), both sides
+came back empty, and the comparison reported **IDENTICAL** for two empty
+strings. The audit re-measured the parity with a working, order-independent
+digest (`method/fact-digest.cjs`): the five fact tables are byte-identical
+between the incremental home and an independent full rebuild (§5). The
+superseded line stays in the preserved `raw/cp2-suite.txt` transcript; the
+harness no longer contains the pattern, and `incremental.ps1` now aborts when
+a query errors, prints nothing, or differs.

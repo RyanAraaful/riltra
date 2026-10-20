@@ -1,0 +1,50 @@
+[
+  {
+    "query": "search-PatchMatch",
+    "ms_p50": 536.2,
+    "ms_p95": 543.7,
+    "ms_max": 543.7
+  },
+  {
+    "query": "search-Run",
+    "ms_p50": 534.0,
+    "ms_p95": 537.1,
+    "ms_max": 537.1
+  },
+  {
+    "query": "callers-PrintDef",
+    "ms_p50": 856.3,
+    "ms_p95": 1001.0,
+    "ms_max": 1001.0
+  },
+  {
+    "query": "callees-PatchMatchRun",
+    "ms_p50": 896.5,
+    "ms_p95": 989.4,
+    "ms_max": 989.4
+  },
+  {
+    "query": "trace-depth4",
+    "ms_p50": 884.3,
+    "ms_p95": 1007.4,
+    "ms_max": 1007.4
+  },
+  {
+    "query": "impact-member",
+    "ms_p50": 723.4,
+    "ms_p95": 737.6,
+    "ms_max": 737.6
+  },
+  {
+    "query": "index-status",
+    "ms_p50": 517.1,
+    "ms_p95": 522.2,
+    "ms_max": 522.2
+  },
+  {
+    "query": "repo-status",
+    "ms_p50": 308.8,
+    "ms_p95": 315.0,
+    "ms_max": 315.0
+  }
+]
