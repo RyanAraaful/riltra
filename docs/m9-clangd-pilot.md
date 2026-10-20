@@ -81,6 +81,18 @@ Two limits found in the audit, both confirmed by measurement:
    reports about a file (an unparsable file, an ambiguous call) never reach
    the caller. §7.2.
 
+> **Update (2026-10-21, after the LSP hardening change).** The two
+> statements above describe the adapter **as it was during this pilot**; the
+> raw evidence under `docs/pilots/clangd/raw/` is the frozen measurement and
+> is not edited. The LSP hardening change now keeps the diagnostics payload
+> (severity, code, message, location), bounded and free of absolute paths,
+> and marks a fact `Stale` when the source it was answered about is provably
+> no longer the source on disk. The pilot's measurements themselves are
+> unaffected: they describe the adapter of that day, and the residual limit
+> it found (a server whose index is stale for a file that changed *before*
+> the session) is unchanged by the hardening — a client still cannot see
+> the server's index. See `docs/m9-lsp-hardening.md`.
+
 ---
 
 ## 3. The environment (what was available, what was installed, where)

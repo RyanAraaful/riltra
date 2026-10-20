@@ -1003,6 +1003,52 @@ fn hit_from_fact(fact: &store::SemanticFact, verification: &str) -> SemanticHit 
     }
 }
 
+/// One semantic hit from one provider fact. The fact's own precision and
+/// verification travel with it: a fact the adapter marked stale or
+/// heuristic never reaches the caller as a current, exact fact.
+fn lsp_hit_from_fact(fact: &crate::semantic::Evidence) -> SemanticHit {
+    let span = &fact.location.span;
+    SemanticHit {
+        symbol_uri: None,
+        display_name: None,
+        path: fact.location.path.clone(),
+        start_line: span.start_line,
+        start_col: span.start_col,
+        end_line: span.end_line,
+        end_col: span.end_col,
+        byte_start: span.byte_start,
+        byte_end: span.byte_end,
+        roles: fact.roles.raw,
+        precision: fact.precision.as_str().to_string(),
+        verification: fact.verification.as_str().to_string(),
+    }
+}
+
+/// The verdict of an LSP answer: the weakest fact in it. A fact the adapter
+/// marked stale makes the whole answer stale, never the other way round.
+fn lsp_answer_verification(definitions: &[SemanticHit], references: &[SemanticHit]) -> String {
+    if definitions
+        .iter()
+        .chain(references.iter())
+        .any(|hit| hit.verification == crate::semantic::Verification::Stale.as_str())
+    {
+        crate::semantic::Verification::Stale.as_str().to_string()
+    } else {
+        crate::semantic::Verification::Unverified
+            .as_str()
+            .to_string()
+    }
+}
+
+/// The reason of a failed LSP query. The server may have said why in its
+/// diagnostics, and those must not be lost: they travel with the reason.
+fn lsp_fallback_reason(error: &str, diagnostics: &[String]) -> String {
+    if diagnostics.is_empty() {
+        return error.to_string();
+    }
+    format!("{error}; server diagnostics: {}", diagnostics.join(" | "))
+}
+
 /// Per-import verdict memo: (verification, provider_name, provider_version).
 /// One query resolves each import once no matter how many of its facts
 /// match; the map is created fresh per query — never shared across requests,
@@ -2386,9 +2432,10 @@ pub(crate) fn graph_query_conn(
 }
 
 /// Single-hop live LSP query with an explicit server path. Ephemeral
-/// evidence only: nothing is persisted, every answer is `Unverified`.
-/// Any spawn/query failure becomes an explicit fallback payload (exit 0),
-/// never a fabricated relationship.
+/// evidence only: nothing is persisted, every answer is `Unverified` unless
+/// the adapter could PROVE that the source it was answered about is no
+/// longer the source on disk (`Stale`). Any spawn/query failure becomes an
+/// explicit fallback payload (exit 0), never a fabricated relationship.
 pub fn semantic_query_lsp(
     root: &Path,
     query: &SpanQuery<'_>,
@@ -2419,7 +2466,10 @@ pub fn semantic_query_lsp(
     let answer = match answer {
         Ok(answer) => answer,
         Err(e) => {
-            session.shutdown();
+            // The server failed, but it may have said why: its diagnostics
+            // travel with the fallback reason instead of being dropped.
+            let diagnostics = session.shutdown();
+            let reason = lsp_fallback_reason(&e, &diagnostics);
             return Ok(SemanticQueryOut {
                 definitions: Vec::new(),
                 references: Vec::new(),
@@ -2427,7 +2477,7 @@ pub fn semantic_query_lsp(
                 provider_version: String::new(),
                 verification: "Unverified".to_string(),
                 server_diagnostics: Vec::new(),
-                fallback: Some(e),
+                fallback: Some(reason),
             });
         }
     };
@@ -2442,27 +2492,16 @@ pub fn semantic_query_lsp(
         fallback: None,
     };
     for fact in &answer.facts {
-        let span = &fact.location.span;
-        let hit = SemanticHit {
-            symbol_uri: None,
-            display_name: None,
-            path: fact.location.path.clone(),
-            start_line: span.start_line,
-            start_col: span.start_col,
-            end_line: span.end_line,
-            end_col: span.end_col,
-            byte_start: span.byte_start,
-            byte_end: span.byte_end,
-            roles: fact.roles.raw,
-            precision: crate::semantic::Precision::Heuristic.as_str().to_string(),
-            verification: "Unverified".to_string(),
-        };
+        let hit = lsp_hit_from_fact(fact);
         if query.refs {
             out.references.push(hit);
         } else {
             out.definitions.push(hit);
         }
     }
+    // The answer's own verdict: the weakest fact in it. A fact the adapter
+    // marked stale makes the whole answer stale, never the other way round.
+    out.verification = lsp_answer_verification(&out.definitions, &out.references);
     session.shutdown();
     Ok(out)
 }
@@ -2754,7 +2793,8 @@ pub fn evaluate_snapshot(
 mod tests {
     use super::{
         build, build_full, config_fingerprint, cpp_include_literal, diff_files, evaluate,
-        evaluate_tx, input_fingerprint, suffix_anchors, unique_suffix_match,
+        evaluate_tx, input_fingerprint, lsp_answer_verification, lsp_fallback_reason,
+        lsp_hit_from_fact, suffix_anchors, unique_suffix_match,
     };
     use crate::store;
     use crate::testutil::{git_repo, tmpdir};
@@ -2763,6 +2803,77 @@ mod tests {
         let dir = tmpdir(tag);
         std::fs::write(dir.join("a.py"), b"def f():\n    return g()\n").unwrap();
         dir
+    }
+
+    #[test]
+    fn a_failed_query_reports_the_diagnostics_of_the_server() {
+        // The server may have said why it failed; the reason must not lose it.
+        assert_eq!(
+            lsp_fallback_reason("server error: refused", &[]),
+            "server error: refused"
+        );
+        let with = lsp_fallback_reason(
+            "server error: refused",
+            &["diagnostic: error[pp_file_not_found] main.rs:4".to_string()],
+        );
+        assert!(with.contains("pp_file_not_found"), "{with}");
+        assert!(with.starts_with("server error: refused"), "{with}");
+    }
+
+    #[test]
+    fn lsp_hits_carry_the_facts_own_precision_and_verification() {
+        // A provider fact is never presented as more certain than it is: the
+        // hit travels with the fact's own precision and verification, so a
+        // fact the adapter marked stale cannot reach the caller as current.
+        let mut fact = crate::semantic::Evidence::lsp_location(
+            "a.rs",
+            "digest",
+            crate::semantic::SpanBytes {
+                start_line: 1,
+                start_col: 2,
+                end_line: 1,
+                end_col: 5,
+                byte_start: 10,
+                byte_end: 13,
+            },
+        );
+        let hit = lsp_hit_from_fact(&fact);
+        assert_eq!(hit.precision, "Heuristic");
+        assert_eq!(hit.verification, "Unverified");
+        fact.verification = crate::semantic::Verification::Stale;
+        assert_eq!(lsp_hit_from_fact(&fact).verification, "Stale");
+        fact.verification = crate::semantic::Verification::Unverified;
+        fact.precision = crate::semantic::Precision::Exact;
+        assert_eq!(lsp_hit_from_fact(&fact).precision, "Exact");
+    }
+
+    #[test]
+    fn an_lsp_answer_is_as_certain_as_its_weakest_fact() {
+        // The answer's own verdict never overstates the facts it carries.
+        let fact = crate::semantic::Evidence::lsp_location(
+            "a.rs",
+            "digest",
+            crate::semantic::SpanBytes {
+                start_line: 1,
+                start_col: 2,
+                end_line: 1,
+                end_col: 5,
+                byte_start: 10,
+                byte_end: 13,
+            },
+        );
+        let plain = lsp_hit_from_fact(&fact);
+        assert_eq!(lsp_answer_verification(&[plain], &[]), "Unverified");
+        let mut stale = lsp_hit_from_fact(&fact);
+        stale.verification = "Stale".to_string();
+        assert_eq!(lsp_answer_verification(&[stale], &[]), "Stale");
+        // One stale fact is enough: the answer cannot be more certain than
+        // its weakest part.
+        let other = lsp_hit_from_fact(&fact);
+        let mut stale_again = lsp_hit_from_fact(&fact);
+        stale_again.verification = "Stale".to_string();
+        assert_eq!(lsp_answer_verification(&[other], &[stale_again]), "Stale");
+        assert_eq!(lsp_answer_verification(&[], &[]), "Unverified");
     }
 
     #[test]

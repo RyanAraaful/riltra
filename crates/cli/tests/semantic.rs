@@ -1003,4 +1003,103 @@ fn cli_lsp_live_query_gated() {
     // it the mock still answers success (default arm). Definition resolves.
     assert!(out.contains("\"fallback\":null"), "no fallback: {out}");
     assert!(out.contains("main.rs"), "{out}");
+
+    // The server's own diagnostics reach the caller, and they never cancel
+    // the answer.
+    std::env::set_var("RILTRA_MOCK_LSP", "diagnostics");
+    let (code, out, err) = run(
+        &h,
+        &[
+            "semantic",
+            "query",
+            "--repo",
+            "sem",
+            "--path",
+            "main.rs",
+            "--line",
+            "2",
+            "--col",
+            "5",
+            "--lsp-server",
+            &mock.to_string_lossy(),
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("\"fallback\":null"), "no fallback: {out}");
+    assert!(out.contains("pp_file_not_found"), "diagnostic code: {out}");
+    assert!(
+        out.contains("diagnostic: error"),
+        "diagnostic severity: {out}"
+    );
+    assert!(
+        out.contains("diagnostic: warning"),
+        "a warning is delivered too: {out}"
+    );
+    assert!(out.contains("main.rs"), "the answer is intact: {out}");
+
+    // A source that changed under the server is reported as stale, never as
+    // a current fact.
+    std::env::set_var("RILTRA_MOCK_LSP", "stale-input");
+    let (code, out, err) = run(
+        &h,
+        &[
+            "semantic",
+            "query",
+            "--repo",
+            "sem",
+            "--path",
+            "main.rs",
+            "--line",
+            "2",
+            "--col",
+            "5",
+            "--lsp-server",
+            &mock.to_string_lossy(),
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        out.contains("\"verification\":\"Stale\""),
+        "a changed source is not presented as current: {out}"
+    );
+    // The answer's OWN verdict (the last field of the payload), not only the
+    // per-fact one.
+    let summary = out
+        .rsplit("\"verification\":\"")
+        .next()
+        .unwrap_or_default()
+        .split('"')
+        .next()
+        .unwrap_or_default();
+    assert_eq!(summary, "Stale", "the answer itself is stale: {out}");
+
+    // An empty answer with an error diagnostic stays empty: it is not turned
+    // into a fallback, and the diagnostic says why.
+    std::env::set_var("RILTRA_MOCK_LSP", "empty");
+    let (code, out, err) = run(
+        &h,
+        &[
+            "semantic",
+            "query",
+            "--repo",
+            "sem",
+            "--path",
+            "main.rs",
+            "--line",
+            "2",
+            "--col",
+            "5",
+            "--lsp-server",
+            &mock.to_string_lossy(),
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        out.contains("\"fallback\":null"),
+        "an empty answer is not a fallback: {out}"
+    );
+    assert!(
+        out.contains("pp_file_not_found"),
+        "the diagnostic explains it: {out}"
+    );
 }

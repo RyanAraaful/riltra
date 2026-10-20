@@ -89,12 +89,113 @@ fn id_of(body: &str) -> String {
     "0".to_string()
 }
 
+/// The URI of the document the client opened, captured from didOpen.
+fn opened_uri(body: &str) -> String {
+    if let Some(at) = body.find("\"uri\":\"") {
+        let rest = &body[at + 7..];
+        if let Some(end) = rest.find('"') {
+            return rest[..end].to_string();
+        }
+    }
+    String::new()
+}
+
+/// A `file://` URI as a local path, for the mock's own file writes. The
+/// Windows form the adapter sends is `file:///C:/...`: the third slash
+/// would make the drive letter a path component.
+fn uri_to_path(uri: &str) -> String {
+    let mut path = uri.strip_prefix("file://").unwrap_or(uri).to_string();
+    if path.len() > 2 && path.as_bytes()[0] == b'/' && path.as_bytes()[2] == b':' {
+        path.remove(0);
+    }
+    path
+}
+
+/// A file OUTSIDE the repository, really created: the adapter has to reject
+/// its diagnostics by containment, not by "the file does not exist". The
+/// name carries the mock's own process id, so parallel tests never share
+/// it.
+fn outside_file() -> String {
+    let root = std::env::var("RILTRA_MOCK_ROOT").unwrap_or_default();
+    let dir = format!("{root}/../outside-{}", std::process::id());
+    let _ = std::fs::create_dir_all(&dir);
+    let path = format!("{dir}/main.rs");
+    let _ = std::fs::write(&path, "fn outside() {}\n");
+    format!("file://{path}")
+}
+
+/// Publish diagnostics for the opened document: one ERROR (the shape a
+/// missing compilation database produces), one WARNING on another line, one
+/// diagnostic with a very long message that carries an absolute path, and a
+/// batch of extra diagnostics. A second notification names a file OUTSIDE the
+/// repository, so the adapter's path confinement has something to reject.
+fn publish_diagnostics(uri: &str) {
+    publish_diagnostics_for(uri, &outside_file());
+}
+
+/// The same, with the outside file already prepared: the caller can create
+/// it BEFORE it answers, so the notification follows the response at once.
+fn publish_diagnostics_for(uri: &str, outside: &str) {
+    let root = std::env::var("RILTRA_MOCK_ROOT").unwrap_or_default();
+    let long = format!(
+        "a very long diagnostic message that repeats itself {} and names the absolute path {root}/include/geom/point.h so that a sanitizer has something to shorten",
+        "again ".repeat(40)
+    );
+    let mut batch = String::new();
+    for i in 0..20 {
+        if i > 0 {
+            batch.push(',');
+        }
+        batch.push_str(&format!(
+            "{{\"range\":{{\"start\":{{\"line\":{i},\"character\":0}},\"end\":{{\"line\":{i},\"character\":1}}}},\"severity\":2,\"code\":\"filler-{i}\",\"message\":\"filler {i}\"}}"
+        ));
+    }
+    notify(
+        "textDocument/publishDiagnostics",
+        &format!(
+            "{{\"uri\":\"{uri}\",\"diagnostics\":[{{\"range\":{{\"start\":{{\"line\":3,\"character\":9}},\"end\":{{\"line\":3,\"character\":23}}}},\"severity\":1,\"code\":\"pp_file_not_found\",\"source\":\"clang\",\"message\":\"'geom/point.h' file not found in {root}/include\"}},{{\"range\":{{\"start\":{{\"line\":1,\"character\":4}},\"end\":{{\"line\":1,\"character\":9}}}},\"severity\":2,\"code\":\"unused-variable\",\"source\":\"clang\",\"message\":\"unused variable 'x'\"}},{{\"range\":{{\"start\":{{\"line\":0,\"character\":0}},\"end\":{{\"line\":0,\"character\":1}}}},\"severity\":1,\"code\":\"long-message\",\"message\":\"{long}\"}}]}}"
+        ),
+    );
+    notify(
+        "textDocument/publishDiagnostics",
+        &format!(
+            "{{\"uri\":\"{outside}\",\"diagnostics\":[{{\"range\":{{\"start\":{{\"line\":0,\"character\":0}},\"end\":{{\"line\":0,\"character\":1}}}},\"severity\":1,\"code\":\"outside-the-repository\",\"message\":\"this file is outside the repository\"}}]}}"
+        ),
+    );
+    notify(
+        "textDocument/publishDiagnostics",
+        &format!("{{\"uri\":\"{uri}\",\"diagnostics\":[{batch}]}}"),
+    );
+}
+
+/// A server→client request: the client has to answer it, or a server that
+/// waits for the answer would stall. The reply is logged, so the test can
+/// see that it arrived.
+fn ask_the_client(id: &str) {
+    send(&format!(
+        "{{\"jsonrpc\":\"2.0\",\"id\":\"{id}\",\"method\":\"workspace/configuration\",\"params\":{{\"items\":[]}}}}"
+    ));
+}
+
+/// Append a line to the opened document: the client asked about the file as
+/// it was, and the file changes underneath it while the server answers.
+fn mutate_opened_file(uri: &str) {
+    if uri.is_empty() {
+        return;
+    }
+    let path = uri_to_path(uri);
+    if let Ok(mut file) = std::fs::OpenOptions::new().append(true).open(&path) {
+        let _ = writeln!(file, "// the source changed while the server was answering");
+    }
+}
+
 fn main() {
     let mode = std::env::var("RILTRA_MOCK_LSP").unwrap_or_default();
     let stdin = std::io::stdin();
     let mut lock = stdin.lock();
     let mut initialized = false;
     let mut hang = false;
+    let mut opened = String::new();
     while let Some(body) = read_message(&mut lock) {
         if body.contains("\"method\":\"initialized\"") {
             initialized = true;
@@ -107,8 +208,20 @@ fn main() {
             }
             continue;
         }
+        if body.contains("\"method\":\"textDocument/didOpen\"") {
+            opened = opened_uri(&body);
+            if mode == "diagnostics" {
+                publish_diagnostics(&opened);
+            }
+            continue;
+        }
         if body.contains("\"method\":\"$/cancelRequest\"") {
             log_event("cancel");
+            continue;
+        }
+        if body.contains("client-request-1") {
+            // The client's reply to the server's own request.
+            log_event("client-request-answered");
             continue;
         }
         if body.contains("\"method\":\"shutdown\"") {
@@ -147,7 +260,8 @@ fn main() {
                     continue;
                 }
                 "pollution" => {
-                    println!("[mock] a helpful log line on stdout");
+                    // A path in the server's stdout must not reach the caller.
+                    println!("[mock] reading /opt/build/private/x");
                     respond(&id, "{\"capabilities\":{}}");
                     continue;
                 }
@@ -180,7 +294,75 @@ fn main() {
                 for _ in 0..2000 {
                     let _ = lock.write_all(&[b'x'; 1024]);
                 }
+                // A path in the server's stderr must not reach the caller.
+                // It is written last, so it is in the tail the adapter keeps.
+                let _ = writeln!(lock, "indexing C:\\Windows\\System32\\private");
                 let _ = lock.flush();
+            }
+            if mode == "stale-input" {
+                // The file the client asked about changes while the server is
+                // answering: the answer is about a version of the source that
+                // is no longer on disk.
+                mutate_opened_file(&opened);
+            }
+            if mode == "late-diagnostics" {
+                // The server answers first and publishes afterwards: the
+                // adapter must not lose the warning that follows the answer.
+                // The file work happens BEFORE the answer, so the
+                // notification follows the response immediately.
+                let outside = outside_file();
+                let uri = file_uri("main.rs");
+                respond(
+                    &id_of(&body),
+                    &format!(
+                        "{{\"uri\":\"{uri}\",\"range\":{{\"start\":{{\"line\":1,\"character\":4}},\"end\":{{\"line\":1,\"character\":7}}}}}}"
+                    ),
+                );
+                publish_diagnostics_for(&opened, &outside);
+                continue;
+            }
+            if mode == "empty" {
+                // An empty answer with an error diagnostic: the answer stays
+                // empty, and the diagnostic says why.
+                publish_diagnostics(&opened);
+                respond(&id_of(&body), "[]");
+                continue;
+            }
+            if mode == "fail-after-diagnostics" {
+                // The server explains itself and then fails: the diagnostics
+                // must travel with the failure.
+                publish_diagnostics(&opened);
+                send(&format!(
+                    "{{\"jsonrpc\":\"2.0\",\"id\":{},\"error\":{{\"code\":-32000,\"message\":\"the server refused\"}}}}",
+                    id_of(&body)
+                ));
+                continue;
+            }
+            if mode == "client-request" {
+                // The server asks the client something after it answered: the
+                // client has to reply, or the server waits.
+                let uri = file_uri("main.rs");
+                respond(
+                    &id_of(&body),
+                    &format!(
+                        "{{\"uri\":\"{uri}\",\"range\":{{\"start\":{{\"line\":1,\"character\":4}},\"end\":{{\"line\":1,\"character\":7}}}}}}"
+                    ),
+                );
+                ask_the_client("client-request-1");
+                continue;
+            }
+            if mode == "stray-response" {
+                // A response nobody asked for: it must be recorded as a
+                // bounded notice.
+                let uri = file_uri("main.rs");
+                respond(
+                    &id_of(&body),
+                    &format!(
+                        "{{\"uri\":\"{uri}\",\"range\":{{\"start\":{{\"line\":1,\"character\":4}},\"end\":{{\"line\":1,\"character\":7}}}}}}"
+                    ),
+                );
+                send("{\"jsonrpc\":\"2.0\",\"id\":9999,\"result\":{\"path\":\"C:/Windows/System32/private\"}}");
+                continue;
             }
             let uri = file_uri("main.rs");
             respond(

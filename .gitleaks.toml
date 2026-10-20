@@ -90,6 +90,13 @@ regexes = [
 ]
 
 [[allowlists]]
+description = "Verified synthetic UNC path example in the LSP adapter unit test"
+targetRules = ["local-absolute-path"]
+condition = "AND"
+paths = ['''^crates/cli/src/lsp\.rs$''']
+regexes = ['''(?i)\\\\host\\share''']
+
+[[allowlists]]
 description = "Verified synthetic uri_path examples in semantic.rs unit tests"
 targetRules = ["local-absolute-path"]
 condition = "AND"
