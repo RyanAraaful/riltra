@@ -58,18 +58,15 @@ if (mode === "facts") {
   console.log("third-party files with errors: " + rows.filter((r) => TP(r.path) === "third-party" && r.errors > 0).length +
     " of " + rows.filter((r) => TP(r.path) === "third-party").length);
 } else if (mode === "digest") {
-  const snap = all("select * from snapshots order by id desc limit 1")[0];
-  const h = crypto.createHash("sha256");
-  let n = 0;
-  const push = (tag, row) => { h.update(tag + "\u0001" + row.join("\u0001") + "\n"); n++; };
-  for (const r of all("select path, digest, bytes, language, errors from files where snapshot_id=? order by path", snap.id)) push("file", r);
-  for (const r of all("select f.path, s.kind, s.name, s.start_line, s.start_col, s.end_line, s.end_col, s.byte_start, s.byte_end, s.provider, s.grammar, s.language from symbols s join files f on f.id=s.file_id where s.snapshot_id=? order by f.path, s.start_line, s.start_col, s.kind, s.name", snap.id)) push("sym", r);
-  for (const r of all("select f.path, i.start_line, i.start_col, i.end_line, i.end_col, i.byte_start, i.byte_end, i.text, i.provider from imports i join files f on f.id=i.file_id where i.snapshot_id=? order by f.path, i.start_line, i.start_col, i.text", snap.id)) push("imp", r);
-  for (const r of all("select f.path, c.start_line, c.start_col, c.end_line, c.end_col, c.byte_start, c.byte_end, c.name, c.unresolved, c.provider, c.grammar from calls c join files f on f.id=c.file_id where c.snapshot_id=? order by f.path, c.start_line, c.start_col, c.name", snap.id)) push("call", r);
-  console.log(JSON.stringify({ rows: n, fact_digest: h.digest("hex") }, null, 2));
-  const he = crypto.createHash("sha256");
-  let m = 0;
-  for (const r of all("select edge_kind, precision, provider, caller_path, caller_sbs, caller_sbe, callee_name, callee_kind, coalesce(unresolved,'') from code_edges where snapshot_id=? order by caller_path, caller_sbs, edge_kind, callee_name", snap.id)) { he.update(r.join("\u0001") + "\n"); m++; }
-  console.log(JSON.stringify({ edges: m, edge_digest: he.digest("hex") }, null, 2));
+  // The digest is shared with the mutation check so that one implementation
+  // exists (node:sqlite returns row objects, and the row order of a
+  // non-total ORDER BY is not stable between two builds).
+  const { factTables, combinedDigest } = require("./fact-digest.cjs");
+  const tables = factTables(dbPath);
+  if (!tables) {
+    console.error("the database has no snapshot");
+    process.exit(3);
+  }
+  console.log(JSON.stringify({ tables: tables, combined_digest: combinedDigest(tables) }, null, 2));
 }
 db.close();

@@ -1,16 +1,28 @@
 // CP2 step 7a: direct MCP stdio smoke against the Riltra MCP server.
 // Verifies: 11-tool surface, JSON-RPC stdout purity, classified error,
 // non-mutating reads, transport health, repository selection.
+//
+// The binary and the paths come from the environment, so the script runs
+// from any machine:
+//   CP2_RILTRA  path to the riltra binary (required)
+//   CP2_HOME    RILTRA_HOME of the pilot index (required)
+//   CP2_OUT     output directory (required)
+//   CP2_REPO    repository name (default mmsp-pin)
 "use strict";
 const { spawn } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
 
-const RILTRA = "<RILTRA_ROOT>\\target\\debug\\riltra.exe";
+const RILTRA = process.env.CP2_RILTRA;
 const HOME = process.env.CP2_HOME;
 const OUT = process.env.CP2_OUT;
-const REPO = "mmsp-pin";
+const REPO = process.env.CP2_REPO || "mmsp-pin";
+if (!RILTRA || !HOME || !OUT) {
+  console.error("CP2_RILTRA, CP2_HOME and CP2_OUT are required");
+  process.exit(2);
+}
+fs.mkdirSync(OUT, { recursive: true });
 
 function homeDigest(dir) {
   const out = {};
@@ -108,9 +120,18 @@ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
   const toolList = parsed.find((m) => m.id === 2);
   report.tool_list = toolList && toolList.result ? toolList.result.tools.map((t) => t.name) : null;
+  const callNames = { 3: "riltra_code_search", 4: "riltra_repo_list", 5: "riltra_code_search", 6: "riltra_health" };
   for (const id of [3, 4, 5, 6]) {
     const m = parsed.find((x) => x.id === id);
-    report.calls.push({ id, present: !!m, is_error: m && m.result ? !!m.result.isError : null, text_len: m && m.result && m.result.content ? m.result.content.map((c) => c.text || "").join("").length : 0 });
+    const text = m && m.result && m.result.content ? m.result.content.map((c) => c.text || "").join("") : "";
+    report.calls.push({
+      id,
+      name: callNames[id],
+      present: !!m,
+      is_error: m && m.result ? !!m.result.isError : null,
+      text_len: text.length,
+      text: text,
+    });
   }
   const errCall = parsed.find((x) => x.id === 5);
   report.classified_error_text = errCall && errCall.result && errCall.result.content ? errCall.result.content.map((c) => c.text || "").join("") : null;

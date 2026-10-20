@@ -1,14 +1,23 @@
-# CP2 step 2c: a third cold index, measured directly on the riltra process
-# (the harness measures the child shell; the indexer's own peak RSS is needed).
+# CP2 harness step: a third cold index, measured directly on the riltra
+# process (the harness measures the child shell; the indexer's own peak RSS
+# is needed).
+#
+# Usage:
+#   pwsh -File cold-index-3.ps1 -BenchRoot <dir> -Bin <riltra.exe> -Snapshot <dir>
+param(
+  [string]$BenchRoot = '',
+  [string]$Bin = '',
+  [string]$Snapshot = '',
+  [string]$Out = ''
+)
 $ErrorActionPreference = 'Stop'
-. "$env:TEMP\opencode\bench\cp2\common.ps1"
-
-$bin = '<RILTRA_ROOT>\target\debug\riltra.exe'
-$snap = "$env:TEMP\opencode\bench\mmsp-d62f06a"
-$homeDir = Reset-BenchDir "$env:TEMP\opencode\bench\home-cold3"
+. (Join-Path $PSScriptRoot 'common.ps1')
+$cfg = Initialize-Cp2Harness -BenchRoot $BenchRoot -Bin $Bin -Snapshot $Snapshot -Out $Out
+$snap = Assert-SnapshotPath -Path $cfg.Snapshot -Root $cfg.BenchRoot
+$homeDir = Reset-BenchDir (Join-Path $cfg.BenchRoot 'home-cold3') -Root $cfg.BenchRoot
 
 $psi = New-Object System.Diagnostics.ProcessStartInfo
-$psi.FileName = $bin
+$psi.FileName = $cfg.Bin
 $psi.Arguments = 'init --repo "' + $snap + '" --name mmsp-pin'
 $psi.UseShellExecute = $false
 $psi.RedirectStandardOutput = $true
@@ -19,7 +28,7 @@ $p.WaitForExit()
 "init exit=$($p.ExitCode): $($p.StandardOutput.ReadToEnd().Trim())"
 
 $psi2 = New-Object System.Diagnostics.ProcessStartInfo
-$psi2.FileName = $bin
+$psi2.FileName = $cfg.Bin
 $psi2.Arguments = 'index --repo mmsp-pin --full'
 $psi2.UseShellExecute = $false
 $psi2.RedirectStandardOutput = $true
@@ -54,5 +63,6 @@ $meta | ConvertTo-Json -Compress
 $stdout
 "===== db size ====="
 (Get-ChildItem $homeDir -Recurse -File -Filter *.db | Measure-Object -Property Length -Sum).Sum
-$outFile = "$env:TEMP\opencode\bench\cp2\raw\cold-index-3.txt"
+New-BenchDir -Path (Join-Path $cfg.Out '') -Root $cfg.BenchRoot | Out-Null
+$outFile = Join-Path $cfg.Out 'cold-index-3.txt'
 [System.IO.File]::WriteAllText($outFile, ("#META " + ($meta | ConvertTo-Json -Compress) + "`n" + $stdout), (New-Object System.Text.UTF8Encoding($false)))

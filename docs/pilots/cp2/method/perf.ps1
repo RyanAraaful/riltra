@@ -1,12 +1,22 @@
-# CP2 step 6: warm query performance (blueprint 14.3 diagnostic SLO targets).
-# Frozen query list from CP1 section B; >= 5 repetitions each; p50/p95 reported.
+# CP2 harness step: warm query performance (blueprint 14.3 diagnostic SLO
+# targets). Frozen query list from CP1 section B; >= 5 repetitions each;
+# p50/p95 reported. The SLO is a diagnostic target, not a release gate.
+#
+# Usage:
+#   pwsh -File perf.ps1 -BenchRoot <dir> -Bin <riltra.exe> -Out <dir>
+param(
+  [string]$BenchRoot = '',
+  [string]$Bin = '',
+  [string]$Out = '',
+  [string]$HomeDir = '',
+  [int]$Reps = 5
+)
 $ErrorActionPreference = 'Stop'
-. "$env:TEMP\opencode\bench\cp2\common.ps1"
-
-$bin = '<RILTRA_ROOT>\target\debug\riltra.exe'
-$env:RILTRA_HOME = "$env:TEMP\opencode\bench\home-main"
-$out = "$env:TEMP\opencode\bench\cp2\raw\perf"
-New-Item -ItemType Directory -Force -Path $out | Out-Null
+. (Join-Path $PSScriptRoot 'common.ps1')
+$cfg = Initialize-Cp2Harness -BenchRoot $BenchRoot -Bin $Bin -Out $Out
+if (-not $HomeDir) { $HomeDir = Join-Path $cfg.BenchRoot 'home-main' }
+$env:RILTRA_HOME = $HomeDir
+$out = New-BenchDir -Path (Join-Path $cfg.Out 'perf') -Root $cfg.BenchRoot
 
 $queries = @(
   @{ n = 'search-PatchMatch';        a = @('search','--repo','mmsp-pin','--symbol','PatchMatch') },
@@ -22,24 +32,23 @@ $queries = @(
   @{ n = 'index-status';             a = @('index','status','--repo','mmsp-pin') },
   @{ n = 'repo-status';              a = @('repo','status','--repo','mmsp-pin') }
 )
-$reps = 5
 
 $results = @()
 foreach ($q in $queries) {
   $times = @()
   $bytes = 0
   $exit = 0
-  for ($i = 1; $i -le $reps; $i++) {
+  for ($i = 1; $i -le $Reps; $i++) {
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    $text = & $bin @($q.a) 2>&1 | Out-String
+    $text = & $cfg.Bin @($q.a) 2>&1 | Out-String
     $exit = $LASTEXITCODE
     $sw.Stop()
     $times += $sw.Elapsed.TotalMilliseconds
     $bytes = $text.Length
   }
   $sorted = $times | Sort-Object
-  $p50 = $sorted[[math]::Floor(($reps - 1) * 0.50)]
-  $p95 = $sorted[[math]::Floor(($reps - 1) * 0.95)]
+  $p50 = $sorted[[math]::Floor(($Reps - 1) * 0.50)]
+  $p95 = $sorted[[math]::Floor(($Reps - 1) * 0.95)]
   $results += [pscustomobject]@{
     query = $q.n; exit = $exit; bytes = $bytes
     ms_min = [math]::Round($sorted[0], 1)
@@ -50,7 +59,7 @@ foreach ($q in $queries) {
   }
   "  {0,-24} p50={1,8} ms  p95={2,8} ms  max={3,8} ms  exit={4}" -f $q.n, [math]::Round($p50,1), [math]::Round($p95,1), [math]::Round($sorted[-1],1), $exit
 }
-$results | ConvertTo-Json -Depth 4 | Set-Content "$out\warm-queries.json" -Encoding utf8
+$results | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $out 'warm-queries.json') -Encoding utf8
 "===== per-query detail ====="
 $results | Format-Table -AutoSize | Out-String
 "===== SLO comparison (blueprint 14.3, diagnostic target) ====="

@@ -2,15 +2,25 @@
 // The natural-language question is interpreted by the agent; this script
 // performs the tool calls the agent would make and archives the raw tool
 // documents, so the answer can be checked against the CP1 ground truth.
+//
+//   CP2_RILTRA  path to the riltra binary (required)
+//   CP2_HOME    RILTRA_HOME of the pilot index (required)
+//   CP2_OUT     output directory (required)
+//   CP2_REPO    repository name (default mmsp-pin)
 "use strict";
 const { spawn } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
 
-const RILTRA = "<RILTRA_ROOT>\\target\\debug\\riltra.exe";
+const RILTRA = process.env.CP2_RILTRA;
 const HOME = process.env.CP2_HOME;
 const OUT = process.env.CP2_OUT;
-const REPO = "mmsp-pin";
+const REPO = process.env.CP2_REPO || "mmsp-pin";
+if (!RILTRA || !HOME || !OUT) {
+  console.error("CP2_RILTRA, CP2_HOME and CP2_OUT are required");
+  process.exit(2);
+}
+fs.mkdirSync(OUT, { recursive: true });
 
 const proc = spawn(RILTRA, ["mcp"], {
   env: { ...process.env, RILTRA_HOME: HOME },

@@ -1,61 +1,94 @@
-# CP2 orchestration: post-fix cold index, workflow queries, freshness,
-# incremental parity, warm-query performance, MCP stdio smoke.
+# CP2 harness: the full run.
+#   1. cold index x2        5. freshness F1-F5
+#   2. home-main            6. incremental correctness
+#   3. workflow queries     7. fact parity (DB digests)
+#   4. grading              8. warm query performance
+#                           9. MCP stdio smoke
+#                          10. isolation assertions
+#
+# Every comparison fails loudly: a script that crashes, produces no output
+# or exits non-zero aborts the run instead of being counted as a match.
+#
+# Usage:
+#   pwsh -File run-all.ps1 -BenchRoot <dir> -Bin <riltra.exe> -Snapshot <dir> -MmspRoot <dir>
+param(
+  [string]$BenchRoot = '',
+  [string]$Bin = '',
+  [string]$Snapshot = '',
+  [string]$MmspRoot = '',
+  [string]$Out = ''
+)
 $ErrorActionPreference = 'Stop'
-. "$env:TEMP\opencode\bench\cp2\common.ps1"
-
-$cp2 = "$env:TEMP\opencode\bench\cp2"
-$raw = "$cp2\raw"
-$bench = "$env:TEMP\opencode\bench"
-$bin = '<RILTRA_ROOT>\target\debug\riltra.exe'
-$snap = "$bench\mmsp-d62f06a"
+. (Join-Path $PSScriptRoot 'common.ps1')
+$cfg = Initialize-Cp2Harness -BenchRoot $BenchRoot -Bin $Bin -Snapshot $Snapshot -MmspRoot $MmspRoot -Out $Out
+$raw = $cfg.Out
+$bench = $cfg.BenchRoot
+$snap = Assert-SnapshotPath -Path $cfg.Snapshot -Root $cfg.BenchRoot -MmspRoot $cfg.MmspRoot
+$method = $PSScriptRoot
 
 function Section([string]$t) { "`n================ $t ================" }
 
-Section "1. cold index x2 (post-fix)"
-& "$cp2\cold-index.ps1"
+Section "1. cold index x2"
+& (Join-Path $method 'cold-index.ps1') -BenchRoot $bench -Bin $cfg.Bin -Snapshot $snap -Out $raw
 
 Section "2. home-main from the verified cold run 1"
-Remove-Item "$bench\home-main" -Recurse -Force -ErrorAction SilentlyContinue
-Copy-Item "$bench\home-cold1" "$bench\home-main" -Recurse -Force
-$env:RILTRA_HOME = "$bench\home-main"
-& $bin index status --repo mmsp-pin
+$homeMain = Reset-BenchDir (Join-Path $bench 'home-main') -Root $bench
+Copy-Item (Join-Path $bench 'home-cold1') $homeMain -Recurse -Force
+$env:RILTRA_HOME = $homeMain
+& $cfg.Bin index status --repo mmsp-pin
 
 Section "3. workflow queries (CP1 section D)"
-& "$cp2\queries.ps1"
+& (Join-Path $method 'queries.ps1') -BenchRoot $bench -Bin $cfg.Bin -Out $raw -HomeDir $homeMain
 
 Section "4. grading"
-$env:CP2_QDIR = "$raw\queries"
+$env:CP2_QDIR = Join-Path $raw 'queries'
 $env:CP2_OUT = $raw
-node "$cp2\grade.cjs"
+node (Join-Path $method 'grade.cjs')
+if ($LASTEXITCODE -ne 0) { throw "the grading script failed with exit $LASTEXITCODE" }
 
 Section "5. freshness F1-F5"
-& "$cp2\freshness.ps1"
+& (Join-Path $method 'freshness.ps1') -BenchRoot $bench -Bin $cfg.Bin -Snapshot $snap -MmspRoot $cfg.MmspRoot -Out $raw -HomeDir $homeMain
 
 Section "6. incremental correctness"
-& "$cp2\incremental.ps1"
+& (Join-Path $method 'incremental.ps1') -BenchRoot $bench -Bin $cfg.Bin -Snapshot $snap -MmspRoot $cfg.MmspRoot -Out $raw -HomeDir $homeMain
 
 Section "7. fact-level parity (DB digests: incremental vs oracle)"
-Copy-Item "$bench\home-main\index\mmsp-pin.db" "$cp2\inc.db" -Force
-Copy-Item "$bench\home-oracle\index\mmsp-pin.db" "$cp2\oracle.db" -Force
-$inc = node "$cp2\db-facts.cjs" "$cp2\inc.db" digest 2>$null
-$orc = node "$cp2\db-facts.cjs" "$cp2\oracle.db" digest 2>$null
-"  incremental: $($inc -join ' ')"
-"  oracle     : $($orc -join ' ')"
-if ($inc -eq $orc) { "  FACT PARITY: IDENTICAL" } else { "  FACT PARITY: DIFFERENT" }
+$incDb = Join-Path $raw 'inc.db'
+$orcDb = Join-Path $raw 'oracle.db'
+Copy-Item (Join-Path $homeMain 'index\mmsp-pin.db') $incDb -Force
+Copy-Item (Join-Path $bench 'home-oracle\index\mmsp-pin.db') $orcDb -Force
+$inc = node (Join-Path $method 'db-mutation-check.cjs') $incDb (Join-Path $raw 'inc-facts.json')
+if ($LASTEXITCODE -ne 0) { throw "the incremental fact digest failed with exit $LASTEXITCODE" }
+$orc = node (Join-Path $method 'db-mutation-check.cjs') $orcDb (Join-Path $raw 'oracle-facts.json')
+if ($LASTEXITCODE -ne 0) { throw "the oracle fact digest failed with exit $LASTEXITCODE" }
+$incDigest = (Get-Content (Join-Path $raw 'inc-facts.json') -Raw | ConvertFrom-Json).combined_digest
+$orcDigest = (Get-Content (Join-Path $raw 'oracle-facts.json') -Raw | ConvertFrom-Json).combined_digest
+if (-not $incDigest -or -not $orcDigest) { throw "a fact digest is missing; the comparison cannot be made" }
+"  incremental: $incDigest"
+"  oracle     : $orcDigest"
+if ($incDigest -eq $orcDigest) {
+  "  FACT PARITY: IDENTICAL"
+}
+else {
+  throw "FACT PARITY: DIFFERENT ($incDigest vs $orcDigest)"
+}
 
 Section "8. warm query performance (5 reps each)"
-& "$cp2\perf.ps1"
+& (Join-Path $method 'perf.ps1') -BenchRoot $bench -Bin $cfg.Bin -Out $raw -HomeDir $homeMain
 
 Section "9. MCP stdio smoke"
-$env:CP2_HOME = "$bench\home-main"
-$env:CP2_OUT = "$raw\mcp"
-node "$cp2\mcp-smoke.cjs"
+$env:CP2_HOME = $homeMain
+$env:CP2_OUT = Join-Path $raw 'mcp'
+$env:CP2_RILTRA = $cfg.Bin
+node (Join-Path $method 'mcp-smoke.cjs')
+if ($LASTEXITCODE -ne 0) { throw "the MCP smoke failed with exit $LASTEXITCODE" }
 
 Section "10. isolation assertions"
 "  snapshot HEAD  = $(git -C $snap rev-parse HEAD)"
 "  snapshot tree  = $(git -C $snap rev-parse 'HEAD^{tree}')"
 "  snapshot porcelain = $((git -C $snap status --porcelain | Measure-Object -Line).Lines) lines"
-"  original MMSP HEAD = $(git -C <MMSP_ROOT> rev-parse HEAD)"
-"  original MMSP porcelain = $((git -C <MMSP_ROOT> status --porcelain | Measure-Object -Line).Lines) lines"
-"  Riltra worktree: $(git -C <RILTRA_ROOT> status --porcelain | Measure-Object -Line).Lines changed line(s)"
+if ($cfg.MmspRoot) {
+  "  original MMSP HEAD = $(git -C $cfg.MmspRoot rev-parse HEAD)"
+  "  original MMSP porcelain = $((git -C $cfg.MmspRoot status --porcelain | Measure-Object -Line).Lines) lines"
+}
 "DONE"

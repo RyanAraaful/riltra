@@ -1,17 +1,28 @@
-# CP2 measurement harness (outside the repository).
-# Usage: measure.ps1 -Label <name> -Out <file> -Command <scriptblock>
-# Records wall time, peak RSS (PeakWorkingSet64) and stdout/stderr to <file>.
-# The command body is written to a temp script and executed with `pwsh -File`,
-# so nested quoting in the caller's scriptblock cannot corrupt the child args.
+# CP2 harness step: measurement wrapper. Records wall time, peak RSS
+# (PeakWorkingSet64) and stdout/stderr of a command body.
+#
+# The body is written to a temp script INSIDE the bench root and executed
+# with `pwsh -File`, so nested quoting in the caller's scriptblock cannot
+# corrupt the child args. The temp script is removed through the same guarded
+# helper as every other delete.
+#
+# Usage: measure.ps1 -Label <name> -Out <file> -Command <scriptblock> [-BenchRoot <dir>]
 param(
   [Parameter(Mandatory = $true)][string]$Label,
   [Parameter(Mandatory = $true)][string]$Out,
-  [Parameter(Mandatory = $true)][scriptblock]$Command
+  [Parameter(Mandatory = $true)][scriptblock]$Command,
+  [string]$BenchRoot = '',
+  [string]$WorkDir = ''
 )
+$ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'common.ps1')
+if (-not $BenchRoot) { $BenchRoot = Join-Path $env:TEMP 'opencode\bench' }
+if (-not $WorkDir) { $WorkDir = Join-Path $BenchRoot 'cp2' }
+New-BenchDir -Path $WorkDir -Root $BenchRoot | Out-Null
 
-$scriptPath = Join-Path $env:TEMP ("opencode\bench\cp2\_run_" + [Guid]::NewGuid().ToString('N') + ".ps1")
+$scriptPath = Join-Path $WorkDir ('_run_' + [Guid]::NewGuid().ToString('N') + '.ps1')
 $body = @"
-Set-Location '$env:TEMP\opencode\bench\cp2'
+Set-Location '$WorkDir'
 `$ErrorActionPreference = 'Continue'
 "@ + "`n" + ($Command.ToString())
 [System.IO.File]::WriteAllText($scriptPath, $body, (New-Object System.Text.UTF8Encoding($false)))
@@ -45,7 +56,10 @@ try { if ($proc.PeakWorkingSet64 -gt $peak) { $peak = $proc.PeakWorkingSet64 } }
 $stdout = $outTask.Result
 $stderr = $errTask.Result
 $exit = $proc.ExitCode
-Remove-Item $scriptPath -Force -ErrorAction SilentlyContinue
+
+# The script this wrapper just created: the delete goes through the guard.
+$guarded = Assert-BenchPath -Path $scriptPath -Root $BenchRoot
+Remove-Item -LiteralPath $guarded -Force -ErrorAction SilentlyContinue
 
 $meta = [ordered]@{
   label            = $Label
