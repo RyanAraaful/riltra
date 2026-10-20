@@ -45,6 +45,39 @@ clone**; the original MMSP and Riltra working trees were never modified.
 | C++ toolchain | **absent** — `g++`, `clang++`, `gcc`, `cl` and `cmake` are all missing |
 | clangd | absent, by owner decision D-M9-2 |
 
+### CI verification
+
+| Run | URL | Commit | windows-latest | ubuntu-latest | macos-15 (pre-change label) | security |
+|---|---|---|---|---|---|---|
+| 39438093811 | <https://github.com/RyanAraaful/riltra/actions/runs/39438093811> | `b9c3d7e` | success | success | **cancelled** | success |
+| 39432405437 | <https://github.com/RyanAraaful/riltra/actions/runs/39432405437> | `4f9d197` | success | success | success | success |
+
+The macOS job of run 39438093811 was **cancelled after 15m01s with no runner
+assigned**, and so was its re-run (attempt 2). The archived job payloads
+(`docs/pilots/cp3/raw/ci/`) record `runner_id: 0`, an empty `runner_name`
+and **zero steps executed**, and carry GitHub's own job annotations:
+
+> The job was not acquired by Runner of type hosted even after multiple
+> attempts
+>
+> Due to capacity constraints, jobs targeting macOS arm64 runners may
+> experience longer queue times.
+
+This is **not a code failure and not a test failure**: no step of ours ever
+ran on those jobs, and the Windows, Ubuntu and security jobs of the same runs
+passed. Across the repository's last 40 macOS jobs: **33 succeeded, 7 were
+cancelled, and 0 ever failed a test**
+(`docs/pilots/cp3/raw/ci/macos-job-history.json`).
+
+**A second constraint shaped the fix.** The `protect-master` ruleset
+requires three status-check contexts, one of them **`check (macos-15)`**
+(`docs/pilots/cp3/raw/ci/ruleset-protect-master.json`). A renamed context is
+never reported, so renaming the matrix entry would have left every pull
+request to master blocked. The fix therefore keeps the three job **names**
+and moves only the macOS **runner**. The ruleset was not modified.
+
+See §9 for the diagnosis and the fix.
+
 ---
 
 ## 2. E8 — hypothesis, verified sample, implementation decision
@@ -598,6 +631,7 @@ not provide. It is recorded as unresolved rather than guessed.
 | E9 | Warm-query SLO missed | **diagnostic, now measured** | **Decide.** The fixed cost is ~472 ms of a ~760 ms invocation and is dominated by the `git` fingerprint subprocess (~272 ms). The owner's CP2 instruction was "profile first, then either the target or the fixed cost"; the profiling is done. |
 | E10 | The agent side of workflow 5 | **no longer blocked** — measured in CP3 | **No change.** One session is evidence that the gate is measurable, not a repeated measurement. |
 | E11 | The repository's history carries unsanitised local paths | open risk, unchanged from CP1 | **Owner-gated** (history rewrite). Untouched by CP3. |
+| **new** | **macOS CI ran on the ARM64 hosted pool, which GitHub could not supply** | **infrastructure defect, diagnosed and fixed in CP3** | **Decide the architecture.** `macos-15` and the earlier `macos-latest` are **both ARM64**, so the earlier pin (commit `4c47625`) did not escape the constraint; 7 of the repository's last 40 macOS jobs were cancelled for lack of a runner and **none ever failed a test**. The macOS **runner** was moved to `macos-15-intel` (the same macOS 15 release on the x64 pool) while the **job names** stay `check (macos-15)`, because the `protect-master` ruleset requires that context and the brief forbids touching rulesets. Two consequences the owner must accept: (i) **macOS ARM64 is no longer covered by the CI matrix** — restore it as a **separate, non-required workflow** once the ARM64 pool recovers (a `continue-on-error` matrix entry would report a cancelled job as a pass, which is not acceptable evidence); (ii) the x64 pool's capacity is **expected** to be better but is not yet observed on this label — verify it on the first run. |
 
 ---
 
@@ -625,13 +659,15 @@ it does not claim that it did.
 ## 11. M9 release-gate status (stated separately from CP3)
 
 CP3's PASS is about CP3. The M9 release gates are a different question, and
-none of them is lowered by this work. A historical milestone being green is
-not a release gate passing.
+**no gate status is changed by this work**. A historical milestone being
+green is not a release gate passing. One gate's *coverage* is narrowed
+pending the owner's architecture decision: G-NAT's macOS coverage is now
+**x64** (see §9); its status remains **NOT YET VERIFIED**.
 
 | Gate | Status after CP3 | Basis |
 |---|---|---|
 | G-LIC | **NOT YET VERIFIED** | outside the CP3 scope; no SBOM, no release artifact |
-| G-NAT | **NOT YET VERIFIED** | outside the CP3 scope; the 3-OS CI run is the evidence and is awaited at the end of CP3 |
+| G-NAT | **NOT YET VERIFIED** | outside the CP3 scope; the 3-OS CI run is the evidence. **One correction from CP3**: the macOS matrix entry moved from `macos-15` to `macos-15-intel`, so the macOS CI is now **x64**, and the **macOS arm64** variant is no longer covered by the matrix (§9) |
 | G-CLI | **NOT YET VERIFIED** | the candidate suite and goldens are green and unchanged (§6.1), but the release-candidate run and the written stability policy do not exist |
 | G-MCP | **PARTIALLY RE-VERIFIED** | the transport and tool behaviour are revalidated and the agent side is now measured (§7); the release-candidate binary, the documented OpenCode config and the archived smoke transcript for the candidate are still outstanding |
 | G-SYN | **NOT YET VERIFIED — one gap found** | the corpus, the goldens and the deterministic MMSP scan are re-verified; the `.inl` extension gap (§9) is open; the release-candidate scan report is still to be archived |
@@ -667,6 +703,10 @@ new coverage gap (`.inl`) that must be decided before G-SYN can close.
 | `docs/pilots/cp3/method/g-sem.ps1` | the two-provider revalidation |
 | `docs/pilots/cp3/method/profile.ps1` | the E9 stage profiler |
 | `docs/pilots/cp3/method/opencode-summary.cjs` | the OpenCode session summary |
+| `docs/pilots/cp3/method/ci-history.ps1` | the CI runner evidence collector |
+| `docs/pilots/cp3/raw/ci/cancelled-macos-job-*.json` | the cancelled macOS job payloads, with GitHub's annotations |
+| `docs/pilots/cp3/raw/ci/macos-job-history.json` | the macOS job history: 40 jobs, 33 succeeded, 7 cancelled, 0 failed |
+| `docs/pilots/cp3/raw/ci/ruleset-protect-master.json` | the required status-check contexts of the `protect-master` ruleset |
 | `docs/pilots/cp3/raw/e8/SAMPLE.md` | the verified E8 sample, every class |
 | `docs/pilots/cp3/raw/e8/baseline.json` | the E8 baseline counts and the samples |
 | `docs/pilots/cp3/raw/e8/missing-class.json` | the 47 unmatched includes, classified |

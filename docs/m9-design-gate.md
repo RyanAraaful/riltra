@@ -162,9 +162,11 @@ enforce byte stability.
   `knowledge`, `mcp` plus unit tests; CP7-A local gate: 634 passed / 0 failed
   (8 suites); golden fixtures for every language plus the M6 multilingual
   corpus (79 source/manifest pairs, 494 frozen responses across py/ts/rs/c/cpp).
-- CI (`.github/workflows/ci.yml`): `windows-latest`, `ubuntu-latest`,
-  `macos-latest` running fmt / clippy / `check --locked` / `test --locked` +
-  CLI help/version/status smoke on every push and PR. macOS CI is ARM64.
+- CI (`.github/workflows/ci.yml`): `windows-latest`, `ubuntu-latest` and
+  macOS 15 running fmt / clippy / `check --locked` / `test --locked` +
+  CLI help/version/status smoke on every push and PR. The macOS job name is
+  `check (macos-15)`; its **runner** is `macos-15-intel`, so the macOS CI is
+  **x64** and **macOS ARM64 is not covered** (see the G-NAT correction).
 - No packaging, release, SBOM, or benchmark workflow exists yet.
 
 ### 1.10 Licensing and security evidence present
@@ -468,6 +470,19 @@ Matrix summary (release-gate status at M9 entry; details per gate below):
   milestone (M6 run 38897944666, M7 39091621405, M8 39157182381 all green);
   platform-split tests (Windows junctions, Unix permissions); macOS CI is
   ARM64.
+  **CP3 correction (2026-10-20):** `macos-15` and the earlier `macos-latest`
+  are both **ARM64** images, and the ARM64 hosted pool could not supply a
+  runner: the macOS job was cancelled after ~15 minutes with **no runner
+  assigned and no step executed**, 7 times out of the repository's last 40
+  macOS jobs, while the Windows, Ubuntu and security jobs of the same runs
+  passed; **no macOS job ever failed a test**. The macOS **runner** is now
+  `macos-15-intel` (the same macOS 15 release on the x64 pool); the macOS
+  **job name** stays `check (macos-15)` because the `protect-master` ruleset
+  requires that status-check context. **macOS ARM64 is therefore no longer
+  covered by the CI matrix** and must be restored as a separate,
+  non-required workflow once the ARM64 pool recovers, or the native-macOS
+  claim must be read as x64-only. Evidence:
+  `docs/pilots/cp3/raw/ci/`.
 - **Provable via MMSP.** No — this is a Riltra packaging gate; MMSP only runs
   on the pilot host.
 - **Needs Riltra/release artifacts.** Release-profile builds per OS; artifact
