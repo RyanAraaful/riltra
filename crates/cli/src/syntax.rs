@@ -247,6 +247,32 @@ pub fn relationship_proof(lang: Language, src: &[u8]) -> RelationshipProof {
         node.child_by_field_name("name")
             .or_else(|| c_name_node(node))
     }
+    /// Nearest enclosing callable definition of `node`, if any.
+    fn enclosing_owner(node: tree_sitter::Node<'_>) -> Option<(usize, usize)> {
+        let mut parent = node.parent();
+        while let Some(p) = parent {
+            if callable(p) && name(p).is_some() {
+                return Some((p.start_byte(), p.end_byte()));
+            }
+            if matches!(
+                p.kind(),
+                "lambda"
+                    | "lambda_expression"
+                    | "arrow_function"
+                    | "closure_expression"
+                    | "function_expression"
+                    | "generator_function"
+                    | "class_definition"
+                    | "class_declaration"
+                    | "class_specifier"
+                    | "struct_specifier"
+            ) {
+                return None;
+            }
+            parent = p.parent();
+        }
+        None
+    }
     let mut proof = RelationshipProof::default();
     let mut parser = tree_sitter::Parser::new();
     if parser.set_language(&ts_language(lang)).is_err() {
@@ -266,33 +292,18 @@ pub fn relationship_proof(lang: Language, src: &[u8]) -> RelationshipProof {
             }
         }
         if matches!(node.kind(), "call" | "call_expression") {
-            let mut parent = node.parent();
-            let mut owner = None;
-            while let Some(p) = parent {
-                if callable(p) && name(p).is_some() {
-                    owner = Some((p.start_byte(), p.end_byte()));
-                    break;
-                }
-                if matches!(
-                    p.kind(),
-                    "lambda"
-                        | "lambda_expression"
-                        | "arrow_function"
-                        | "closure_expression"
-                        | "function_expression"
-                        | "generator_function"
-                        | "class_definition"
-                        | "class_declaration"
-                        | "class_specifier"
-                        | "struct_specifier"
-                ) {
-                    break;
-                }
-                parent = p.parent();
-            }
             proof
                 .owners
-                .insert((node.start_byte(), node.end_byte()), owner);
+                .insert((node.start_byte(), node.end_byte()), enclosing_owner(node));
+        }
+        // A C++ direct-initialization call has no `call_expression` node, so
+        // its owner is recorded against the same range the call fact uses.
+        if node.kind() == "declaration" {
+            if let Some((ty, args)) = direct_init_parts(node) {
+                proof
+                    .owners
+                    .insert((ty.start_byte(), args.end_byte()), enclosing_owner(node));
+            }
         }
         for i in (0..node.named_child_count()).rev() {
             if let Some(child) = node.named_child(i) {
@@ -428,6 +439,109 @@ fn push_call(facts: &mut FileFacts, node: tree_sitter::Node, src: &[u8]) {
     });
 }
 
+/// Whether `node` sits inside a function or lambda body. A declaration in
+/// such a scope is a local variable, never a function declaration: C++ does
+/// not allow declaring a function inside a block. Class bodies and
+/// namespace scope are excluded, and a preprocessor branch does not change
+/// the scope.
+fn inside_function_body(node: tree_sitter::Node) -> bool {
+    let mut parent = node.parent();
+    while let Some(p) = parent {
+        match p.kind() {
+            "compound_statement" => {}
+            "function_definition" | "lambda_expression" | "lambda" => return true,
+            "field_declaration_list"
+            | "class_specifier"
+            | "struct_specifier"
+            | "namespace_definition"
+            | "translation_unit" => return false,
+            _ => {}
+        }
+        parent = p.parent();
+    }
+    false
+}
+
+/// C++ direct initialization (`T var(args);`) has no `call_expression` node:
+/// the grammar models it as `declaration` -> `init_declarator` ->
+/// `argument_list`, with the called type in the declaration's type field.
+/// The grammar also applies C++'s most-vexing-parse rule: when every
+/// argument looks like a type, `T var(a, b);` is parsed as a
+/// `function_declarator` (a function prototype) instead. Inside a function
+/// body a function declaration is not legal C++, so that form is a
+/// constructor call too. Returns the called type node and the argument
+/// list node.
+fn direct_init_parts(node: tree_sitter::Node) -> Option<(tree_sitter::Node, tree_sitter::Node)> {
+    let decl = node.child_by_field_name("declarator")?;
+    let args = match decl.kind() {
+        // Direct initialization puts the argument list in the declarator's
+        // `value` field; copy initialization (`T v = T(args);`) puts a
+        // `call_expression` there, which is captured on its own.
+        "init_declarator" => {
+            let value = decl.child_by_field_name("value")?;
+            if value.kind() != "argument_list" {
+                return None;
+            }
+            value
+        }
+        // Most-vexing-parse form: only a local declaration, never a
+        // prototype, because a function cannot be declared in a block.
+        "function_declarator" => {
+            if !inside_function_body(node) {
+                return None;
+            }
+            let mut walker = decl.walk();
+            let list = decl
+                .named_children(&mut walker)
+                .find(|c| c.kind() == "parameter_list")?;
+            list
+        }
+        _ => return None,
+    };
+    let ty = node.child_by_field_name("type")?;
+    // Only a named type can be a constructor: `int x(5);` is not a call.
+    if !matches!(ty.kind(), "type_identifier" | "qualified_identifier") {
+        return None;
+    }
+    Some((ty, args))
+}
+
+/// Record a C++ direct-initialization constructor call as a call fact. The
+/// call range runs from the called type to the end of the argument list
+/// (`Widget w(1)`), the callee is the type (`Widget`), and the terminal is
+/// the type's last name part.
+fn push_direct_init_call(facts: &mut FileFacts, node: tree_sitter::Node, src: &[u8]) {
+    let Some((ty, args)) = direct_init_parts(node) else {
+        return;
+    };
+    let (ty_span, ty_start, ty_end) = span_of(ty);
+    let (args_span, _, args_end) = span_of(args);
+    let callee_span = CalleeSpan {
+        start_line: ty_span.start_line,
+        start_col: ty_span.start_col,
+        end_line: ty_span.end_line,
+        end_col: ty_span.end_col,
+        byte_start: ty_start,
+        byte_end: ty_end,
+    };
+    let span = Span {
+        start_line: ty_span.start_line,
+        start_col: ty_span.start_col,
+        end_line: args_span.end_line,
+        end_col: args_span.end_col,
+    };
+    facts.calls.push(Fact {
+        kind: "call",
+        name: node_text(ty, src).map(|s| s.to_string()),
+        text: None,
+        span,
+        byte_start: ty_start,
+        byte_end: args_end,
+        callee: Some(callee_span),
+        tcallee: terminal_span(src, ty_start, ty_end),
+    });
+}
+
 /// Terminal identifier/property of a callee expression: the text after the
 /// last `.`, `::`, or `->` separator. Separators are ASCII, so byte
 /// arithmetic on the UTF-8 source is exact. Returns `None` when no
@@ -536,6 +650,7 @@ fn visit(lang: Language, node: tree_sitter::Node, src: &[u8], facts: &mut FileFa
             "class_specifier" => push_def(facts, "class", node, src),
             "preproc_include" => push_import(facts, node, src),
             "call_expression" => push_call(facts, node, src),
+            "declaration" => push_direct_init_call(facts, node, src),
             _ => {}
         },
     }
@@ -725,5 +840,103 @@ mod tests {
     fn grammar_versions_match_lockfile_entries() {
         assert_eq!(grammar_version(Language::Python), "python:0.25.0");
         assert_eq!(grammar_version(Language::Cpp), "cpp:0.23.4");
+    }
+
+    #[test]
+    fn cpp_direct_initialization_is_a_call() {
+        // C++ has no `call_expression` for `T var(args);`: the grammar models
+        // it as declaration -> init_declarator -> argument_list, so the
+        // constructor call is invisible unless it is captured explicitly.
+        let src = b"struct Widget { Widget(int a); };\nvoid caller() {\n  Widget w(1);\n  Widget w2 = Widget(2);\n}\n";
+        let facts = parse_source(Language::Cpp, src);
+        let names: Vec<&str> = facts
+            .calls
+            .iter()
+            .map(|c| c.name.as_deref().unwrap_or(""))
+            .collect();
+        assert_eq!(
+            names,
+            vec!["Widget", "Widget"],
+            "direct initialization and copy initialization are both constructor calls"
+        );
+        let direct = &facts.calls[0];
+        // The call range covers the called type through the argument list.
+        assert_eq!(&src[direct.byte_start..direct.byte_end], b"Widget w(1)");
+        let callee = direct.callee.as_ref().expect("callee span recorded");
+        assert_eq!(&src[callee.byte_start..callee.byte_end], b"Widget");
+        let terminal = direct.tcallee.as_ref().expect("terminal span recorded");
+        assert_eq!(&src[terminal.byte_start..terminal.byte_end], b"Widget");
+    }
+
+    #[test]
+    fn cpp_direct_initialization_keeps_the_qualified_terminal() {
+        let src = b"void caller() {\n  ns::Widget w(1);\n}\n";
+        let facts = parse_source(Language::Cpp, src);
+        assert_eq!(facts.calls.len(), 1);
+        let call = &facts.calls[0];
+        assert_eq!(call.name.as_deref(), Some("ns::Widget"));
+        let terminal = call.tcallee.as_ref().expect("terminal span recorded");
+        assert_eq!(&src[terminal.byte_start..terminal.byte_end], b"Widget");
+    }
+
+    #[test]
+    fn cpp_primitive_direct_initialization_is_not_a_call() {
+        // `int x(5);` is not a constructor call; a primitive type must not
+        // become a call name.
+        let src = b"void caller() {\n  int x(5);\n}\n";
+        let facts = parse_source(Language::Cpp, src);
+        assert!(
+            facts.calls.is_empty(),
+            "primitive initialization is not a call"
+        );
+    }
+
+    #[test]
+    fn cpp_most_vexing_parse_local_declaration_is_a_call() {
+        // `T v(a, b);` with identifier-like arguments is parsed as a
+        // function prototype by the grammar. Inside a function body a
+        // function declaration is not legal C++, so it is a constructor call.
+        let src = b"void caller() {\n  Widget w(options, problem);\n}\n";
+        let facts = parse_source(Language::Cpp, src);
+        assert_eq!(facts.calls.len(), 1);
+        let call = &facts.calls[0];
+        assert_eq!(call.name.as_deref(), Some("Widget"));
+        let callee = call.callee.as_ref().expect("callee span recorded");
+        assert_eq!(&src[callee.byte_start..callee.byte_end], b"Widget");
+        let terminal = call.tcallee.as_ref().expect("terminal span recorded");
+        assert_eq!(&src[terminal.byte_start..terminal.byte_end], b"Widget");
+    }
+
+    #[test]
+    fn cpp_prototype_at_namespace_scope_is_not_a_call() {
+        // The same shape outside a function body is a prototype, not a call.
+        let src = b"Widget w(options, problem);\n";
+        let facts = parse_source(Language::Cpp, src);
+        assert!(
+            facts.calls.is_empty(),
+            "a namespace-scope prototype is not a constructor call"
+        );
+    }
+
+    #[test]
+    fn cpp_local_declaration_in_a_preprocessor_branch_is_a_call() {
+        // A preprocessor branch does not change the scope: the declaration is
+        // still local, so it is a constructor call.
+        let src = b"void caller() {\n#if defined(X)\n  Widget w(options, problem);\n#endif\n}\n";
+        let facts = parse_source(Language::Cpp, src);
+        assert_eq!(facts.calls.len(), 1);
+        assert_eq!(facts.calls[0].name.as_deref(), Some("Widget"));
+    }
+
+    #[test]
+    fn cpp_class_member_declaration_is_not_a_call() {
+        // A declaration inside a class body is a member declaration, not a
+        // constructor call.
+        let src = b"struct Holder { Holder(int a); };\n";
+        let facts = parse_source(Language::Cpp, src);
+        assert!(
+            facts.calls.is_empty(),
+            "a class member declaration is not a constructor call"
+        );
     }
 }
