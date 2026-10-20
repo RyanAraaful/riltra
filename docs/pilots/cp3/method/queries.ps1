@@ -81,10 +81,12 @@ function Invoke-Set {
     $summary += [pscustomobject]@{
       name = $q.n; ms = $sw.ElapsedMilliseconds; exit = $code; bytes = $outText.Length
     }
-    "== $($q.n)  exit=$code  $($sw.ElapsedMilliseconds) ms  $($outText.Length) bytes"
+    # Write-Host, not the pipeline: a stray string in the returned array
+    # would become a null row in the pairing table.
+    Write-Host "== $($q.n)  exit=$code  $($sw.ElapsedMilliseconds) ms  $($outText.Length) bytes"
   }
   $summary | ConvertTo-Json | Set-Content -Path (Join-Path $Dir '_summary.json') -Encoding utf8
-  return $summary
+  return ,$summary
 }
 
 "===== BEFORE ====="
@@ -94,8 +96,9 @@ $after = Invoke-Set -Bin $BinAfter -Dir (Join-Path $Out 'after')
 
 # The pairing table: what changed, and by how much.
 $rows = @()
-foreach ($b in $before) {
-  $a = $after | Where-Object { $_.name -eq $b.name }
+foreach ($b in @($before | Where-Object { $_.name })) {
+  $a = @($after | Where-Object { $_.name -eq $b.name })
+  if ($a.Count -ne 1) { throw "the pairing is not one-to-one for $($b.name)" }
   $bp = Join-Path (Join-Path $Out 'before') ($b.name + '.json')
   $ap = Join-Path (Join-Path $Out 'after') ($b.name + '.json')
   $changed = if ((Test-Path $bp) -and (Test-Path $ap)) {

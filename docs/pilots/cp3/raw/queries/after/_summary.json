@@ -1,169 +1,169 @@
 [
   {
     "name": "d1-1-search-Print",
-    "ms": 2768,
+    "ms": 489,
     "exit": 0,
     "bytes": 8464
   },
   {
     "name": "d1-2-search-normalize_vec",
-    "ms": 1235,
+    "ms": 471,
     "exit": 0,
     "bytes": 709
   },
   {
     "name": "d1-3-search-Run",
-    "ms": 1240,
+    "ms": 479,
     "exit": 0,
     "bytes": 14578
   },
   {
     "name": "d1-4-search-max_triangulation",
-    "ms": 1213,
+    "ms": 472,
     "exit": 0,
     "bytes": 433
   },
   {
     "name": "d1-5-callers-PrintDef",
-    "ms": 1854,
+    "ms": 760,
     "exit": 0,
     "bytes": 1401
   },
   {
     "name": "d1-6-callers-PrintDecl",
-    "ms": 1983,
+    "ms": 734,
     "exit": 0,
     "bytes": 1398
   },
   {
     "name": "d1-7-callers-normalize_vec",
-    "ms": 1946,
+    "ms": 777,
     "exit": 0,
     "bytes": 4968
   },
   {
     "name": "d2-1-callers-PatchMatchCtrlRun",
-    "ms": 1810,
+    "ms": 741,
     "exit": 0,
     "bytes": 2098
   },
   {
     "name": "d2-2-callees-PatchMatchRun",
-    "ms": 1974,
+    "ms": 766,
     "exit": 0,
     "bytes": 3970
   },
   {
     "name": "d2-3-callees-CtrlRun",
-    "ms": 2194,
+    "ms": 879,
     "exit": 0,
     "bytes": 15067
   },
   {
     "name": "d2-4-callers-CreateWorkspace",
-    "ms": 2048,
+    "ms": 784,
     "exit": 0,
     "bytes": 3356
   },
   {
     "name": "d2-5-callers-optmgr-binding",
-    "ms": 1928,
+    "ms": 753,
     "exit": 0,
     "bytes": 1428
   },
   {
     "name": "d3-1-trace-depth4",
-    "ms": 2053,
+    "ms": 803,
     "exit": 0,
     "bytes": 17866
   },
   {
     "name": "d3-2-trace-to-cuda",
-    "ms": 134,
+    "ms": 53,
     "exit": 3,
     "bytes": 74
   },
   {
     "name": "d4-1-impact-member",
-    "ms": 1714,
+    "ms": 671,
     "exit": 0,
     "bytes": 1756
   },
   {
     "name": "d4-2-impact-function",
-    "ms": 1737,
+    "ms": 655,
     "exit": 0,
     "bytes": 1743
   },
   {
     "name": "d0-1-index-status",
-    "ms": 1380,
+    "ms": 476,
     "exit": 0,
     "bytes": 336
   },
   {
     "name": "d0-2-repo-status",
-    "ms": 755,
+    "ms": 279,
     "exit": 0,
     "bytes": 370
   },
   {
     "name": "d0-3-unknown-repo-classified",
-    "ms": 47,
+    "ms": 18,
     "exit": 3,
     "bytes": 45
   },
   {
     "name": "p1-callers-class-PatchMatchCuda",
-    "ms": 1958,
+    "ms": 775,
     "exit": 0,
     "bytes": 1407
   },
   {
     "name": "p2-callers-class-PatchMatch",
-    "ms": 1935,
+    "ms": 826,
     "exit": 0,
     "bytes": 2098
   },
   {
     "name": "p3-search-qualified-Print",
-    "ms": 956,
+    "ms": 530,
     "exit": 0,
     "bytes": 712
   },
   {
     "name": "e8-1-callers-PatchMatch-class",
-    "ms": 2113,
+    "ms": 738,
     "exit": 0,
     "bytes": 1397
   },
   {
     "name": "e8-2-callers-PatchMatchCuda-class",
-    "ms": 1864,
+    "ms": 750,
     "exit": 0,
     "bytes": 1407
   },
   {
     "name": "e8-3-callers-PatchMatchOptions",
-    "ms": 1975,
+    "ms": 776,
     "exit": 0,
     "bytes": 2727
   },
   {
     "name": "e8-4-callers-Controller",
-    "ms": 1960,
+    "ms": 739,
     "exit": 0,
     "bytes": 2098
   },
   {
     "name": "e8-5-callees-PatchMatchRun",
-    "ms": 2113,
+    "ms": 759,
     "exit": 0,
     "bytes": 3970
   },
   {
     "name": "e8-6-impact-PatchMatch-class",
-    "ms": 1819,
+    "ms": 669,
     "exit": 0,
     "bytes": 1739
   }

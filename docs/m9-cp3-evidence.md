@@ -189,11 +189,25 @@ the correction cannot reach them.
 
 ### The 5 added candidates, each verified against the source
 
-| Anchor | Added candidate caller | Verification |
-|---|---|---|
-| `mvs/patch_match.h` (`PatchMatchController`) | `controllers/automatic_reconstruction.cc` | includes `"colmap/mvs/patch_match.h"`; constructs `mvs::PatchMatchController` at `:431` |
-| `mvs/patch_match_options.h` (`PatchMatchOptions`) | `controllers/option_manager.cc` | includes `"colmap/mvs/patch_match_options.h"`; constructs `mvs::PatchMatchOptions` at `:85` — the owner CP1 B.3 verified as the bound object's owner |
-| `mvs/patch_match_options.h` (`PatchMatchOptions`) | `pycolmap/pipeline/mvs.cc` | includes `"colmap/mvs/patch_match_options.h"`; references `mvs::PatchMatchOptions` |
+The exact call site of every added row was resolved from the edge's
+`callee_span` against the indexed working-tree file by
+`docs/pilots/cp3/method/e8-candidate-lines.cjs` (the working tree has CRLF
+endings on this host, so a blob offset and an indexed offset differ).
+
+| Anchor | Added candidate caller | Call site (resolved from the edge's byte span) | Verification |
+|---|---|---|---|
+| `mvs/patch_match.h` (`PatchMatchController`) | `controllers/automatic_reconstruction.cc` | `:431` — `mvs::PatchMatchController patch_match_controller(` | the file `#include "colmap/mvs/patch_match.h"`; the site is CP1 B.2's second construction site, exactly |
+| `mvs/patch_match_options.h` (`PatchMatchOptions`) | `controllers/option_manager.cc` | `:1253` — `*patch_match_stereo = mvs::PatchMatchOptions();` | the file `#include "colmap/mvs/patch_match_options.h"`; this is the copy-initialisation temporary of the `patch_match_stereo` object CP1 B.3 identifies as the bound object's owner |
+| `mvs/patch_match_options.h` (`PatchMatchOptions`) | `pycolmap/pipeline/mvs.cc` | `:179` — `py::arg_v("options", mvs::PatchMatchOptions(), "PatchMatchOptions()"),` | the file `#include "colmap/mvs/patch_match_options.h"`; the pycolmap binding of the same type |
+
+**A correction of record.** An earlier draft of this table attributed the
+`option_manager.cc` candidate to `:85`
+(`patch_match_stereo = std::make_shared<mvs::PatchMatchOptions>();`). That
+is the site CP1 B.3 cites as the object's owner, but it is **not** the
+candidate: its callee terminal is `make_shared`, so it never produces a
+`PatchMatchOptions` candidate row. The candidate is the separate
+construction at `:1253`. The byte span in the archived edge row
+(`callee_span [61047, 61069]` = `mvs::PatchMatchOptions`) is the authority.
 
 **Incorrect candidate additions: 0.** Every added row is `kind:
 POTENTIAL_CALL`, `precision: Heuristic`, `provider: syntax`,
@@ -214,7 +228,7 @@ semantic resolution: the added rows are candidates, and the tool says so.
 `docs/pilots/cp3/method/profile.ps1` ran 7 repetitions per stage on both
 binaries (medians, ms):
 
-| Stage | Before | After | Δ |
+| Stage | Before (differenced median) | After (differenced median) | Δ |
 |---|---|---|---|
 | process start and exit | 8.7 | 8.7 | 0.0 |
 | git fingerprint collection | 270.2 | 271.9 | +1.7 |
@@ -264,10 +278,12 @@ session creates **nothing** (`home_unchanged: true`, 0 files), exposes the
 returns a classified `not_registered` error for an unknown repository.
 Against the **populated** home it leaves two extra files,
 `mmsp-pin.db-shm` and `mmsp-pin.db-wal`. These are **SQLite's own WAL
-sidecars** for a store that already existed: no store file is created, the
-store file's size is unchanged (50 020 352 bytes before and after), so **no
-schema migration ran**. This is the already-accepted WAL behaviour,
-accurately stated — not a read tool creating or migrating a store.
+sidecars** for a store that already existed: **no store file is created**
+(`store files created: 0`) and the store files' sizes are **unchanged**
+(`mmsp-pin.db` 50 020 352 bytes before and after, `riltra-self.db`
+9 379 840 bytes before and after), so **no schema migration ran**. This is
+the already-accepted WAL behaviour, accurately stated — not a read tool
+creating or migrating a store.
 
 **C8 — escape refused.** A junction inside the MMSP clone pointing outside
 the root: `scan --path …/cp3-escape/secret.h` → exit 3, `error: --path
@@ -322,8 +338,8 @@ assertions, so it fails on drift, not on counts.
 ### 6.1 G-SYN — source-verified syntax
 
 **Regression: PASS.** `cargo test --locked` is green on the candidate:
-360 + 16 + 144 + 21 + 52 + 44 + 15 + 12 = **664 tests, 0 failures**. The
-M6 corpus runs inside `tests/edges.rs` (144 tests), one per pair, each
+360 + 16 + 145 + 21 + 52 + 44 + 15 + 12 = **665 tests, 0 failures**. The
+M6 corpus runs inside `tests/edges.rs` (145 tests), one per pair, each
 asserting the full JSON golden and the source-truth spans.
 
 **MMSP re-scan: PASS.** The pinned tree scans deterministically: 2 277 files
@@ -529,13 +545,20 @@ Bounded profiling with existing tooling only
 (`docs/pilots/cp3/method/profile.ps1`): 7 repetitions per stage, one
 discarded warm-up, medians on an otherwise idle host.
 
-| Stage | Median | min–max | Share of the `callers` invocation |
+| Stage | Differenced median | Raw command range (min–max) | Share of the `callers` invocation |
 |---|---|---|---|
 | process start and exit | **8.7 ms** | 7.9–10.4 | 1.1 % |
 | **git fingerprint collection** | **271.9 ms** | 274.2–286.5 | **35.8 %** |
 | **database open + snapshot validation** | **191.9 ms** | 454.3–492.8 | **25.3 %** |
 | query execution (`search`) | below the resolution of this method | 461.4–487.0 | ≈ 0 % |
 | query execution (`callers`, the E8 path) | **287.1 ms** | 742.9–773.3 | 37.8 % |
+
+The two columns are **different quantities** and must not be read as one
+distribution: the *differenced median* is the stage's estimated cost
+(current command median minus the previous stage's median), while the
+*raw command range* is the spread of the whole command that was timed. A
+raw minimum can therefore sit above a differenced median. Both come from
+`docs/pilots/cp3/raw/gates/perf/stages.json` and `breakdown.json`.
 
 The stages are separated by **differencing** the cost of successively
 heavier commands, because the CLI has no built-in stage timer; the search
@@ -583,7 +606,7 @@ not provide. It is recorded as unresolved rather than guessed.
 | Phase | Scope | Result |
 |---|---|---|
 | 1 | E8 source-grounded evaluation | **COMPLETE** — the caller candidate scope and import matching located and explained from source; baseline measured; a verified sample of true / incorrect / ambiguous / missing classes prepared; the frozen CP1 anchors included; a before-change baseline recorded. **One CP2 figure corrected** (§2.2). |
-| 2 | Conditional minimal E8 implementation | **COMPLETE — Option A implemented**, narrower than projected (rooted literals only). Regression tests: 3 unit tests + 7 CLI-level tests covering correct discovery, ambiguous suffixes, misleading unique matches, missing paths, differing include roots, Windows/Unix normalisation and cross-repository isolation. The red state was proven: with the source change stashed, `e8_rooted_include_adds_candidate_caller` fails. No new schema, database, dependency, CMake parser or external provider. |
+| 2 | Conditional minimal E8 implementation | **COMPLETE — Option A implemented**, narrower than projected (rooted literals only). Regression tests: 3 unit tests + 8 CLI-level tests covering correct discovery, the anchor-name filter, ambiguous suffixes, misleading unique matches, missing paths, differing include roots, Windows/Unix normalisation and cross-repository isolation. The red state was proven for the two load-bearing cases: with the source change stashed, `e8_rooted_include_adds_candidate_caller` fails, and with `callee_name = ?9` removed from the query predicate, `e8_candidate_scope_keeps_the_anchor_name_filter` fails (the `Other` edge leaks in). No new schema, database, dependency, CMake parser or external provider. |
 | 3 | Re-measure E8 impact | **COMPLETE** — 28 queries on one index, 4 changed, 5 candidates added, 0 removed, **0 `CALLS` and 0 `REFERENCES` added**, every added row verified against the source, missing expected relations classified to E1/E7/E12, cost unchanged within noise. |
 | 4 | Multi-repository verification | **COMPLETE** — one isolated home, exactly two repositories, eight checks, all PASS. Riltra self-indexing labelled internal validation. No third pilot repository. |
 | 5 | Remaining CP3 gate verification | **COMPLETE** — G-SYN, G-SEM, G-GRF, G-FSH, G-INC, G-KNW, G-SEC re-verified with archived evidence; G-TOK recorded without re-running CP7-A; G-MCP/E10 measured for the first time. |
@@ -637,6 +660,7 @@ new coverage gap (`.inl`) that must be decided before G-SYN can close.
 | `docs/pilots/cp3/method/e8-missing-class.cjs` | classifies the unmatched includes against the real git tree |
 | `docs/pilots/cp3/method/e8-anchor.cjs` | the frozen CP1 anchors under the E8 rules |
 | `docs/pilots/cp3/method/e8-diff.cjs` | the before/after edge diff |
+| `docs/pilots/cp3/method/e8-candidate-lines.cjs` | resolves each added candidate's byte span to its exact source line |
 | `docs/pilots/cp3/method/queries.ps1` | the 28-query before/after set |
 | `docs/pilots/cp3/method/multirepo.ps1` | the multi-repository isolation matrix |
 | `docs/pilots/cp3/method/multirepo-probe.cjs` | the store-level two-repository comparison |
@@ -647,6 +671,7 @@ new coverage gap (`.inl`) that must be decided before G-SYN can close.
 | `docs/pilots/cp3/raw/e8/baseline.json` | the E8 baseline counts and the samples |
 | `docs/pilots/cp3/raw/e8/missing-class.json` | the 47 unmatched includes, classified |
 | `docs/pilots/cp3/raw/e8/anchors.json` | the frozen CP1 anchors under the E8 rules |
+| `docs/pilots/cp3/raw/e8/candidate-lines.json` | every added candidate's byte span resolved to its exact source line |
 | `docs/pilots/cp3/raw/e8/include-roots.txt` | the include-root evidence, verbatim from the pinned tree |
 | `docs/pilots/cp3/raw/e8/remeasurement.md` | the before/after result and the missing-relation analysis |
 | `docs/pilots/cp3/raw/queries/` | the before/after answers, the pairing table and the diff |

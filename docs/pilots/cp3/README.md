@@ -32,6 +32,7 @@ $bin = "$w\riltra-after.exe"     # the candidate binary
 node method/e8-baseline.cjs "$w\home\index\mmsp-pin.db" 'colmap/src' > raw/e8/baseline.json
 node method/e8-missing-class.cjs raw/e8/baseline.json "$w\raw\mmsp-tree.txt" > raw/e8/missing-class.json
 node method/e8-anchor.cjs "$w\home\index\mmsp-pin.db" 'colmap/src' > raw/e8/anchors.json
+node method/e8-candidate-lines.cjs "$w\clones\mmsp" "$w\raw\queries" > raw/e8/candidate-lines.json
 
 # Phase 3 — before/after on ONE index (the correction is query-side)
 pwsh -File method/queries.ps1 -HomeDir "$w\home" -BinBefore "$w\riltra-before.exe" `

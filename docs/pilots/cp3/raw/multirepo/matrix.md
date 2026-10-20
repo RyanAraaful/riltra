@@ -45,15 +45,15 @@ repository has its own store.
 | Session | Result |
 |---|---|
 | read-only MCP session against an **empty** home | `home_unchanged: true`, **0** files created; 11 tools; stdout 6/6 JSON lines, 0 non-JSON; unknown repository → classified `not_registered` error |
-| read-only MCP session against the **populated** home | 11 tools; stdout pure; classified error; **no new store, no migration** |
+| read-only MCP session against the **populated** home | 11 tools; stdout pure; classified error; **no store file created** (`store files created: 0`) and **no store file migrated** (`mmsp-pin.db` 50 020 352 bytes before and after, `riltra-self.db` 9 379 840 bytes before and after) |
 
 **The accepted WAL caveat, stated accurately.** Against the populated home
 the session leaves two extra files: `mmsp-pin.db-shm` and `mmsp-pin.db-wal`.
 These are **SQLite's own WAL sidecars** for the store that already existed:
 
-- no store file is created (the store file list is the same before and after);
-- the store file's size is unchanged (50 020 352 bytes before and after), so
-  **no schema migration ran**;
+- **no store file is created** (`store files created: 0`);
+- the store files' sizes are **unchanged** before and after, so **no schema
+  migration ran**;
 - the sidecars belong to the database SQLite opens for reading, and are
   removed again on the next clean close.
 

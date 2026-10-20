@@ -167,13 +167,23 @@ Case 'C7-mcp-read-only-purity' 'read-only MCP tools create or migrate no store' 
   $entries = @(Get-ChildItem -Recurse -Force -LiteralPath $empty -ErrorAction SilentlyContinue)
   $lines += "empty home entries after a read-only MCP session: $($entries.Count)"
   foreach ($e in $entries) { $lines += "  $($e.Name)" }
-  # The same session against the populated home must not change it either.
+  # The same session against the populated home must not change it either:
+  # no store file is created and no store file is migrated (its size and
+  # its schema must be unchanged).
+  $store = Get-ChildItem -Recurse -Force -LiteralPath (Join-Path $HomeDir 'index') -Filter '*.db' -ErrorAction SilentlyContinue
+  $before = @{}
+  foreach ($f in $store) { $before[$f.Name] = $f.Length }
   $populatedBefore = @(Get-ChildItem -Recurse -Force -LiteralPath $HomeDir -ErrorAction SilentlyContinue)
   $env:CP2_HOME = $HomeDir
   $env:CP2_OUT = (Join-Path $OutDir 'c7-mcp-populated-home')
   node (Join-Path $PSScriptRoot '..\..\cp2\method\mcp-smoke.cjs') 2>&1 | Out-Null
   $populatedAfter = @(Get-ChildItem -Recurse -Force -LiteralPath $HomeDir -ErrorAction SilentlyContinue)
   $lines += "populated home entries before=$($populatedBefore.Count) after=$($populatedAfter.Count)"
+  foreach ($f in $store) {
+    $now = (Get-Item -LiteralPath $f.FullName).Length
+    $lines += "store $($f.Name) bytes before=$($before[$f.Name]) after=$now"
+  }
+  $lines += "store files created: $((@(Get-ChildItem -Recurse -Force -LiteralPath (Join-Path $HomeDir 'index') -Filter '*.db')).Count - $store.Count)"
   $lines
 }
 

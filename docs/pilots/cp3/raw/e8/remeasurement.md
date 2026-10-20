@@ -28,11 +28,25 @@ the `callers` candidate branch of `store::EdgeSelection::sql`.
 
 ## The 5 added candidates, each verified against the source
 
-| Anchor (header) | Added candidate caller | Verification |
-|---|---|---|
-| `colmap/src/colmap/mvs/patch_match.h` (`PatchMatchController`) | `colmap/src/colmap/controllers/automatic_reconstruction.cc` | the file `#include "colmap/mvs/patch_match.h"` and constructs `mvs::PatchMatchController patch_match_controller(...)` at `:431` |
-| `colmap/src/colmap/mvs/patch_match_options.h` (`PatchMatchOptions`) | `colmap/src/colmap/controllers/option_manager.cc` | the file `#include "colmap/mvs/patch_match_options.h"` and constructs `mvs::PatchMatchOptions` at `:85` — the owner CP1 B.3 verified as the bound object's owner |
-| `colmap/src/colmap/mvs/patch_match_options.h` (`PatchMatchOptions`) | `colmap/src/pycolmap/pipeline/mvs.cc` | the file `#include "colmap/mvs/patch_match_options.h"` and references `mvs::PatchMatchOptions` |
+The call site of every added row was resolved from the edge's `callee_span`
+against the indexed working-tree file (CRLF endings on this host, so the
+blob and the indexed offsets differ). Machine output:
+`method/e8-candidate-lines.cjs`.
+
+| Anchor (header) | Added candidate caller | Call site | Verification |
+|---|---|---|---|
+| `colmap/src/colmap/mvs/patch_match.h` (`PatchMatchController`) | `colmap/src/colmap/controllers/automatic_reconstruction.cc` | `:431` — `mvs::PatchMatchController patch_match_controller(` | the file `#include "colmap/mvs/patch_match.h"`; the site is CP1 B.2's second construction site, exactly |
+| `colmap/src/colmap/mvs/patch_match_options.h` (`PatchMatchOptions`) | `colmap/src/colmap/controllers/option_manager.cc` | `:1253` — `*patch_match_stereo = mvs::PatchMatchOptions();` | the file `#include "colmap/mvs/patch_match_options.h"`; the copy-initialisation temporary of the `patch_match_stereo` object CP1 B.3 cites as the bound object's owner |
+| `colmap/src/colmap/mvs/patch_match_options.h` (`PatchMatchOptions`) | `colmap/src/pycolmap/pipeline/mvs.cc` | `:179` — `py::arg_v("options", mvs::PatchMatchOptions(), "PatchMatchOptions()"),` | the file `#include "colmap/mvs/patch_match_options.h"`; the pycolmap binding of the same type |
+
+**Correction of record.** An earlier draft attributed the `option_manager.cc`
+candidate to `:85`
+(`patch_match_stereo = std::make_shared<mvs::PatchMatchOptions>();`). That
+is the site CP1 B.3 cites as the object's owner, but it is **not** the
+candidate: its callee terminal is `make_shared`, so it never produces a
+`PatchMatchOptions` candidate row. The candidate is the separate
+construction at `:1253`; the archived edge row's `callee_span`
+`[61047, 61069]` = `mvs::PatchMatchOptions` is the authority.
 
 The `PatchMatchController` row appears in three queries (`d2-1`, `e8-4`,
 `p2`) because three anchors resolve to the same definition.

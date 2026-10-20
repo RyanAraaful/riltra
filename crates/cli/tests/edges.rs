@@ -1997,6 +1997,34 @@ fn e8_rooted_include_adds_candidate_caller() {
 }
 
 #[test]
+fn e8_candidate_scope_keeps_the_anchor_name_filter() {
+    let h = home("e8name");
+    repo_with(
+        &h,
+        "sem",
+        &[
+            ("src/proj/thing.h", E8_HEADER),
+            (
+                "src/proj/main.cc",
+                "#include \"proj/thing.h\"\n\nint go() { return Thing(1) + Other(1); }\n",
+            ),
+        ],
+    );
+    do_index(&h);
+    let v = e8_callers(&h, "src/proj/thing.h");
+    let edges = e8_edges(&v);
+    // The importing file IS in the candidate scope, but only the rows whose
+    // callee name is the anchor's name are selected.
+    assert_eq!(edges.len(), 1, "{v}");
+    assert_eq!(edges[0]["callee_name"], "Thing");
+    assert_eq!(edges[0]["caller_path"], "src/proj/main.cc");
+    assert!(
+        !edges.iter().any(|e| e["callee_name"] == "Other"),
+        "the anchor's name must filter the candidate scope: {v}"
+    );
+}
+
+#[test]
 fn e8_ambiguous_suffix_stays_unresolved() {
     let h = home("e8ambig");
     repo_with(
