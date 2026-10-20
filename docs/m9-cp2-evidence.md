@@ -290,13 +290,38 @@ to the pin afterwards (HEAD `d62f06a…`, porcelain 0).
 
 ## 5. Incremental correctness (CP1 §A.7 five-point contract)
 
-The audit re-ran the whole step with the corrected capture:
+Two pairs of indexes are compared. They are **different proofs**, and the
+earlier version of this section only had the second one:
 
-| Run | Mode | `reused` | `reparsed` | `fallback_reason` | Wall | Fact counters |
-|---|---|---|---|---|---|---|
-| no-op refresh | `incremental` | 1 438 | 0 | `none` | 52.1 s | 2 277 / 1 438 / 12 105 / 6 680 / 91 025 / 1 991 |
-| one-file delta | `incremental` | 1 437 | 1 | `none` | 65.0 s | identical |
-| independent full rebuild (fresh home, same tree) | `full` | 0 | 1 438 | `forced-full` | 166.5 s | identical |
+| Pair | Source tree | Incremental index | Independent full rebuild | Result |
+|---|---|---|---|---|
+| **the delta pair** | the tree with the one-file change | `reparsed=1`, `reused=1437` | a fresh home, `reparsed=1438`, `forced-full` | **identical facts, identical query answers** |
+| **the pinned pair** | the restored pinned tree | a no-op refresh, `reparsed=0`, `reused=1438` | a fresh home, `reparsed=1438`, `forced-full` | **identical facts** |
+
+The delta pair is the one that proves the incremental path: both indexes come
+from the **same** one-file-changed tree, so the comparison cannot be
+satisfied by two indexes that merely happen to hold the same file set. The
+pinned pair shows that the incremental path and a full rebuild also agree on
+the tree the pilot is pinned to.
+
+### 5.1 The delta pair — the same one-file-changed tree
+
+The sequence (`method/incremental.ps1`), each step verified:
+
+| Step | Action | Verified |
+|---|---|---|
+| 1 | restore the snapshot to the pin | HEAD `d62f06a…`, porcelain 0 |
+| 2 | the baseline index of that tree | `mode=incremental`, `reused=1438`, `reparsed=0`, `fresh` (50.1 s) |
+| 3 | change exactly one file | the porcelain shows **exactly one** entry; `patch_match_options.h` sha256 `0F20F6CC…` |
+| 4 | incremental indexing on the changed tree | `mode=incremental`, `reused=1437`, **`reparsed=1`** (49.9 s) |
+| 5 | an independent full rebuild in a fresh home on the **same** tree | `mode=full`, `reused=0`, `reparsed=1438`, `forced-full` (151.2 s) |
+| 6 | the fact digests of **both** indexes, taken **before** the restore | all five tables identical, the combined digest identical |
+| 7 | the query parity on the same state | 12 of 12 identical |
+| 8 | restore the snapshot to the pin and verify it | HEAD `d62f06a…`, porcelain 0; the main home re-indexed to the pinned tree |
+
+Fact counters of both indexes (identical in every run):
+`discovered 2277 · processed 1438 · definitions 12105 · imports 6680 ·
+calls 91025 · errors 1991`.
 
 Same-tree fact parity, computed as order-independent digests over the index
 database (files with content digests, symbols, imports, calls with spans and
@@ -310,18 +335,40 @@ provenance, and the edge set):
 | `calls` | 91 025 / 91 025 | **yes** |
 | `code_edges` | 97 705 / 97 705 | **yes** |
 
-The 12 query outputs of the two homes are identical after normalizing the
-volatile snapshot metadata (`id`, `created_unix`, `nonce`, `revision`,
-`added_unix`); the only raw difference is the snapshot creation timestamp.
-The comparison **aborts** if a query exits non-zero, prints nothing, or
-differs — the harness can no longer report a match it did not measure
-(§11.1).
+Combined digest, both indexes: `2389cd32e702b479e48b0b3a9ca5e452aa379406058b063b79e619dfcc18756c`.
+
+The source tree identity of the pair is archived with it
+(`raw-audit/incremental/delta-tree.json`): the commit `d62f06a…`, the one
+porcelain entry, the changed file's content digest `0F20F6CC…`, and the
+commit each index recorded. The comparison additionally refuses a pair whose
+indexes recorded **different** commits.
+
+The 12 query answers of the two indexes are identical after normalizing the
+**verified** volatile snapshot metadata (the snapshot id, its creation
+timestamp, its nonce and its revision, and the registry's `added_unix`).
+The normalization is structural for a JSON answer, so no broad regex can
+erase a substantive difference; a query that errors, prints nothing or
+exits non-zero never matches.
+
+### 5.2 The pinned pair — after the restore
+
+The main home, re-indexed to the pinned tree, against an independent full
+rebuild of that same tree (`method/parity-release.ps1`): all five fact
+tables and the combined digest are identical
+(`46b73363467a875f…`), and the tree identity is archived in
+`raw-audit/incremental/pinned-tree.json`.
+
+### 5.3 Contract result
 
 **Contract result:** same tree and configuration, fact parity, equal total
 fact counters, operational counters validated per mode, and no unexplained
-fact difference. The operational counters are *not* expected to be equal: a
-full build re-parses everything, an incremental run reuses the unchanged
-files. This is the CP1 §A.7 contract, and it is met.
+fact difference — for the changed tree *and* for the pinned tree. The
+operational counters are *not* expected to be equal: a full build re-parses
+everything, an incremental run reuses the unchanged files. This is the
+CP1 §A.7 contract, and it is met. Every comparison in it **can fail**: a
+digest that differs, is empty or cannot be computed, a source tree that does
+not match, a query that errors or prints nothing, and a nonzero exit code
+each abort the step (§11.1, §11.3).
 
 ---
 
@@ -583,7 +630,7 @@ code and here, and none of them produces a wrong fact:
 
 | Limit | Behaviour | Why |
 |---|---|---|
-| a **typedef** is indistinguishable from a class | `size_t n(0);` is recorded as a call to `size_t` although C++ may perform a functional cast | a name lookup would settle it (gap E12) |
+| a **typedef** is indistinguishable from a class | `size_t n(0);` is recorded as a `POTENTIAL_CALL` candidate to `size_t`, although C++ may perform a functional cast there — the fact is a **possible false positive**, never a verified constructor call | a name lookup would settle it (gap E12) |
 | a **multi-declarator** declaration | `Widget a(1), b(2);` records the fact for the first declarator only | the grammar attaches one declarator field; the omission is conservative |
 | a **template type** | `std::vector<int> v(10);` is recorded, with the terminal `vector<int>` | the template arguments stay in the terminal (the known terminal-mangling limit) |
 
@@ -623,7 +670,7 @@ than assumed.
 | E1 | C++ semantics absent: no provider, no compilation database in MMSP | **unsupported capability** (owner-gated: clangd deferred by D-M9-2) | release-blocking for resolved C++ call edges |
 | E7 | Reference-level resolution absent: a data member, a member read and a macro argument produce no edge, so `impact` on a field is empty, a trace cannot exceed one hop, and the ambiguous most-vexing-parse form cannot be decided (a name lookup is needed) | **unsupported capability** (owner-gated) | release-blocking for workflow 4 |
 | E8 | C/C++ include-root resolution: the candidate-caller scope of an anchor is built from import texts that mention the anchor's *repository-relative* path, but MMSP's includes are rooted at `colmap/src/`. Measured: **0 of 4 009** quoted C/C++ includes resolve; a unique-suffix rule *would* match **2 993** of them, 969 are ambiguous and 47 have no match | **implementation defect** — diagnosed, measured, **not fixed here** (see 10.3) | release-blocking for cross-TU C++ callers (workflow 2) |
-| E9 | The warm-query p95 target (§14.3, ≤ 500 ms) is missed by 2.1–2.4× in the release profile. The **cause is a hypothesis**: the measurements are consistent with a large fixed per-invocation cost (process start, the `git` subprocess, the database open) rather than with the graph, but the query path was **not profiled**, so the split is unmeasured | **diagnostic**, not a gate | owner decision: profile first, then either the target or the fixed cost |
+| E9 | The warm-query p95 target (§14.3, ≤ 500 ms) is missed by **1.04×–2.18×** in the release profile on an idle host (the two idle-host runs of the audit; the earlier CP2 figure of 2.1×–2.4× was taken under host contention and is **superseded**). The **cause is a hypothesis**: the measurements are consistent with a large fixed per-invocation cost (process start, the `git` subprocess, the database open) rather than with the graph, but the query path was **not profiled**, so the split is unmeasured | **diagnostic**, not a gate | owner decision: profile first, then either the target or the fixed cost |
 | E10 | The OpenCode free tier refuses nested CLI sessions in this environment, so the agent side of workflow 5 could not be measured | **environmental block** | G-MCP re-verification deferred; CP7-A G6 remains the last agent-side evidence |
 | E11 | The repository's own history carries unsanitized local paths (1 068 findings in 9 commits / 184 files, 0 credential-rule findings), inherited from CP1 | **open risk**, unchanged | rewrite still owner-gated |
 | E12 | The C++ most-vexing-parse form cannot be decided from syntax: `T v(a, b);` is a function declaration when `a`/`b` denote types and a variable when they denote variables. Riltra therefore records **no** constructor call for that form (§9.4, §9.5) | **unsupported capability** (needs the name lookup of E1/E7) | the affected constructor calls are missing, not wrong |
@@ -692,6 +739,11 @@ cannot decide the most-vexing-parse form without a name lookup.
 | `pilots/cp2/raw/` | **the original CP2 run, preserved unchanged** (queries, freshness, incremental, perf, MCP, cold index, the first grading) |
 | `pilots/cp2/raw-audit/` | **the audit's corrected run** (queries against the corrected index, the corrected grading, the incremental parity, the MCP smoke, the agent-side session summary) |
 | `pilots/cp2/raw/cold-index*.txt` | the cold-index runs (debug and release) |
+| `pilots/cp2/raw-audit/incremental/` | the one-file-delta pair: the digests of the incremental index and of the independent full rebuild of the **same** changed tree, the source tree identity, the query parity of that pair, and the restore evidence |
+| `pilots/cp2/raw-audit/incremental/delta-inc-facts.json` | the fact digest of the incrementally updated index (taken **before** the restore) |
+| `pilots/cp2/raw-audit/incremental/delta-oracle-facts.json` | the fact digest of the independent full rebuild of the same changed tree |
+| `pilots/cp2/raw-audit/incremental/delta-tree.json` | the source tree identity of that pair: the commit, the porcelain, the changed file's content digest and the commit each index recorded |
+| `pilots/cp2/raw-audit/incremental/parity-*.inc.txt` / `.oracle.txt` | the query answers of that pair, one file per query and per index |
 | `pilots/cp2/raw-audit/grading.json` | the corrected grading: 17 honesty PASS, 1 honesty UNAVAILABLE, 4 capability UNMET, 2 evidence UNAVAILABLE |
 
 All archived evidence is redacted: machine-local paths are replaced with
@@ -732,3 +784,26 @@ recorded, with the terminal `vector<int>`. The two limits that remain (a
 typedef is indistinguishable from a class, and a multi-declarator
 declaration records its first declarator only) are recorded in §9.6 and in
 the code.
+
+### 11.3 The parity comparison can fail
+
+The comparison logic lives in `pilots/cp2/method/fact-digest.cjs` and is
+covered by `pilots/cp2/method/fact-digest.test.cjs` (16 assertions):
+
+| Case | Verdict |
+|---|---|
+| two factually identical indexes | **IDENTICAL** |
+| a content change the oracle does not have | **DIFFERENT** (`tables-differ:files`) |
+| a changed edge set or row count | **DIFFERENT** |
+| indexes whose recorded commits differ | **DIFFERENT** (`snapshot-head-differs`) |
+| a missing source-tree record | **DIFFERENT** (`missing-snapshot-metadata`) |
+| an empty or missing digest | **NOT IDENTICAL** (`missing-digest`), never a pass |
+| a missing combined digest | **DIFFERENT** (`missing-combined-digest`) |
+| a missing query output | **NOT IDENTICAL** (`empty-output`) |
+| a nonzero exit code | **NOT IDENTICAL** (`nonzero-exit:3/0`) |
+| a substantive difference in the results | **DIFFERENT** (`content-differs`) |
+| only the volatile snapshot metadata differs | **IDENTICAL** |
+
+The command line behaves the same way: `compare-digests` exits 0 only for an
+identical pair, 1 for a difference and 2 for a digest it could not read, so
+the harness aborts on any of them.
