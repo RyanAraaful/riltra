@@ -467,6 +467,9 @@ fn direct_init_parts(node: tree_sitter::Node) -> Option<(tree_sitter::Node, tree
     }
     let ty = node.child_by_field_name("type")?;
     // Only a named type can be a constructor: `int x(5);` is not a call.
+    // shortcut: a typedef is indistinguishable from a class here, so
+    // `size_t n(0);` is recorded as a call to `size_t` although it may be
+    // a functional cast; a name lookup would settle it (gap E12).
     if !matches!(ty.kind(), "type_identifier" | "qualified_identifier") {
         return None;
     }
@@ -943,6 +946,37 @@ mod tests {
         let facts = parse_source(Language::Cpp, src);
         assert_eq!(facts.calls.len(), 1);
         assert_eq!(facts.calls[0].name.as_deref(), Some("Widget"));
+    }
+
+    #[test]
+    fn cpp_direct_initialization_records_the_first_declarator_only() {
+        // Known limit: a declaration with several declarators yields the
+        // fact for the first one only. The omission is conservative - a
+        // missing fact, never a wrong one.
+        let src = b"void caller() {\n  Widget a(1), b(2);\n}\n";
+        let facts = parse_source(Language::Cpp, src);
+        assert_eq!(
+            facts.calls.len(),
+            1,
+            "only the first declarator of a multi-declarator declaration is recorded"
+        );
+    }
+
+    #[test]
+    fn cpp_template_type_direct_initialization_is_a_call() {
+        // A template type is a qualified_identifier in the type field, so
+        // the call is recorded. The terminal keeps the template arguments
+        // (`vector<int>`), which is the known terminal-mangling limit.
+        let src = b"void caller() {\n  std::vector<int> v(10);\n}\n";
+        let facts = parse_source(Language::Cpp, src);
+        assert_eq!(facts.calls.len(), 1);
+        let call = &facts.calls[0];
+        assert_eq!(call.name.as_deref(), Some("std::vector<int>"));
+        let callee = call.callee.as_ref().expect("callee span recorded");
+        assert_eq!(
+            &src[callee.byte_start..callee.byte_end],
+            b"std::vector<int>"
+        );
     }
 
     #[test]
