@@ -22,6 +22,7 @@ if (-not $ReleaseBin) { $ReleaseBin = Get-DefaultBin -Profile 'release' }
 $snap = Assert-SnapshotPath -Path $cfg.Snapshot -Root $cfg.BenchRoot -MmspRoot $cfg.MmspRoot
 $raw = New-BenchDir -Path (Join-Path $cfg.Out 'incremental') -Root $cfg.BenchRoot
 $digest = Join-Path $PSScriptRoot 'db-mutation-check.cjs'
+$compare = Join-Path $PSScriptRoot 'fact-digest.cjs'
 
 "===== 1. restore the snapshot to the pinned tree ====="
 Restore-Snapshot -Snapshot $snap -Root $cfg.BenchRoot -Pin $Pin -MmspRoot $cfg.MmspRoot | Out-Null
@@ -50,7 +51,7 @@ $o = $full | ConvertFrom-Json
 
 "===== 4. same-tree fact parity (order-independent digests) ====="
 # The digests are archived with the run, so the parity can be re-verified
-# from the archive alone.
+# from the archive alone. Both indexes are taken from the SAME pinned tree.
 $incJson = Join-Path $raw 'inc-facts.json'
 $orcJson = Join-Path $raw 'oracle-facts.json'
 node $digest (Join-Path $HomeDir 'index\mmsp-pin.db') $incJson | Out-Null
@@ -59,13 +60,24 @@ node $digest (Join-Path $oracleDir 'index\mmsp-pin.db') $orcJson | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "the fact digest script failed" }
 $ii = Get-Content $incJson -Raw | ConvertFrom-Json
 $oo = Get-Content $orcJson -Raw | ConvertFrom-Json
-$parityFailures = @()
 foreach ($t in 'files','symbols','imports','calls','edges') {
   "  {0,-9} rows {1,7} vs {2,7}  identical = {3}" -f $t, $ii.tables.$t.rows, $oo.tables.$t.rows, ($ii.tables.$t.digest -eq $oo.tables.$t.digest)
-  if ($ii.tables.$t.digest -ne $oo.tables.$t.digest) { $parityFailures += $t }
 }
-"  COMBINED IDENTICAL = $($ii.combined_digest -eq $oo.combined_digest)"
-if ($ii.combined_digest -ne $oo.combined_digest) { $parityFailures += 'combined' }
+"  incremental combined = $($ii.combined_digest)"
+"  oracle      combined = $($oo.combined_digest)"
+# The comparison is the tested one: a difference, an empty digest, a digest
+# that could not be computed or a source tree that does not match is a FAIL.
+node $compare compare-digests $incJson $orcJson
+if ($LASTEXITCODE -ne 0) { throw "FACT PARITY on the pinned tree: DIFFERENT (exit $LASTEXITCODE)" }
+$pinnedTree = [ordered]@{
+  snapshot_head = (git -C $snap rev-parse HEAD)
+  snapshot_porcelain = @(git -C $snap status --porcelain)
+  incremental_index_head = $ii.snapshot.head
+  oracle_index_head = $oo.snapshot.head
+  incremental_combined_digest = $ii.combined_digest
+  oracle_combined_digest = $oo.combined_digest
+}
+[System.IO.File]::WriteAllText((Join-Path $raw 'pinned-tree.json'), ($pinnedTree | ConvertTo-Json -Depth 4), (New-Object System.Text.UTF8Encoding($false)))
 
 "===== 5. release profile: cold index ====="
 if (-not (Test-Path -LiteralPath $ReleaseBin)) { throw "release binary not found: $ReleaseBin" }
@@ -123,7 +135,4 @@ foreach ($q in $queries) {
 $rows | ConvertTo-Json | Set-Content (Join-Path $cfg.Out 'perf-release.json') -Encoding utf8
 "  SLO p95 <= 500 ms missed by: $($rows | Where-Object { $_.ms_p95 -gt 500 } | ForEach-Object { $_.query })"
 
-if ($parityFailures.Count -gt 0) {
-  throw "fact parity failed for: $($parityFailures -join ', ')"
-}
 "DONE-PARITY-RELEASE"

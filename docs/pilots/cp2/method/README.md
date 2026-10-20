@@ -40,7 +40,9 @@ pwsh -File test-path-safety.ps1
 pwsh -File run-all.ps1 -BenchRoot $bench -Snapshot $snap -MmspRoot <original clone>
 ```
 
-The individual steps, in the order `run-all.ps1` runs them:
+The individual steps. `run-all.ps1` runs the first group in this order; the
+rest are standalone (the diagnostics, the release profile and the
+self-tests, which `run-all.ps1` also runs as step 0).
 
 | Script | What it does |
 |---|---|
@@ -50,19 +52,43 @@ The individual steps, in the order `run-all.ps1` runs them:
 | `grade.cjs` | grades the query output against the CP1 section D criteria |
 | `grade.test.cjs` | the regression tests of the grader (`node --test`) |
 | `freshness.ps1` | the CP1 section C freshness scenarios F0-F5 |
-| `incremental.ps1` | the no-op refresh, the one-file delta, the oracle rebuild and the query parity |
+| `incremental.ps1` | the one-file delta, the independent full rebuild of the **same** changed tree, the fact digests of both, the query parity, and only then the restore |
 | `perf.ps1` | the warm-query timings |
-| `parity-release.ps1` | the same-tree fact parity plus the release profile |
+| `parity-release.ps1` | the same-tree fact parity on the pinned tree plus the release profile |
+| `fact-digest.cjs` | the order-independent fact digest and the **comparison** (digests, query answers, the volatile-metadata normalization) |
+| `fact-digest.test.cjs` | the regression tests of the comparison (`node --test`) |
+| `db-mutation-check.cjs` | the content digest of an index database |
+| `db-facts.cjs` | read-only fact reports (`facts`, `split`, `digest`) |
+| `db-include-probe.cjs`, `db-probe*.cjs` | the read-only diagnostics behind the decision package |
 | `mcp-smoke.cjs` | the MCP stdio smoke (needs `CP2_RILTRA`, `CP2_HOME`, `CP2_OUT`) |
 | `d5-mcp-sequence.cjs` | the D.5 tool sequence over the real MCP transport |
 | `opencode-session.ps1` | the agent-side OpenCode session |
-| `db-facts.cjs` | read-only fact reports (`facts`, `split`, `digest`) |
-| `db-mutation-check.cjs` | the content digest of an index database |
-| `fact-digest.cjs` | the shared order-independent digest implementation |
-| `db-include-probe.cjs`, `db-probe*.cjs` | the read-only diagnostics behind the decision package |
 | `measure.ps1` | the measurement wrapper (wall time, peak RSS) |
 | `redact.cjs` | redacts machine-local paths before archiving |
 | `common.ps1` | the path-safety helpers and the shared configuration |
+
+## The parity step
+
+`incremental.ps1` proves the parity on **one** source tree — the tree with
+the one-file change — and never compares two indexes from different source
+states:
+
+1. restore the snapshot to the frozen pin;
+2. refresh the baseline index on that tree (a no-op: `reparsed` must be 0);
+3. change exactly one file (the porcelain must show exactly one entry);
+4. index incrementally on the changed tree (`reparsed` must be 1);
+5. build an independent full rebuild (oracle) in a fresh home on the **same**
+   changed tree;
+6. compute and archive the fact digests of **both** indexes **before** the
+   restore, and compare them;
+7. compare the query answers of both indexes on the same state;
+8. only then restore the snapshot to the pin, verify it, and re-index the
+   main home.
+
+The archived pair is `incremental/delta-inc-facts.json` and
+`incremental/delta-oracle-facts.json`, with the source tree identity in
+`incremental/delta-tree.json` (the commit, the porcelain, the changed file's
+content digest and the commit each index recorded).
 
 ## Path safety
 
@@ -91,17 +117,30 @@ A comparison never reports a match it did not measure:
 
 - a query that exits non-zero, prints nothing, or cannot be parsed aborts
   the step;
-- the incremental step also asserts that the one-file delta really changed
-  the tree and that exactly one file was re-parsed, so a parity over two
-  identical trees cannot be reported;
-- the fact parity needs a digest from both sides; a missing digest aborts
-  the run instead of comparing two empty strings;
+- the incremental step also asserts that the one-file change touched
+  exactly one entry, that the baseline refresh was a no-op, that the
+  incremental run re-parsed exactly one file, and that the snapshot was
+  restored afterwards;
+- the fact parity needs a digest from both sides, computed from the **same**
+  source tree; a missing, empty or uncomputable digest, a differing digest
+  or a differing recorded commit is a FAIL;
 - the grader distinguishes `PASS`, `FAIL`, `UNMET` (a capability gap) and
   `UNAVAILABLE` (the evidence could not be obtained), and exits non-zero
   when a check fails. A parse error is never a `PASS`, an empty array is
   never proof of completeness, and an impact verdict must be exactly
   `UNKNOWN`;
-- `run-all.ps1` grades **this run's** query directory, not the archived one.
+- only the **verified** volatile snapshot metadata is normalized: the
+  snapshot id, its creation timestamp, its nonce and its revision, and the
+  registry's `added_unix`. The normalization is structural for a JSON answer,
+  so no broad regex can erase a substantive difference;
+- `run-all.ps1` grades **this run's** query directory, not the archived one,
+  and re-makes the parity comparison from the archived digest pair of the
+  same-state (changed tree) pair.
+
+`fact-digest.test.cjs` is the regression test of the comparison: two
+identical indexes pass, a content change the oracle does not have fails, an
+empty or missing digest never passes, a missing output or a nonzero exit
+never passes, and a substantive difference is never normalized away.
 
 ## Redaction
 

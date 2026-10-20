@@ -8,6 +8,7 @@
 "use strict";
 const { DatabaseSync } = require("node:sqlite");
 const crypto = require("node:crypto");
+const fs = require("node:fs");
 
 const flat = (row) =>
   Object.values(row)
@@ -46,4 +47,186 @@ function combinedDigest(tables) {
   return h.digest("hex");
 }
 
-module.exports = { factTables, combinedDigest, digestRows };
+function snapshotMeta(dbPath) {
+  const db = new DatabaseSync(dbPath, { readOnly: true });
+  const snap = db.prepare("select * from snapshots order by id desc limit 1").get();
+  db.close();
+  if (!snap) return null;
+  return {
+    id: snap.id,
+    head: snap.head,
+    dirty: snap.dirty,
+    status_at_write: snap.status_at_write,
+  };
+}
+
+// --- the comparisons ------------------------------------------------------
+//
+// A parity check that cannot fail proves nothing, so each comparison
+// reports WHY it rejects and never reports a match it did not measure.
+
+const FACT_TABLES = ["files", "symbols", "imports", "calls", "edges"];
+
+// Compare two digest objects (the output of db-mutation-check.cjs).
+function compareDigests(a, b) {
+  if (!a || typeof a !== "object" || !b || typeof b !== "object") {
+    return { identical: false, reason: "missing-digest" };
+  }
+  if (!a.tables || !b.tables) {
+    return { identical: false, reason: "missing-tables" };
+  }
+  // The two indexes must come from the same source tree: the recorded
+  // commit must match, and the metadata must be there to prove it.
+  if (!a.snapshot || !b.snapshot) {
+    return { identical: false, reason: "missing-snapshot-metadata" };
+  }
+  if (a.snapshot.head !== b.snapshot.head) {
+    return { identical: false, reason: "snapshot-head-differs" };
+  }
+  const differing = [];
+  for (const t of FACT_TABLES) {
+    const ta = a.tables[t];
+    const tb = b.tables[t];
+    if (!ta || !tb || !ta.digest || !tb.digest) {
+      return { identical: false, reason: "missing-table:" + t };
+    }
+    if (ta.digest !== tb.digest) differing.push(t);
+    else if (ta.rows !== tb.rows) differing.push(t + ":rows");
+  }
+  if (differing.length > 0) {
+    return { identical: false, reason: "tables-differ:" + differing.join(","), tables: differing };
+  }
+  if (!a.combined_digest || !b.combined_digest) {
+    return { identical: false, reason: "missing-combined-digest" };
+  }
+  if (a.combined_digest !== b.combined_digest) {
+    return { identical: false, reason: "combined-digest-differs" };
+  }
+  return { identical: true, reason: null, tables: FACT_TABLES };
+}
+
+// The verified volatile snapshot metadata. Everything else - results, spans,
+// counters, file digests - is content and must match byte for byte.
+function normalizeSnapshot(snapshot) {
+  const out = Object.assign({}, snapshot);
+  if ("id" in out) out.id = "<SNAP>";
+  if ("created_unix" in out) out.created_unix = "<TS>";
+  if ("nonce" in out) out.nonce = "<NONCE>";
+  if ("revision" in out) out.revision = "<REVISION>";
+  return out;
+}
+
+function normalizeDoc(node) {
+  if (Array.isArray(node)) return node.map(normalizeDoc);
+  if (node && typeof node === "object") {
+    const out = {};
+    for (const [key, value] of Object.entries(node)) {
+      if (key === "snapshot" && value && typeof value === "object" && !Array.isArray(value)) {
+        // A result carries a numeric "snapshot" (the snapshot id): only an
+        // object is the snapshot metadata.
+        out[key] = normalizeSnapshot(value);
+      } else if (key === "repos" && Array.isArray(value)) {
+        out[key] = value.map((r) =>
+          r && typeof r === "object" ? Object.assign({}, r, { added_unix: "<TS>" }) : r
+        );
+      } else {
+        out[key] = normalizeDoc(value);
+      }
+    }
+    return out;
+  }
+  return node;
+}
+
+// Normalize a query answer. A JSON document is normalized structurally, so
+// no broad regex can erase a substantive difference; a plain text answer
+// (a CLI error) is compared as it is.
+function normalizeOutput(text) {
+  const raw = String(text == null ? "" : text);
+  let doc;
+  try {
+    doc = JSON.parse(raw);
+  } catch (e) {
+    return raw.trim();
+  }
+  return JSON.stringify(normalizeDoc(doc));
+}
+
+// Compare two query answers. A nonzero exit, a missing output or a
+// substantive difference is never a match.
+function compareOutputs(a, b) {
+  if (!a || !b) return { identical: false, reason: "missing-output" };
+  if (a.exitCode !== 0 || b.exitCode !== 0) {
+    return { identical: false, reason: "nonzero-exit:" + a.exitCode + "/" + b.exitCode };
+  }
+  const ta = String(a.text == null ? "" : a.text);
+  const tb = String(b.text == null ? "" : b.text);
+  if (ta.trim() === "" || tb.trim() === "") {
+    return { identical: false, reason: "empty-output" };
+  }
+  if (normalizeOutput(ta) === normalizeOutput(tb)) {
+    return { identical: true, reason: null };
+  }
+  return { identical: false, reason: "content-differs" };
+}
+
+module.exports = {
+  factTables,
+  combinedDigest,
+  digestRows,
+  snapshotMeta,
+  compareDigests,
+  compareOutputs,
+  normalizeOutput,
+  FACT_TABLES,
+};
+
+// --- the command line -----------------------------------------------------
+
+if (require.main === module) {
+  const mode = process.argv[2] || "";
+  const fail = (reason, detail) => {
+    console.log("NOT IDENTICAL: " + reason + (detail ? " (" + detail + ")" : ""));
+    process.exit(1);
+  };
+  if (mode === "compare-digests") {
+    const read = (p) => {
+      if (!p || !fs.existsSync(p)) return null;
+      const text = fs.readFileSync(p, "utf8");
+      if (!text.trim()) return null;
+      try {
+        return JSON.parse(text);
+      } catch (e) {
+        return null;
+      }
+    };
+    const a = read(process.argv[3]);
+    const b = read(process.argv[4]);
+    if (!a || !b) {
+      console.log("NOT IDENTICAL: missing-digest");
+      process.exit(2);
+    }
+    const r = compareDigests(a, b);
+    if (!r.identical) fail(r.reason);
+    console.log("IDENTICAL: " + FACT_TABLES.join(","));
+    process.exit(0);
+  }
+  if (mode === "compare-outputs") {
+    const read = (p) => {
+      if (!p || !fs.existsSync(p)) return "";
+      return fs.readFileSync(p, "utf8");
+    };
+    const exitA = process.argv[5] === undefined ? 0 : Number(process.argv[5]);
+    const exitB = process.argv[6] === undefined ? 0 : Number(process.argv[6]);
+    const r = compareOutputs(
+      { exitCode: exitA, text: read(process.argv[3]) },
+      { exitCode: exitB, text: read(process.argv[4]) }
+    );
+    if (!r.identical) fail(r.reason);
+    console.log("IDENTICAL");
+    process.exit(0);
+  }
+  console.log("usage: node fact-digest.cjs compare-digests <a.json> <b.json>");
+  console.log("       node fact-digest.cjs compare-outputs <a.txt> <b.txt> [exitA] [exitB]");
+  process.exit(2);
+}

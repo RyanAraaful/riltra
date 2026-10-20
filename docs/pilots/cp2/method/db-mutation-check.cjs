@@ -5,7 +5,7 @@
 "use strict";
 const crypto = require("node:crypto");
 const fs = require("node:fs");
-const { factTables, combinedDigest } = require("./fact-digest.cjs");
+const { factTables, combinedDigest, snapshotMeta } = require("./fact-digest.cjs");
 
 const dbPath = process.argv[2];
 const outPath = process.argv[3] || "";
@@ -22,6 +22,7 @@ if (!tables) {
 const result = {
   file_bytes: fs.statSync(dbPath).size,
   file_sha256: crypto.createHash("sha256").update(fs.readFileSync(dbPath)).digest("hex"),
+  snapshot: snapshotMeta(dbPath),
   tables: tables,
   fact_rows: tables.files.rows + tables.symbols.rows + tables.imports.rows + tables.calls.rows,
   total_rows: Object.values(tables).reduce((n, t) => n + t.rows, 0),

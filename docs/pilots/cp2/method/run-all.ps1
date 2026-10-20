@@ -28,6 +28,17 @@ $method = $PSScriptRoot
 
 function Section([string]$t) { "`n================ $t ================" }
 
+Section "0. harness self-tests (the comparison must be able to fail)"
+Push-Location $method
+try {
+  node --test (Join-Path $method 'fact-digest.test.cjs')
+  if ($LASTEXITCODE -ne 0) { throw "the fact-digest tests failed with exit $LASTEXITCODE" }
+  node --test (Join-Path $method 'grade.test.cjs')
+  if ($LASTEXITCODE -ne 0) { throw "the grader tests failed with exit $LASTEXITCODE" }
+  pwsh -NoProfile -File (Join-Path $method 'test-path-safety.ps1')
+  if ($LASTEXITCODE -ne 0) { throw "the path-safety tests failed with exit $LASTEXITCODE" }
+} finally { Pop-Location }
+
 Section "1. cold index x2"
 & (Join-Path $method 'cold-index.ps1') -BenchRoot $bench -Bin $cfg.Bin -Snapshot $snap -Out $raw
 
@@ -53,26 +64,28 @@ Section "5. freshness F1-F5"
 Section "6. incremental correctness"
 & (Join-Path $method 'incremental.ps1') -BenchRoot $bench -Bin $cfg.Bin -Snapshot $snap -MmspRoot $cfg.MmspRoot -Out $raw -HomeDir $homeMain
 
-Section "7. fact-level parity (DB digests: incremental vs oracle)"
-$incDb = Join-Path $raw 'inc.db'
-$orcDb = Join-Path $raw 'oracle.db'
-Copy-Item (Join-Path $homeMain 'index\mmsp-pin.db') $incDb -Force
-Copy-Item (Join-Path $bench 'home-oracle\index\mmsp-pin.db') $orcDb -Force
-$inc = node (Join-Path $method 'db-mutation-check.cjs') $incDb (Join-Path $raw 'inc-facts.json')
-if ($LASTEXITCODE -ne 0) { throw "the incremental fact digest failed with exit $LASTEXITCODE" }
-$orc = node (Join-Path $method 'db-mutation-check.cjs') $orcDb (Join-Path $raw 'oracle-facts.json')
-if ($LASTEXITCODE -ne 0) { throw "the oracle fact digest failed with exit $LASTEXITCODE" }
-$incDigest = (Get-Content (Join-Path $raw 'inc-facts.json') -Raw | ConvertFrom-Json).combined_digest
-$orcDigest = (Get-Content (Join-Path $raw 'oracle-facts.json') -Raw | ConvertFrom-Json).combined_digest
-if (-not $incDigest -or -not $orcDigest) { throw "a fact digest is missing; the comparison cannot be made" }
+Section "7. fact-level parity (the same-state pair from step 6)"
+# Step 6 proved the parity on ONE source tree: the tree with the one-file
+# change, indexed incrementally and rebuilt from scratch. The digests are
+# read back from the archive, so the comparison is re-made here with the
+# tested comparison. Two indexes from DIFFERENT source states are never
+# compared: after step 6 the main home has been restored to the pinned tree,
+# so comparing it with the oracle (built on the changed tree) would prove
+# nothing.
+$incFacts = Join-Path $raw 'incremental\delta-inc-facts.json'
+$orcFacts = Join-Path $raw 'incremental\delta-oracle-facts.json'
+if (-not (Test-Path -LiteralPath $incFacts) -or -not (Test-Path -LiteralPath $orcFacts)) {
+  throw "the delta digest pair is missing; step 6 did not archive it"
+}
+node (Join-Path $method 'fact-digest.cjs') compare-digests $incFacts $orcFacts
+if ($LASTEXITCODE -ne 0) { throw "FACT PARITY: DIFFERENT (exit $LASTEXITCODE)" }
+$incDigest = (Get-Content $incFacts -Raw | ConvertFrom-Json).combined_digest
+$orcDigest = (Get-Content $orcFacts -Raw | ConvertFrom-Json).combined_digest
 "  incremental: $incDigest"
 "  oracle     : $orcDigest"
-if ($incDigest -eq $orcDigest) {
-  "  FACT PARITY: IDENTICAL"
-}
-else {
-  throw "FACT PARITY: DIFFERENT ($incDigest vs $orcDigest)"
-}
+"  FACT PARITY: IDENTICAL (both indexes are from the same one-file-changed tree)"
+$tree = Get-Content (Join-Path $raw 'incremental\delta-tree.json') -Raw | ConvertFrom-Json
+"  tree: head=$($tree.snapshot_head) changed=$($tree.changed_file) sha256=$($tree.changed_file_sha256.Substring(0,16))..."
 
 Section "8. warm query performance (5 reps each)"
 & (Join-Path $method 'perf.ps1') -BenchRoot $bench -Bin $cfg.Bin -Out $raw -HomeDir $homeMain
