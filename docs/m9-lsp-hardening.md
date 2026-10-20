@@ -229,7 +229,15 @@ evidence, and Task A/Task B behave as documented on the success path."
 | `cargo test --locked` | 380 + 16 + 145 + 21 + 52 + 44 + 15 + 12 = **685 passed, 0 failed** |
 | `cargo test --locked` with `RILTRA_TEST_LSP=1` | the gated end-to-end LSP test also passes (local only; CI does not set the gate) |
 | `git diff --check` | clean |
-| security scan (`security/scan.sh staged`) | the pre-commit hook runs it; no findings |
+| security scan (`security/scan.sh staged`, gitleaks 8.30.1) | no findings; one allowlist entry was added for a verified synthetic UNC fixture in the LSP unit test, in the same style as the existing entries |
+| CI on the commit | `39488750755`: windows, ubuntu, macos-15 and security all green |
+
+**No regression on the pilot's E1/E7 findings.** The pilot's own probe
+table (17 probes over the fixture and MMSP) was re-run against the hardened
+build: every answer is the same file and line as the pilot measured, and
+the only expectation that does not hold is the E12 one — which is the
+finding, not a regression. The hardening changes what the caller is told
+about the answer (the diagnostics, the staleness), not what the answer is.
 
 The CI matrix does not set `RILTRA_TEST_LSP`, so the end-to-end LSP test is
 local evidence; the adapter-level tests are in CI. That is a known limit of
