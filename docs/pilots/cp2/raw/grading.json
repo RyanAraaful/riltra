@@ -1,0 +1,398 @@
+{
+  "generated_at": "2026-10-20T06:38:27.828Z",
+  "checks": [
+    {
+      "id": "D1-H1",
+      "criterion": "search returns the Print definition (patch_match.h:74 or patch_match.cc:118)",
+      "layer": "honesty",
+      "pass": true,
+      "evidence": {
+        "h74": false,
+        "cc118": true,
+        "total": 29
+      }
+    },
+    {
+      "id": "D1-H2",
+      "criterion": "reference edges are candidates (POTENTIAL_CALL), never proven CALLS",
+      "layer": "honesty",
+      "pass": true,
+      "evidence": {
+        "kinds": [],
+        "n_edges": 0,
+        "note": "empty edge set is honest but incomplete"
+      }
+    },
+    {
+      "id": "D1-H3",
+      "criterion": "search normalize_vec returns the Python definition and no C++ one",
+      "layer": "honesty",
+      "pass": true,
+      "evidence": {
+        "py34": true,
+        "results": [
+          "colmap/benchmark/reconstruction/evaluation/geometry.py:34"
+        ]
+      }
+    },
+    {
+      "id": "D1-H4",
+      "criterion": "search Run returns multiple distinct identities, not one merged symbol",
+      "layer": "honesty",
+      "pass": true,
+      "evidence": {
+        "distinct_paths": [
+          "colmap/benchmark/reconstruction/evaluate.py",
+          "colmap/benchmark/reconstruction/evaluation/utils.py",
+          "colmap/benchmark/runtime/fundamental_matrix_degensac.cc",
+          "colmap/benchmark/runtime/incremental_mapping.cc",
+          "colmap/python/examples/example.py",
+          "colmap/python/pycolmap/panorama.py",
+          "colmap/src/colmap/controllers/automatic_reconstruction.cc",
+          "colmap/src/colmap/controllers/bundle_adjustment.cc",
+          "colmap/src/colmap/controllers/feature_extraction.cc",
+          "colmap/src/colmap/controllers/feature_matching.cc",
+          "colmap/src/colmap/controllers/feature_matching_utils.cc",
+          "colmap/src/colmap/controllers/global_pipeline.cc",
+          "colmap/src/colmap/controllers/hierarchical_pipeline.cc",
+          "colmap/src/colmap/controllers/incremental_pipeline.cc",
+          "colmap/src/colmap/controllers/reconstruction_clustering.cc",
+          "colmap/src/colmap/controllers/rotation_averaging.cc",
+          "colmap/src/colmap/controllers/undistorters.cc",
+          "colmap/src/colmap/estimators/global_positioning.cc",
+          "colmap/src/colmap/estimators/gravity_refinement.cc",
+          "colmap/src/colmap/estimators/rotation_averaging.cc",
+          "colmap/src/colmap/estimators/rotation_averaging_test.cc",
+          "colmap/src/colmap/estimators/solvers/absolute_pose.cc",
+          "colmap/src/colmap/exe/database.cc",
+          "colmap/src/colmap/exe/feature.cc"
+        ],
+        "total": 161
+      }
+    },
+    {
+      "id": "D1-H5",
+      "criterion": "repository identity and freshness verdict are present",
+      "layer": "honesty",
+      "pass": true,
+      "evidence": {
+        "repo": "mmsp-pin",
+        "freshness": "fresh",
+        "reasons": []
+      }
+    },
+    {
+      "id": "D1-C6",
+      "criterion": "reference set resolves the C++ method identity (separates patch_match.cc:667 from :668 and fusion.cc:144)",
+      "layer": "capability",
+      "pass": false,
+      "evidence": {
+        "reason": "measured below from the raw edge list",
+        "edge_sites": [],
+        "distinct_sites": 0
+      }
+    },
+    {
+      "id": "D2-H1",
+      "criterion": "caller candidates include the two direct construction calls (exe/mvs.cc, automatic_reconstruction.cc)",
+      "layer": "honesty",
+      "pass": false,
+      "evidence": {
+        "caller_paths": []
+      }
+    },
+    {
+      "id": "D2-H2",
+      "criterion": "callee candidates of PatchMatch::Run include the PatchMatchCuda construction and Run call",
+      "layer": "honesty",
+      "pass": true,
+      "evidence": {
+        "callee_names": [
+          "LOG_HEADING2",
+          "Check",
+          "make_unique<PatchMatchCuda>",
+          "Run"
+        ]
+      }
+    },
+    {
+      "id": "D2-H3",
+      "criterion": "the ThreadPool dispatch to ProcessProblem is absent or a candidate, never a proven CALLS edge",
+      "layer": "honesty",
+      "pass": true,
+      "evidence": {
+        "process_problem_edges": []
+      }
+    },
+    {
+      "id": "D2-H4",
+      "criterion": "CreateWorkspace references stay inside patch_match.cc",
+      "layer": "honesty",
+      "pass": true,
+      "evidence": {
+        "caller_paths": [
+          "colmap/src/colmap/mvs/patch_match.cc"
+        ]
+      }
+    },
+    {
+      "id": "D2-H5",
+      "criterion": "the option-manager address-of site is not presented as a call edge to max_triangulation_angle",
+      "layer": "honesty",
+      "pass": true,
+      "evidence": {
+        "edges": []
+      }
+    },
+    {
+      "id": "D2-C6",
+      "criterion": "all three construction sites are attributed to the class (incl. the make_shared/make_unique template site)",
+      "layer": "capability",
+      "pass": false,
+      "evidence": {
+        "has_widget_site": false,
+        "distinct_callers": 0
+      }
+    },
+    {
+      "id": "D3-H2",
+      "criterion": "the plausibility disclaimer plausible-path-not-execution is present",
+      "layer": "honesty",
+      "pass": true,
+      "evidence": {
+        "disclaimer": "plausible-path-not-execution"
+      }
+    },
+    {
+      "id": "D3-H3",
+      "criterion": "the path does not claim a device-side (CUDA) definition",
+      "layer": "honesty",
+      "pass": true,
+      "evidence": {
+        "path_hops": [
+          [
+            "colmap/src/colmap/mvs/patch_match.cc:9909"
+          ],
+          [
+            "colmap/src/colmap/mvs/patch_match.cc:9931"
+          ],
+          [
+            "colmap/src/colmap/mvs/patch_match.cc:9951"
+          ],
+          [
+            "colmap/src/colmap/mvs/patch_match.cc:9970"
+          ],
+          [
+            "colmap/src/colmap/mvs/patch_match.cc:10008"
+          ],
+          [
+            "colmap/src/colmap/mvs/patch_match.cc:10037"
+          ],
+          [
+            "colmap/src/colmap/mvs/patch_match.cc:10080"
+          ],
+          [
+            "colmap/src/colmap/mvs/patch_match.cc:10117"
+          ],
+          [
+            "colmap/src/colmap/mvs/patch_match.cc:10896"
+          ],
+          [
+            "colmap/src/colmap/mvs/patch_match.cc:11384"
+          ],
+          [
+            "colmap/src/colmap/mvs/patch_match.cc:11436"
+          ],
+          [
+            "colmap/src/colmap/mvs/patch_match.cc:11634"
+          ],
+          [
+            "colmap/src/colmap/mvs/patch_match.cc:11820"
+          ],
+          [
+            "colmap/src/colmap/mvs/patch_match.cc:12117"
+          ],
+          [
+            "colmap/src/colmap/mvs/patch_match.cc:12432"
+          ],
+          [
+            "colmap/src/colmap/mvs/patch_match.cc:12484"
+          ],
+          [
+            "colmap/src/colmap/mvs/patch_match.cc:12687"
+          ],
+          [
+            "colmap/src/colmap/mvs/patch_match.cc:12997"
+          ],
+          [
+            "colmap/src/colmap/mvs/patch_match.cc:13037"
+          ],
+          [
+            "colmap/src/colmap/mvs/patch_match.cc:13225"
+          ],
+          [
+            "colmap/src/colmap/mvs/patch_match.cc:13252"
+          ]
+        ],
+        "has_cu_hop": false
+      }
+    },
+    {
+      "id": "D3-H4",
+      "criterion": "the CUDA destination query fails cleanly instead of inventing a path",
+      "layer": "honesty",
+      "pass": true,
+      "evidence": {
+        "to_cuda_output": "{\"_parse_error\":\"error: anchor unresolved: source-changed; reindex before syntax fallback\"}"
+      }
+    },
+    {
+      "id": "D3-C5",
+      "criterion": "the path spans the full frozen chain including the indirect thread-pool dispatch",
+      "layer": "capability",
+      "pass": false,
+      "evidence": {
+        "measured": "from path_hops",
+        "path_hops": [
+          [
+            "colmap/src/colmap/mvs/patch_match.cc:9909"
+          ],
+          [
+            "colmap/src/colmap/mvs/patch_match.cc:9931"
+          ],
+          [
+            "colmap/src/colmap/mvs/patch_match.cc:9951"
+          ],
+          [
+            "colmap/src/colmap/mvs/patch_match.cc:9970"
+          ],
+          [
+            "colmap/src/colmap/mvs/patch_match.cc:10008"
+          ],
+          [
+            "colmap/src/colmap/mvs/patch_match.cc:10037"
+          ],
+          [
+            "colmap/src/colmap/mvs/patch_match.cc:10080"
+          ],
+          [
+            "colmap/src/colmap/mvs/patch_match.cc:10117"
+          ],
+          [
+            "colmap/src/colmap/mvs/patch_match.cc:10896"
+          ],
+          [
+            "colmap/src/colmap/mvs/patch_match.cc:11384"
+          ],
+          [
+            "colmap/src/colmap/mvs/patch_match.cc:11436"
+          ],
+          [
+            "colmap/src/colmap/mvs/patch_match.cc:11634"
+          ],
+          [
+            "colmap/src/colmap/mvs/patch_match.cc:11820"
+          ],
+          [
+            "colmap/src/colmap/mvs/patch_match.cc:12117"
+          ],
+          [
+            "colmap/src/colmap/mvs/patch_match.cc:12432"
+          ],
+          [
+            "colmap/src/colmap/mvs/patch_match.cc:12484"
+          ],
+          [
+            "colmap/src/colmap/mvs/patch_match.cc:12687"
+          ],
+          [
+            "colmap/src/colmap/mvs/patch_match.cc:12997"
+          ],
+          [
+            "colmap/src/colmap/mvs/patch_match.cc:13037"
+          ],
+          [
+            "colmap/src/colmap/mvs/patch_match.cc:13225"
+          ],
+          [
+            "colmap/src/colmap/mvs/patch_match.cc:13252"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "D4-H2",
+      "criterion": "the impact verdict is UNKNOWN (never SAFE/LOW and never 'no impact')",
+      "layer": "honesty",
+      "pass": true,
+      "evidence": {
+        "verdict": "UNKNOWN"
+      }
+    },
+    {
+      "id": "D4-H3",
+      "criterion": "completeness is partial with graph-completeness-unproven",
+      "layer": "honesty",
+      "pass": true,
+      "evidence": {
+        "completeness": {
+          "status": "partial",
+          "covered": 0,
+          "total": 0,
+          "total_exact": true,
+          "denominator": {
+            "ambiguous_calls": 194,
+            "dynamic_calls": 46053,
+            "missing_provider_files": 1438,
+            "observed_edges": 0,
+            "parse_error_files": 151,
+            "skipped_files": 0,
+            "stale_imports": 0,
+            "truncated_branches": 0,
+            "unresolved_owner": 17115,
+            "unresolved_target": 91957,
+            "unsupported_files": 839
+          },
+          "unresolved": [
+            "ambiguous_calls",
+            "dynamic_calls",
+            "empty-result-not-coverage-proof",
+            "graph-completeness-unproven",
+            "insufficient-impact-evidence",
+            "missing_provider_files",
+            "parse_error_files",
+            "syntax-anchor-uncertain",
+            "unresolved-relations",
+            "unresolved_owner",
+            "unresolved_target",
+            "unsupported_files"
+          ]
+        },
+        "disclaimer": "plausible-impact-not-execution"
+      }
+    },
+    {
+      "id": "D4-H4",
+      "criterion": "no macro site is resolved to a function definition named after the option",
+      "layer": "honesty",
+      "pass": true,
+      "evidence": {
+        "mentions_option_as_callee": false
+      }
+    },
+    {
+      "id": "D4-C5",
+      "criterion": "the affected set includes the 4 non-call sites (declaration, print, validation, read/filter, CLI binding)",
+      "layer": "capability",
+      "pass": false,
+      "evidence": {
+        "measured": "from paths",
+        "paths": [],
+        "nodes": {
+          "nodes": 1,
+          "edges": 0
+        }
+      }
+    }
+  ]
+}
