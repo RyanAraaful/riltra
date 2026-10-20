@@ -1513,6 +1513,59 @@ fn import_mentions_path(importer: &str, language: &str, text: &str, target: &str
     false
 }
 
+/// The quoted literal of a C/C++ `#include "..."` directive, with its
+/// separators normalised to `/`. An angle-bracket include names a root or
+/// system header, and a repository path suffix can never establish which
+/// one the compiler opens.
+fn cpp_include_literal(text: &str) -> Option<String> {
+    let rest = text.split_once('"')?.1;
+    let literal = rest.split_once('"')?.0;
+    if literal.is_empty() {
+        return None;
+    }
+    // Every repository path uses '/', so a Windows-authored include must
+    // resolve the same way on every host.
+    Some(literal.replace('\\', "/"))
+}
+
+/// Every component-boundary suffix of `path` that still carries a
+/// directory component: the forms an `#include` literal may take for a
+/// header that lives under an include root the repository does not
+/// record. A bare filename is excluded — it is the one form a system
+/// header can shadow.
+fn suffix_anchors(path: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    if path.contains('/') {
+        out.push(path);
+    }
+    for (at, _) in path.match_indices('/') {
+        let suffix = &path[at + 1..];
+        if suffix.contains('/') {
+            out.push(suffix);
+        }
+    }
+    out
+}
+
+/// The one indexed path the literal names, or `None` when it names none
+/// or several. Ambiguity is never resolved arbitrarily.
+fn unique_suffix_match<'a>(
+    literal: &str,
+    paths: impl Iterator<Item = &'a String>,
+) -> Option<&'a str> {
+    let needle = format!("/{literal}");
+    let mut found: Option<&'a str> = None;
+    for path in paths {
+        if path == literal || path.ends_with(&needle) {
+            if found.is_some() {
+                return None;
+            }
+            found = Some(path.as_str());
+        }
+    }
+    found
+}
+
 fn caller_candidate_paths(
     tx: &rusqlite::Connection,
     snapshot_id: i64,
@@ -1526,10 +1579,49 @@ fn caller_candidate_paths(
     let mut linked = BTreeSet::from([anchor.path.clone()]);
     // Local SCIP identities never gain cross-document name candidates.
     if anchor.doc.is_none() {
-        for import in store::imports_for(tx, snapshot_id)? {
+        let imports = store::imports_for(tx, snapshot_id)?;
+        for import in &imports {
             if let (Some(path), Some(text)) = (paths.get(&import.file_id), import.text.as_deref()) {
                 if import_mentions_path(path, &import.language, text, &anchor.path) {
                     linked.insert((*path).to_string());
+                }
+            }
+        }
+        // A C/C++ include is written against an include root the repository
+        // does not record, so its literal rarely equals the target's
+        // repository-relative path. A unique path suffix may widen this
+        // candidate scope; it stays a candidate and never an identity.
+        // shortcut: a unique suffix is not proof of the compiler's choice —
+        // a literal the compiler resolves through another include root stays
+        // a candidate only; upgrade by reading the build system's roots.
+        let anchors = suffix_anchors(&anchor.path);
+        if !anchors.is_empty() {
+            let mut resolved: BTreeMap<String, Option<&str>> = BTreeMap::new();
+            for import in &imports {
+                let path = match paths.get(&import.file_id) {
+                    Some(path) => *path,
+                    None => continue,
+                };
+                if !matches!(import.language.as_str(), "c" | "cpp") {
+                    continue;
+                }
+                let literal = match import.text.as_deref().and_then(cpp_include_literal) {
+                    Some(literal) => literal,
+                    None => continue,
+                };
+                if !anchors.contains(&literal.as_str()) {
+                    continue;
+                }
+                let hit = match resolved.get(literal.as_str()) {
+                    Some(hit) => *hit,
+                    None => {
+                        let hit = unique_suffix_match(&literal, id_map.keys());
+                        resolved.insert(literal.clone(), hit);
+                        hit
+                    }
+                };
+                if hit == Some(anchor.path.as_str()) {
+                    linked.insert(path.to_string());
                 }
             }
         }
@@ -2661,7 +2753,8 @@ pub fn evaluate_snapshot(
 #[cfg(test)]
 mod tests {
     use super::{
-        build, build_full, config_fingerprint, diff_files, evaluate, evaluate_tx, input_fingerprint,
+        build, build_full, config_fingerprint, cpp_include_literal, diff_files, evaluate,
+        evaluate_tx, input_fingerprint, suffix_anchors, unique_suffix_match,
     };
     use crate::store;
     use crate::testutil::{git_repo, tmpdir};
@@ -3687,6 +3780,47 @@ mod tests {
         )
         .unwrap();
         (conn, snap, dir)
+    }
+
+    #[test]
+    fn cpp_include_literal_reads_only_the_quoted_form() {
+        assert_eq!(
+            cpp_include_literal("#include \"colmap/mvs/patch_match.h\"").as_deref(),
+            Some("colmap/mvs/patch_match.h")
+        );
+        // A Windows-authored include separates the path with backslashes.
+        assert_eq!(
+            cpp_include_literal("#include \"colmap\\mvs\\patch_match.h\"").as_deref(),
+            Some("colmap/mvs/patch_match.h")
+        );
+        // An angle-bracket include names a root or system header; a repository
+        // path suffix can never establish which one.
+        assert_eq!(cpp_include_literal("#include <numeric>"), None);
+        assert_eq!(cpp_include_literal("#include \"\""), None);
+    }
+
+    #[test]
+    fn suffix_anchors_excludes_the_bare_filename() {
+        assert_eq!(
+            suffix_anchors("colmap/src/colmap/mvs/patch_match.h"),
+            vec![
+                "colmap/src/colmap/mvs/patch_match.h",
+                "src/colmap/mvs/patch_match.h",
+                "colmap/mvs/patch_match.h",
+                "mvs/patch_match.h",
+            ]
+        );
+        // A bare filename is the one form a system header can shadow.
+        assert!(suffix_anchors("patch_match.h").is_empty());
+    }
+
+    #[test]
+    fn unique_suffix_match_is_unique_or_nothing() {
+        let paths = ["a/b/x.h".to_string(), "c/x.h".to_string()];
+        assert_eq!(unique_suffix_match("b/x.h", paths.iter()), Some("a/b/x.h"));
+        // Two files share the suffix: ambiguity is never resolved arbitrarily.
+        assert_eq!(unique_suffix_match("x.h", paths.iter()), None);
+        assert_eq!(unique_suffix_match("z.h", paths.iter()), None);
     }
 
     /// Semantic anchor: narrowest enclosing occurrence wins, import-scoped.

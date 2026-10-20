@@ -1938,3 +1938,234 @@ fn task6_impact_full_json_goldens() {
         assert_eq!(actual, expected);
     }
 }
+
+// --- M9 CP3: E8 - C/C++ include resolution in the candidate scope ---------
+//
+// A C/C++ include is written against an include root the repository does not
+// record, so its literal rarely equals the target's repository-relative path.
+// The conservative rule: a UNIQUE ROOTED path suffix may widen the caller
+// candidate scope, and it never proves an identity. Ambiguous, missing and
+// bare-filename includes stay unresolved.
+
+const E8_HEADER: &str = "int Thing(int x) { return x + 1; }\n";
+const E8_CALLER: &str = "#include \"proj/thing.h\"\n\nint go() { return Thing(1); }\n";
+
+fn e8_callers(h: &Path, path: &str) -> serde_json::Value {
+    let (code, out, err) = run(
+        h,
+        &[
+            "callers", "--repo", "sem", "--path", path, "--line", "1", "--col", "5",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    serde_json::from_str(&out).expect("valid JSON")
+}
+
+fn e8_edges(v: &serde_json::Value) -> &Vec<serde_json::Value> {
+    v["edges"].as_array().expect("edges array")
+}
+
+#[test]
+fn e8_rooted_include_adds_candidate_caller() {
+    let h = home("e8root");
+    repo_with(
+        &h,
+        "sem",
+        &[
+            ("src/proj/thing.h", E8_HEADER),
+            ("src/proj/main.cc", E8_CALLER),
+        ],
+    );
+    do_index(&h);
+    let v = e8_callers(&h, "src/proj/thing.h");
+    let edges = e8_edges(&v);
+    assert_eq!(edges.len(), 1, "{v}");
+    let e = &edges[0];
+    assert_eq!(e["kind"], "POTENTIAL_CALL");
+    assert_eq!(e["callee_name"], "Thing");
+    assert_eq!(e["caller_path"], "src/proj/main.cc");
+    assert_eq!(e["precision"], "Heuristic");
+    assert!(
+        e["unresolved"].is_string(),
+        "a candidate stays unresolved: {v}"
+    );
+    assert!(
+        e["callee"].is_null(),
+        "a candidate never proves identity: {v}"
+    );
+    assert!(e["evidence"]["path"].is_string(), "source provenance: {v}");
+}
+
+#[test]
+fn e8_ambiguous_suffix_stays_unresolved() {
+    let h = home("e8ambig");
+    repo_with(
+        &h,
+        "sem",
+        &[
+            ("src/proj/thing.h", E8_HEADER),
+            ("src/proj/main.cc", E8_CALLER),
+            // A second file with the same suffix: the literal names two.
+            ("other/proj/thing.h", E8_HEADER),
+        ],
+    );
+    do_index(&h);
+    let v = e8_callers(&h, "src/proj/thing.h");
+    assert_eq!(e8_edges(&v).len(), 0, "ambiguity is never resolved: {v}");
+}
+
+#[test]
+fn e8_misleading_bare_filename_is_not_a_candidate() {
+    let h = home("e8bare");
+    repo_with(
+        &h,
+        "sem",
+        &[
+            ("src/util/thing.h", E8_HEADER),
+            // A bare literal is the one form a system header can shadow.
+            (
+                "src/thirdparty/lbp.c",
+                "#include \"thing.h\"\n\nint go() { return Thing(1); }\n",
+            ),
+        ],
+    );
+    do_index(&h);
+    let v = e8_callers(&h, "src/util/thing.h");
+    assert_eq!(
+        e8_edges(&v).len(),
+        0,
+        "a bare filename must not claim the repository file: {v}"
+    );
+}
+
+#[test]
+fn e8_missing_header_yields_no_candidate() {
+    let h = home("e8missing");
+    repo_with(
+        &h,
+        "sem",
+        &[
+            ("src/proj/thing.h", E8_HEADER),
+            (
+                "src/proj/main.cc",
+                "#include \"proj/absent.h\"\n\nint go() { return Thing(1); }\n",
+            ),
+        ],
+    );
+    do_index(&h);
+    let v = e8_callers(&h, "src/proj/thing.h");
+    assert_eq!(
+        e8_edges(&v).len(),
+        0,
+        "an include that names no indexed file links nothing: {v}"
+    );
+}
+
+#[test]
+fn e8_differing_include_roots_are_not_merged() {
+    let h = home("e8roots");
+    repo_with(
+        &h,
+        "sem",
+        &[
+            ("one/proj/thing.h", E8_HEADER),
+            ("two/proj/thing.h", E8_HEADER),
+            (
+                "src/proj/main.cc",
+                "#include \"two/proj/thing.h\"\n\nint go() { return Thing(1); }\n",
+            ),
+        ],
+    );
+    do_index(&h);
+    // The literal names one file, so that file's scope gains the caller.
+    let named = e8_callers(&h, "two/proj/thing.h");
+    assert_eq!(e8_edges(&named).len(), 1, "{named}");
+    assert_eq!(e8_edges(&named)[0]["caller_path"], "src/proj/main.cc");
+    // The other file under the same suffix is a different header.
+    let other = e8_callers(&h, "one/proj/thing.h");
+    assert_eq!(
+        e8_edges(&other).len(),
+        0,
+        "two roots must not merge into one identity: {other}"
+    );
+}
+
+#[test]
+fn e8_windows_and_unix_include_paths_resolve_alike() {
+    let h = home("e8win");
+    repo_with(
+        &h,
+        "sem",
+        &[
+            ("src/proj/thing.h", E8_HEADER),
+            (
+                "src/proj/main.cc",
+                "#include \"proj\\thing.h\"\n\nint go() { return Thing(1); }\n",
+            ),
+        ],
+    );
+    do_index(&h);
+    let v = e8_callers(&h, "src/proj/thing.h");
+    assert_eq!(
+        e8_edges(&v).len(),
+        1,
+        "a Windows separator must resolve like the Unix form: {v}"
+    );
+    assert_eq!(e8_edges(&v)[0]["caller_path"], "src/proj/main.cc");
+}
+
+#[test]
+fn e8_cross_repository_candidate_scopes_stay_isolated() {
+    let h = home("e8xrepo");
+    repo_with(
+        &h,
+        "sem",
+        &[
+            ("src/proj/thing.h", E8_HEADER),
+            ("src/proj/main.cc", E8_CALLER),
+        ],
+    );
+    repo_with(
+        &h,
+        "other",
+        &[
+            ("other/proj/thing.h", E8_HEADER),
+            (
+                "other/proj/main.cc",
+                "#include \"proj/thing.h\"\n\nint go() { return Thing(1); }\n",
+            ),
+        ],
+    );
+    do_index(&h);
+    let (code, _, err) = run(&h, &["index", "--repo", "other"]);
+    assert_eq!(code, 0, "{err}");
+    let mine = e8_callers(&h, "src/proj/thing.h");
+    assert_eq!(e8_edges(&mine).len(), 1, "{mine}");
+    assert_eq!(e8_edges(&mine)[0]["caller_path"], "src/proj/main.cc");
+    let (code, out, err) = run(
+        &h,
+        &[
+            "callers",
+            "--repo",
+            "other",
+            "--path",
+            "other/proj/thing.h",
+            "--line",
+            "1",
+            "--col",
+            "5",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    let theirs: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+    assert_eq!(e8_edges(&theirs).len(), 1, "{theirs}");
+    assert_eq!(
+        e8_edges(&theirs)[0]["caller_path"],
+        "other/proj/main.cc",
+        "no cross-repository candidate: {theirs}"
+    );
+    assert!(
+        !out.contains("src/proj/main.cc"),
+        "no cross-repository leakage: {out}"
+    );
+}
