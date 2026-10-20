@@ -1,19 +1,43 @@
 # M9 design gate — multi-repo release readiness (MMSP-first pilot)
 
-**Status: PROPOSED — AWAIT OWNER REVIEW.** (Revision 2, 2026-10-19: F1–F4
+**Status: APPROVED — CP1 EXECUTED, AWAIT OWNER GO FOR CP2.** (Revision 3,
+2026-10-20: synchronized with `origin/master` `a5f67e6`; M9 objective restated
+as a usable GitNexus alternative; CP1 pilot spec frozen in
+[`m9-cp1-pilot-spec.md`](m9-cp1-pilot-spec.md). Revision 2, 2026-10-19: F1–F4
 corrections, G-TOK reconciliation policy, and owner decisions D-M9-1..D-M9-6
 recorded in §6.)
 
-This document is a design proposal only. It authorizes no implementation, no
-checkpoint execution, no benchmark run, no MMSP modification, no packaging, no
-merge, no tag, and no release. Each checkpoint (CP1–CP4) requires its own
-OWNER GO. The `v0.1.0` release itself requires a separate, explicit OWNER GO.
+This document is a design proposal. It authorizes no implementation, no
+checkpoint execution beyond CP1, no benchmark run, no MMSP modification, no
+packaging, no merge, no tag, and no release. CP1 was executed on 2026-10-20
+under an explicit OWNER GO and produced
+[`m9-cp1-pilot-spec.md`](m9-cp1-pilot-spec.md) (documentation and ground truth
+only — no code, no measurement). Each remaining checkpoint (CP2–CP4) requires
+its own OWNER GO. The `v0.1.0` release itself requires a separate, explicit
+OWNER GO.
 
-- Date: 2026-10-19
+- Date: 2026-10-19 (Revision 3: 2026-10-20)
 - Branch: `m9-multirepo-release-candidate`, created explicitly from
   `origin/master`
-- Base commit (verified): `cc963aec1e55ed65cc0628d65309c754177ce270`
-  (PR #3 merged; merge commit `cc963ae`)
+- **Current baseline (Revision 3):** `origin/master` ==
+  `a5f67e6544f14d77774dfddf49e78ff10acd4966` (PR #6 merged; merge commit
+  `a5f67e6`); the M9 branch was synchronized with it by merge commit
+  `96a57f8d95686cbe061d1f74780db9c373508e8b` (parents `a097e2d` + `a5f67e6`,
+  DCO-signed). The M9 branch HEAD after synchronization is `96a57f8`.
+- **Historical original baseline (preserved):** `cc963ae…`
+  (`cc963aec1e55ed65cc0628d65309c754177ce270`, PR #3 merged) — the commit the
+  M9 branch was created from and the baseline of the M0–M8 evidence below.
+- **Objective (Revision 3, owner directive):** deliver `v0.1.0` as a usable,
+  local-first alternative to GitNexus for the core code-intelligence workflows
+  developers and OpenCode agents need — find a symbol and its references,
+  identify callers/callees, trace a call path, analyze the impact of a change,
+  and answer natural-language code questions through OpenCode using Riltra MCP
+  tools — within the documented support scope. Parity with GitNexus's UI,
+  Cypher, automated rename, embeddings and its full MCP tool set is **not**
+  required for `v0.1.0`; a full C++/CUDA semantic capability is **not**
+  claimed. The objective, the workflow acceptance checklist and the
+  release-blocking functional gaps are frozen in
+  [`m9-cp1-pilot-spec.md`](m9-cp1-pilot-spec.md) §D and §E.
 - Primary pilot (owner decision, fixed): MMSP `RyanAraaful/mmsp`, default
   branch `main`, commit `d62f06a576d8e76b705c8ecc57fc380f7ebc9c44`
 - Secondary pilot: Riltra self-indexing — **internal validation only**, never
@@ -31,12 +55,19 @@ against milestone history. A gate is never PASS until its M9 acceptance test
 ran on the release candidate and its evidence is archived. One MMSP pilot is
 not sufficient evidence for any entire release gate.
 
-## 1. Verified current state (baseline `cc963ae`)
+## 1. Verified current state (baseline `cc963ae`; synchronized with `a5f67e6` on 2026-10-20)
 
 ### 1.1 Repository and branch state
 
-- `origin/master` == expected `cc963ae…`; local `master` equal; PR #3 MERGED
-  (GitHub API: state `MERGED`, merge commit `cc963ae…`).
+- **Current (Revision 3, 2026-10-20):** `origin/master` == `a5f67e6…`
+  (PR #6 MERGED, merge commit `a5f67e6…`); `m9-multirepo-release-candidate`
+  synchronized with `origin/master` by merge commit `96a57f8…` (two parents:
+  `a097e2d…` M9 tip + `a5f67e6…` master tip), DCO-signed, no rebase, no
+  force-push, no branch deletion. The merge was conflict-free: the M9 branch
+  changed only `docs/m9-design-gate.md`, which `master` did not touch.
+- **Historical (Revision 2, 2026-10-19):** `origin/master` == expected
+  `cc963ae…`; local `master` equal; PR #3 MERGED (GitHub API: state `MERGED`,
+  merge commit `cc963ae…`).
 - `m9-multirepo-release-candidate` created from `origin/master`; `HEAD` ==
   `cc963ae…`; no history divergence; working tree carries only the
   pre-existing untracked `AGENTS.md` (never staged; not ignored).
@@ -177,6 +208,16 @@ every run. `RILTRA_HOME` points to `<BENCH_ROOT>\home`, outside MMSP, so
 indexing artifacts never land in any MMSP working tree. No MMSP source is
 imported into Riltra; no MMSP dataset, build output, or machine configuration
 is opened.
+
+**Revision 3 note (2026-10-20):** the table above is the 2026-10-19 record and
+is kept as history. The MMSP default branch has since advanced
+(`origin/main` == `7c1b1ceb1b067268c9e6b1b2c353f9044a2e3546`) and the local
+MMSP clone now sits on a documentation branch (`75b3a3f…`); the local clone was
+neither pulled nor checked out for M9. **The pilot pin is unchanged and stays
+`d62f06a…`** (owner decision D-M9-1) — a re-pin is an owner decision. The
+current snapshot identity, the concrete `BENCH_ROOT` and the frozen inventory
+are recorded in [`m9-cp1-pilot-spec.md`](m9-cp1-pilot-spec.md) §A, and were
+re-counted at the pin and found to reproduce §2.2 exactly.
 
 The local tree currently contains ignored build/smoke directories
 (`colmap/build-mx150/` — including 75 build-tree `.cu` copies — plus
@@ -684,6 +725,11 @@ requires its own OWNER GO and lands tested, DCO-signed commits with CI green.
   No code changes. Deliverable: CP1 pilot spec document. Verification: every
   anchor checked by reading MMSP source; `git diff --check`; CI green.
   STOP if the snapshot differs from the record or an anchor is unverifiable.
+  **EXECUTED 2026-10-20** under an explicit OWNER GO; deliverable:
+  [`m9-cp1-pilot-spec.md`](m9-cp1-pilot-spec.md) (frozen snapshot, inventory,
+  source ground truth, freshness matrix, measurement procedure, workflow
+  acceptance checklist, release-readiness matrix, functional gaps). No code
+  change, no measurement, no MMSP modification, no pilot query executed.
 - **CP2 — MMSP pilot execution and targeted correctness fixes.**
   Execute §3 against the frozen snapshot with archived raw logs; report cold
   index, warm queries (p50/p95), one-file delta, full-rebuild parity, memory
@@ -769,6 +815,10 @@ evidence exists.
 - `docs/m8-design-gate.md`, `docs/m8-opencode-first-amendment.md`,
   `docs/m8-final-acceptance-review.md`, `docs/m8-owner-acceptance.md` —
   M8 gates, amendment, acceptance.
+- `docs/m9-cp1-pilot-spec.md` — CP1 deliverable: frozen MMSP pilot input,
+  manually verified source ground truth, pre-registered freshness matrix,
+  frozen measurement procedure, GitNexus-replacement workflow acceptance
+  checklist, release-readiness matrix and functional gaps.
 - `docs/pilots/cp7a/` — frozen benchmark archive (must not be edited).
 - `docs/licensing.md`, `NOTICE` — licensing inventory and release duty.
 - `docs/audits/2026-10-19-windows-wal-concurrency.md` — Windows WAL audit;
