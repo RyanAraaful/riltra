@@ -554,10 +554,11 @@ variable definition. The `function_declarator` form is never asserted:
   question, and Riltra has no semantic provider (E1/E7).
 
 Effect of the correction on the pilot: the facts asserted from the
-ambiguous form (**932**) are withdrawn and the sound form is kept
-(**+1 206** over the pre-fix baseline). The three MMSP construction sites
-named in §9.1 use the ambiguous form, so they are **not** captured — the
-audit withdraws the earlier claim that they are "now present as candidates".
+ambiguous form (**932**) are withdrawn and the form with expression
+arguments is kept (**+1 206** over the pre-fix baseline). The three MMSP
+construction sites named in §9.1 use the ambiguous form, so they are **not**
+captured — the audit withdraws the earlier claim that they are "now present
+as candidates".
 
 The corrected code also removes the scope test it no longer needs: a
 block-scope function declaration is legal C++, so the scope never settled

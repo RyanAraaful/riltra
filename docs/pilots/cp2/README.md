@@ -20,7 +20,11 @@ harness is in [`method/README.md`](method/README.md).
 Where the two runs differ, the audit numbers govern: the audit corrected the
 C++ direct-initialization capture (the facts asserted from the
 most-vexing-parse form are withdrawn, §9.4 of the evidence document) and the
-grading (a vacuous `PASS` became `UNAVAILABLE`, §3).
+grading (a vacuous `PASS` became `UNAVAILABLE`, §3). An independent review of
+that correction found three further defects in the harness — a path guard
+that missed an intermediate junction, a grader that passed a missing output,
+and two checks that accepted less than their criterion. They are corrected
+and covered by regression tests (§11.2 of the evidence document).
 
 ## Redaction
 
