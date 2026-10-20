@@ -212,6 +212,22 @@ test("a blocked OpenCode session is not a passing agent session", () => {
   assert.strictEqual(check.reason, "provider-auth-403");
 });
 
+test("a workflow without an evidence check reports no evidence gate", () => {
+  const dir = writeQueries({
+    "d1-1-search-Print": JSON.stringify({
+      repo: "mmsp-pin",
+      freshness: { status: "fresh", reasons: [] },
+      total: 1,
+      results: [{ path: "colmap/src/colmap/mvs/patch_match.cc", span: { start_line: 118 } }],
+    }),
+  });
+  const result = grade(dir);
+  // The honesty checks that need the other queries are unavailable, but the
+  // evidence layer has no check for D1 at all: that is "n/a", not
+  // "unavailable".
+  assert.strictEqual(result.summary.gates.D1.evidence.verdict, "n/a");
+});
+
 test("the workflow gate reports an unavailable check as unavailable", () => {
   const dir = writeQueries({});
   const result = grade(dir);

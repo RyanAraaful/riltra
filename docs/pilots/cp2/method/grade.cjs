@@ -403,7 +403,9 @@ function summarize(checks) {
     w[c.layer].push(c);
   }
   const gate = (list) => {
-    if (list.length === 0) return { verdict: V.UNAVAILABLE, reason: "no-check" };
+    // No check of this kind for the workflow: nothing was measured, which is
+    // not the same as an unavailable measurement.
+    if (list.length === 0) return { verdict: "n/a", reason: "no-check" };
     if (list.some((c) => c.verdict === V.FAIL)) return { verdict: V.FAIL, reason: "a-check-failed" };
     // A verified capability gap dominates an unavailable piece of evidence.
     if (list.some((c) => c.verdict === V.UNMET)) return { verdict: V.UNMET, reason: "a-capability-is-not-met" };

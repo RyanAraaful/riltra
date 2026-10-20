@@ -430,19 +430,30 @@ with a trivial prompt, so it is a provider-side free-tier restriction on
 nested CLI sessions in this environment — **not** a Riltra defect and not a
 model choice. Consequently the **agent-side** half of workflow 5 (an LLM
 interpreting the natural-language question through the MCP tools) is
-**BLOCKED / NOT YET VERIFIED**. The **server-side** half is fully verified
-by §7.1 and §7.2. CP7-A's own G6 evidence (a real OpenCode session) remains
-the last agent-side evidence and is unchanged; it must not be presented as
-re-verified by CP2.
+**BLOCKED**, and its verdict is **UNAVAILABLE** — the evidence was never
+produced, which is not the same as a failure and not the same as a pass.
+The audit re-ran the session and recorded the outcome in a machine-readable
+summary (`raw-audit/mcp/opencode-session.json`:
+`{"exit_code":1,"reason":"provider-auth-403",...}`); the harness exits with
+the provider's code and prints `BLOCKED: the OpenCode session failed`. The
+**server-side** half is fully verified by §7.1 and §7.2. CP7-A's own G6
+evidence (a real OpenCode session) remains the last agent-side evidence and
+is unchanged; it must not be presented as re-verified by CP2.
 
 ---
 
 ## 8. What CP2 did **not** change
 
 No source outside the single defect fix, no schema, no dependency, no
-scanner, no benchmark, no ruleset, no branch protection, no M8/CP7-A
+scanner, no benchmark corpus, no ruleset, no branch protection, no M8/CP7-A
 archive, no MMSP content, no history rewrite, no release tag, and no merge
 to `master`. The CP1 design and ground truth were not reopened.
+
+The audit changed the **benchmark harness** — the measurement scripts under
+`pilots/cp2/method/`, which are evidence artefacts, not product code: the
+path guard, the grader and the parameterization (§11.1). It changed no
+acceptance criterion and no CP1 ground truth, and it lowered no gate: the
+corrected grading is *stricter* than the CP2 one (§3).
 
 ---
 
