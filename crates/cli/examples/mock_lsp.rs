@@ -196,6 +196,7 @@ fn main() {
     let mut initialized = false;
     let mut hang = false;
     let mut opened = String::new();
+    let mut retryable_sent = false;
     while let Some(body) = read_message(&mut lock) {
         if body.contains("\"method\":\"initialized\"") {
             initialized = true;
@@ -328,6 +329,26 @@ fn main() {
                 respond(&id_of(&body), "[]");
                 continue;
             }
+            if mode == "retryable" {
+                // The server says "not ready yet" once, then answers: the
+                // marker that says so must survive the sanitizing.
+                if !retryable_sent {
+                    retryable_sent = true;
+                    send(&format!(
+                        "{{\"jsonrpc\":\"2.0\",\"id\":{},\"error\":{{\"code\":-32801,\"message\":\"content not indexed yet\"}}}}",
+                        id_of(&body)
+                    ));
+                    continue;
+                }
+                let uri = file_uri("main.rs");
+                respond(
+                    &id_of(&body),
+                    &format!(
+                        "{{\"uri\":\"{uri}\",\"range\":{{\"start\":{{\"line\":1,\"character\":4}},\"end\":{{\"line\":1,\"character\":7}}}}}}"
+                    ),
+                );
+                continue;
+            }
             if mode == "fail-after-diagnostics" {
                 // The server explains itself and then fails: the diagnostics
                 // must travel with the failure.
@@ -361,7 +382,7 @@ fn main() {
                         "{{\"uri\":\"{uri}\",\"range\":{{\"start\":{{\"line\":1,\"character\":4}},\"end\":{{\"line\":1,\"character\":7}}}}}}"
                     ),
                 );
-                send("{\"jsonrpc\":\"2.0\",\"id\":9999,\"result\":{\"path\":\"C:/Windows/System32/private\"}}");
+                send("{\"jsonrpc\":\"2.0\",\"id\":\"C:/Windows/System32/private\",\"result\":{\"path\":\"C:/Windows/System32/private\"}}");
                 continue;
             }
             let uri = file_uri("main.rs");

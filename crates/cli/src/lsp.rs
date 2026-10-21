@@ -464,7 +464,7 @@ impl Session {
                 Ok(Incoming::Response { id: got, body }) => {
                     if got == want {
                         if std::env::var("RILTRA_LSP_DEBUG").is_ok() {
-                            eprintln!("LSP <- {body}");
+                            eprintln!("{}", debug_response(&body.to_string()));
                         }
                         if let Some(err) = body.get("error") {
                             // The retryable marker must survive the cap: the
@@ -515,11 +515,22 @@ impl Session {
     }
 
     fn stderr_tail(&self) -> String {
+        // The tail starts at a line boundary: a window that starts inside a
+        // path would hide the path's start and let the rest through.
         let log = self.stderr_log.lock().unwrap();
         if log.is_empty() {
             return String::new();
         }
-        let tail = &log[log.len().saturating_sub(512)..];
+        let mut start = log.len().saturating_sub(512);
+        if start > 0 && log[start - 1] != b'\n' {
+            // The first line of the window is the tail of a longer line: it
+            // may be the tail of a path, so it is dropped.
+            match log[start..].iter().position(|b| *b == b'\n') {
+                Some(newline) => start += newline + 1,
+                None => start = log.len(),
+            }
+        }
+        let tail = &log[start..];
         // The server's stderr reaches the caller's output: it is sanitized
         // like every other piece of server text. A tail keeps its END, so the
         // cut is taken from the front.
@@ -1090,7 +1101,19 @@ fn is_url_token(token: &str) -> bool {
     lower.contains("://") && !lower.starts_with('/')
 }
 
-/// True when the token carries an absolute path: a `file:` URI, a Windows
+/// True when a position may start an absolute path: the previous character
+/// ends a word. A letter, a digit, an underscore or a currency sign does
+/// not: a relative path (`geom/point.h`), a protocol name (`$/progress`) and
+/// a word that merely ends in a letter are never mistaken for a path.
+fn is_path_boundary(chars: &[char], i: usize) -> bool {
+    if i == 0 {
+        return true;
+    }
+    let previous = chars[i - 1];
+    !previous.is_alphanumeric() && !matches!(previous, '_' | '$' | '~' | '%')
+}
+
+/// True when the text carries an absolute path: a `file:` URI, a Windows
 /// drive path, a UNC path, a POSIX absolute path, or a compiler flag that
 /// names one. Relative paths (`geom/point.h`) and protocol names
 /// (`$/progress`) are not absolute paths.
@@ -1100,7 +1123,9 @@ fn token_carries_absolute_path(token: &str) -> bool {
     }
     let chars: Vec<char> = token.chars().collect();
     let lower: String = token.to_ascii_lowercase();
-    if lower.contains("file:") {
+    // A `file:` URI. The scheme needs its slashes, so that an ordinary word
+    // that ends in "file:" (a profile, a rule) is not mistaken for one.
+    if lower.contains("file://") {
         return true;
     }
     // A Windows drive path: a single letter, a colon, a separator. The
@@ -1120,60 +1145,215 @@ fn token_carries_absolute_path(token: &str) -> bool {
     if is_url_token(token) {
         return false;
     }
-    // A UNC path: two separators at the start.
-    if chars.len() > 1 && chars[0] == '\\' && chars[1] == '\\' {
-        return true;
-    }
-    if chars.len() > 1 && chars[0] == '/' && chars[1] == '/' {
-        return true;
-    }
-    // A POSIX absolute path: the token starts with a separator and has a
-    // segment behind it. A bare separator is not a path.
-    if chars[0] == '/' && chars.len() > 1 && chars[1] != '/' {
-        return true;
-    }
-    // A compiler flag that names a path: "-I/usr/include".
-    if chars[0] == '-' && token.contains('/') {
-        return true;
+    for i in 0..chars.len() {
+        if !is_path_boundary(&chars, i) {
+            continue;
+        }
+        // A relative path with a leading "./" or "../" is not absolute.
+        if chars[i] == '/' && i > 0 && chars[i - 1] == '.' && !token.starts_with('/') {
+            continue;
+        }
+        // A UNC path: two separators, a segment behind them, and a further
+        // separator of the same kind. A bare "//" (the integer division of
+        // ordinary prose) is not a path.
+        if chars[i] == '/' || chars[i] == '\\' {
+            let separator = chars[i];
+            if i + 2 < chars.len()
+                && chars[i + 1] == separator
+                && !chars[i + 2].is_whitespace()
+                && chars[i + 2..].contains(&separator)
+            {
+                return true;
+            }
+        }
+        // A POSIX absolute path: a separator with a segment behind it. A
+        // bare separator, a separator followed by a space (the "a / b" of
+        // ordinary prose), and the second separator of a "//" are not paths.
+        if chars[i] == '/'
+            && i + 1 < chars.len()
+            && chars[i + 1] != '/'
+            && !chars[i + 1].is_whitespace()
+            && !(i > 0 && (chars[i - 1] == '/' || chars[i - 1] == '\\'))
+        {
+            return true;
+        }
+        // A compiler flag that names a path: "-I/usr/include".
+        if chars[i] == '-' && token.contains('/') {
+            return true;
+        }
     }
     false
 }
 
-/// Replace absolute paths in a server message with `<path>`. A diagnostic
-/// travels into the caller's output, so it must not carry a machine-local
-/// path. The whole token that carries the path is replaced, so a path glued
-/// to a flag or a scheme cannot leak through the redaction.
-///
-/// A token ends at whitespace, a quote or a bracket, so a path wrapped in
-/// punctuation (`(/usr/include/f.h)`, `` `/usr/include/f.h` ``) is a token of
-/// its own.
-fn sanitize_message(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut token = String::new();
+/// One token of a server message.
+struct Token {
+    text: String,
+    /// The token was quoted: its end is certain, so the redaction of a path
+    /// inside it is exact.
+    quoted: bool,
+    /// The token is a separator (a bracket, a quote, ...) rather than a word.
+    separator: bool,
+}
+
+/// Split a server message into tokens. A quoted section stays together with
+/// its quotes: a quoted path ends at its closing quote, so it can be redacted
+/// exactly. A word ends at whitespace or at a separator.
+fn tokenize_message(text: &str) -> Vec<Token> {
+    let mut out: Vec<Token> = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    let mut in_quote: Option<char> = None;
     for ch in text.chars() {
-        if ch.is_whitespace()
-            || matches!(
-                ch,
-                '\'' | '"' | '(' | ')' | '[' | ']' | '{' | '}' | '`' | '<' | '>' | '=' | ',' | ';'
-            )
-        {
-            if token_carries_absolute_path(&token) {
-                out.push_str("<path>");
-            } else {
-                out.push_str(&token);
+        if let Some(quote) = in_quote {
+            // An escaped quote does not close the section: a JSON value may
+            // contain one, and the path behind it must stay inside it. The
+            // backslashes are counted, so an odd run escapes the quote.
+            let run = current.chars().rev().take_while(|c| *c == '\\').count();
+            let escaped = ch == quote && run % 2 == 1;
+            current.push(ch);
+            if ch == quote && !escaped {
+                // The quoted section ends here: it is a token of its own, so
+                // the text around it cannot hide a path inside it.
+                in_quote = None;
+                out.push(Token {
+                    text: std::mem::take(&mut current),
+                    quoted,
+                    separator: false,
+                });
+                quoted = false;
             }
-            token.clear();
-            out.push(ch);
             continue;
         }
-        token.push(ch);
+        if ch == '\'' || ch == '"' {
+            if !current.is_empty() {
+                out.push(Token {
+                    text: std::mem::take(&mut current),
+                    quoted: false,
+                    separator: false,
+                });
+            }
+            quoted = true;
+            in_quote = Some(ch);
+            current.push(ch);
+            continue;
+        }
+        if ch.is_whitespace() {
+            if !current.is_empty() {
+                out.push(Token {
+                    text: std::mem::take(&mut current),
+                    quoted,
+                    separator: false,
+                });
+                quoted = false;
+            }
+            out.push(Token {
+                text: ch.to_string(),
+                quoted: false,
+                separator: false,
+            });
+            continue;
+        }
+        if matches!(
+            ch,
+            '(' | ')' | '[' | ']' | '{' | '}' | '`' | '<' | '>' | '=' | ',' | ';'
+        ) {
+            if !current.is_empty() {
+                out.push(Token {
+                    text: std::mem::take(&mut current),
+                    quoted,
+                    separator: false,
+                });
+                quoted = false;
+            }
+            out.push(Token {
+                text: ch.to_string(),
+                quoted: false,
+                separator: true,
+            });
+            continue;
+        }
+        current.push(ch);
     }
-    if token_carries_absolute_path(&token) {
-        out.push_str("<path>");
-    } else {
-        out.push_str(&token);
+    if !current.is_empty() {
+        out.push(Token {
+            text: current,
+            quoted,
+            separator: false,
+        });
     }
     out
+}
+
+/// The content of a token without its quotes. A quoted section that was
+/// never closed keeps its quote: the slicing is on characters, never on
+/// bytes, so a multi-byte character can never split it.
+fn token_content(token: &Token) -> &str {
+    let text = token.text.as_str();
+    if !token.quoted {
+        return text;
+    }
+    let Some(quote) = text.chars().next() else {
+        return text;
+    };
+    match text.strip_prefix(quote) {
+        Some(inner) => inner.strip_suffix(quote).unwrap_or(inner),
+        None => text,
+    }
+}
+
+/// Replace absolute paths in a server message with `<path>`. A diagnostic
+/// travels into the caller's output, so it must not carry a machine-local
+/// path.
+///
+/// A path with a space in it has no certain end. A **quoted** path ends at
+/// its closing quote, so it is redacted exactly. An **unquoted** one may
+/// continue into the words after it, so the redaction takes the ambiguous
+/// part with it: the words that follow are removed as well. Losing the tail
+/// of a message is cheaper than leaking half a path.
+///
+/// The separators (brackets, commas, ...) are kept, so the shape of the
+/// message survives the redaction.
+fn sanitize_message(text: &str) -> String {
+    let tokens = tokenize_message(text);
+    let mut out = String::with_capacity(text.len());
+    let mut swallow_words = false;
+    for token in &tokens {
+        if swallow_words && !token.separator {
+            continue;
+        }
+        if token.separator {
+            out.push_str(&token.text);
+            continue;
+        }
+        let content = token_content(token);
+        if token_carries_absolute_path(content) {
+            if token.quoted {
+                // The quoted path ends at its closing quote: the redaction is
+                // exact, and the quotes are kept so the shape of the message
+                // survives.
+                let quote = token.text.chars().next().unwrap_or('"');
+                out.push(quote);
+                out.push_str("<path>");
+                if token.text.chars().count() > 1 && token.text.ends_with(quote) {
+                    out.push(quote);
+                }
+            } else {
+                out.push_str("<path>");
+                // The path may continue into the words that follow.
+                swallow_words = true;
+            }
+            continue;
+        }
+        out.push_str(&token.text);
+    }
+    out
+}
+
+/// The debug line of one server response. Turning the debug flag on must not
+/// print the machine's layout, so the body is sanitized and bounded like
+/// every other piece of server text.
+fn debug_response(body: &str) -> String {
+    format!("LSP <- {}", bounded_server_text(body, MAX_NOTICE_CHARS))
 }
 
 /// Sanitize and bound a piece of server text that reaches the caller's
@@ -1347,6 +1527,78 @@ mod tests {
     }
 
     #[test]
+    fn a_path_with_a_space_leaves_nothing_sensitive() {
+        // A path with a space in it has no certain end: the redaction must
+        // remove the ambiguous part rather than leave half the path behind.
+        let quoted =
+            sanitize_message("cannot open 'C:\\Users\\Jane Doe\\private-project\\source.cc'");
+        for part in ["Jane", "Doe", "private-project", "source.cc"] {
+            assert!(!quoted.contains(part), "'{part}' survived: {quoted}");
+        }
+        assert!(quoted.contains("<path>"), "the path was replaced: {quoted}");
+
+        let bare =
+            sanitize_message("in C:\\Users\\Jane Doe\\private-project\\source.cc: no such file");
+        for part in ["Jane", "Doe", "private-project", "source.cc"] {
+            assert!(!bare.contains(part), "'{part}' survived: {bare}");
+        }
+
+        let posix = sanitize_message("in /opt/build/Jane Doe/source.cc: no such file");
+        for part in ["Jane", "Doe", "source.cc"] {
+            assert!(!posix.contains(part), "'{part}' survived: {posix}");
+        }
+
+        // The same path as a URI, quoted and unquoted.
+        let uri = sanitize_message("see 'file:///opt/build/Jane Doe/source.cc'");
+        for part in ["Jane", "Doe", "source.cc"] {
+            assert!(!uri.contains(part), "'{part}' survived: {uri}");
+        }
+    }
+
+    #[test]
+    fn a_path_inside_a_json_payload_is_redacted() {
+        // The normal shape of an LSP payload: the path sits in a JSON string
+        // value. The key must not hide the value from the redaction.
+        let line = debug_response(
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"workspace failed: /opt/build/Jane Doe/source.cc"}}"#,
+        );
+        assert!(!line.contains("Jane"), "no path in the debug line: {line}");
+        assert!(!line.contains("Doe"), "no path in the debug line: {line}");
+        assert!(
+            !line.contains("source.cc"),
+            "no path in the debug line: {line}"
+        );
+        assert!(line.contains("<path>"), "the path was replaced: {line}");
+
+        // The same path as a JSON value, with a space in it.
+        let value = sanitize_message(r#"{"path":"/opt/build/Jane Doe/source.cc"}"#);
+        for part in ["Jane", "Doe", "source.cc"] {
+            assert!(!value.contains(part), "'{part}' survived: {value}");
+        }
+    }
+
+    #[test]
+    fn the_lsp_debug_output_never_carries_a_path() {
+        // Turning the debug flag on must not print the machine's layout.
+        let body = r#"{"jsonrpc":"2.0","id":1,"result":{"uri":"file:///C:/Windows/System32/source.cc","range":{"start":{"line":3,"character":4}}}}"#;
+        let line = debug_response(body);
+        assert!(
+            !line.contains("System32"),
+            "no path in the debug line: {line}"
+        );
+        assert!(
+            !line.contains("source.cc"),
+            "no path in the debug line: {line}"
+        );
+        assert!(line.contains("<path>"), "the path was replaced: {line}");
+        assert!(
+            line.chars().count() <= MAX_NOTICE_CHARS + "LSP <- ".len() + 3,
+            "the debug line is bounded: {}",
+            line.chars().count()
+        );
+    }
+
+    #[test]
     fn diagnostic_messages_never_carry_an_absolute_path() {
         // The forms that must be redacted. The fixtures use absolute paths
         // that are not home directories, so the repository's own privacy
@@ -1398,7 +1650,7 @@ mod tests {
         std::fs::write(dir.join("main.rs"), "fn main() {}\n").unwrap();
         let err = spawn(mock_spec("pollution", &dir, &dir.join("m.log"))).unwrap_err();
         assert!(err.contains("non-framing stdout"), "{err}");
-        assert!(!err.contains("alice"), "no path in the reason: {err}");
+        assert!(!err.contains("private"), "no path in the reason: {err}");
         assert!(err.contains("<path>"), "the path was replaced: {err}");
     }
 
@@ -1424,9 +1676,10 @@ mod tests {
         let def = session.definition("main.rs", 1, 5).unwrap();
         let joined = def.diagnostics.join("\n");
         assert!(
-            joined.contains("stray response id 9999"),
+            joined.contains("stray response id"),
             "the stray response is recorded: {joined}"
         );
+        // The server controls the response id, and it may carry a path.
         assert!(
             !joined.contains("System32"),
             "no path in the notice: {joined}"
@@ -1754,6 +2007,120 @@ mod tests {
             diags.iter().any(|d| d.contains("stderr tail")),
             "stderr captured: {diags:?}"
         );
+    }
+
+    #[test]
+    fn a_path_behind_odd_punctuation_is_still_redacted() {
+        // The path may follow any punctuation, not only ASCII: a full-width
+        // bracket, a quotation mark, a replacement character.
+        for input in [
+            "Fehler（/opt/build/Jane Doe/source.cc）",
+            "“/opt/build/Jane Doe/source.cc”",
+            "|/opt/build/Jane Doe/source.cc",
+        ] {
+            let out = sanitize_message(input);
+            assert!(!out.contains("Jane"), "the path survived: {out}");
+            assert!(!out.contains("Doe"), "the path survived: {out}");
+            assert!(!out.contains("source.cc"), "the path survived: {out}");
+        }
+    }
+
+    #[test]
+    fn an_escaped_quote_does_not_end_the_section() {
+        // A JSON value may contain an escaped quote: the path behind it must
+        // stay inside the value.
+        let out = sanitize_message(
+            r#"{"message":"cannot open /opt/build/Jane/\"private dir\"/source.cc"}"#,
+        );
+        assert!(!out.contains("Jane"), "the path survived: {out}");
+        assert!(!out.contains("private dir"), "the path survived: {out}");
+        assert!(!out.contains("source.cc"), "the path survived: {out}");
+    }
+
+    #[test]
+    fn ordinary_prose_with_a_slash_survives() {
+        // A slash between two words is not a path.
+        assert_eq!(
+            sanitize_message(r#"{"message":"use a / b here"}"#),
+            r#"{"message":"use a / b here"}"#
+        );
+        assert_eq!(sanitize_message("set profile: x"), "set profile: x");
+        // A bare "//" is the integer division of ordinary prose, not a UNC
+        // path.
+        let division = sanitize_message("unsupported operand type(s) for //: 'int' and 'str'");
+        assert!(
+            division.contains("'int' and 'str'"),
+            "the text survived: {division}"
+        );
+        // A relative include path keeps its spelling.
+        assert_eq!(
+            sanitize_message("'../include/geom/point.h' file not found"),
+            "'../include/geom/point.h' file not found"
+        );
+    }
+
+    #[test]
+    fn a_unc_path_is_still_redacted() {
+        let unc = sanitize_message(r"in \\host\share\f.h");
+        assert!(unc.contains("<path>"), "the UNC path was replaced: {unc}");
+        assert!(!unc.contains("host"), "the UNC path was replaced: {unc}");
+    }
+
+    #[test]
+    fn an_odd_run_of_backslashes_escapes_the_quote() {
+        // Three backslashes: the quote is escaped, so the path behind it
+        // stays inside the value.
+        let out =
+            sanitize_message(r#"{"message":"cannot open /opt/build/Jane\\\" Doe/private.cc"}"#);
+        assert!(!out.contains("Doe"), "the path survived: {out}");
+        assert!(!out.contains("private.cc"), "the path survived: {out}");
+    }
+
+    #[test]
+    fn an_unterminated_quote_with_a_multibyte_character_does_not_panic() {
+        // The text is cut before it is sanitized, so a quoted section can end
+        // in the middle of a character.
+        assert!(sanitize_message("\"é").contains("é"));
+        // The path in an unterminated quoted section is redacted, and the
+        // multi-byte character at its end does not panic the sanitizer.
+        let out = sanitize_message("\"cannot open '/opt/build/sourcé");
+        assert!(!out.contains("sourcé"), "the path survived: {out}");
+    }
+
+    #[test]
+    fn a_retryable_server_answer_is_retried() {
+        // The server says "not indexed yet" once. The marker that says so
+        // must survive the sanitizing, or the answer would never be retried.
+        let (dir, log) = mock_repo();
+        let mut session = spawn(mock_spec("retryable", &dir, &log)).unwrap();
+        let def = session.definition("main.rs", 1, 5).unwrap();
+        assert_eq!(def.facts.len(), 1, "the answer was found: {def:?}");
+        assert!(
+            def.diagnostics
+                .iter()
+                .any(|d| d.contains("converged after")),
+            "the answer was retried: {:?}",
+            def.diagnostics
+        );
+    }
+
+    #[test]
+    fn the_stderr_tail_starts_at_a_line_boundary() {
+        // A window that starts inside a path would hide the path's start and
+        // let the rest of it through: the partial first line is dropped.
+        let (dir, log) = mock_repo();
+        let session = spawn(mock_spec("success", &dir, &log)).unwrap();
+        {
+            let mut stderr = session.stderr_log.lock().unwrap();
+            // The last line is longer than the window, so the window opens
+            // inside the path.
+            let long = format!("/opt/build/{}/Jane Doe/source.cc", "a".repeat(520));
+            stderr.extend_from_slice(format!("\nindexing {long}\n").as_bytes());
+        }
+        let tail = session.stderr_tail();
+        assert!(!tail.contains("Jane"), "no path in the tail: {tail}");
+        assert!(!tail.contains("Doe"), "no path in the tail: {tail}");
+        session.shutdown();
     }
 
     #[test]

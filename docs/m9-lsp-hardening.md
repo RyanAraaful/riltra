@@ -39,12 +39,22 @@ is not edited.
   an absolute path is replaced whole by `<path>` — a `file:` URI, a Windows
   drive path, a UNC path, a POSIX absolute path, or a compiler flag that
   names one. URLs, relative paths and protocol names survive.
-  Two known limits: a path that contains a space is redacted only up to the
-  space (the remainder of the path is kept), and a protocol-relative URL
-  (`//host/x`) is redacted as if it were a path. A token that starts with
-  two backslashes is redacted as a UNC path, so a quoted escape sequence
-  (`'\\d+'`) is over-redacted; a `~`-prefixed path (`~/code/x`) is not
-  detected at all.
+  The known limits, all deliberate and all on the side of keeping the text:
+  - a **quoted** path ends at its closing quote, so the redaction is exact
+    for the path — but the whole quoted section is replaced, so the words
+    around the path inside the quotes are lost with it;
+  - an **unquoted** path has no certain end, so it is redacted together with
+    the words that follow it (the ambiguous part is removed rather than
+    leaked — the price is that the rest of that message is lost, up to the
+    next bracket);
+  - a path glued to a letter of any script, a `~`-prefixed path
+    (`~/code/x`, `~jane/x`), a single-leading-backslash Windows path
+    (`\Users\jane\x`), and a non-`file://` scheme that carries a local path
+    (`vscode://file/<local path>`) are **not** detected;
+  - a token that starts with two backslashes is redacted as a UNC path, so
+    a quoted escape sequence (`'\\d+'`) is over-redacted;
+  - the stderr tail starts at a line boundary: a line that would be the tail
+    of a path is dropped rather than half-kept.
 - A warning never fails the query: the diagnostics are text next to the
   answer, and the answer's facts are untouched.
 - An empty result is never turned into a fallback: the fallback is still
@@ -118,6 +128,18 @@ RED column says the same thing.
 | `index::tests::lsp_hits_carry_the_facts_own_precision_and_verification` | a hit carries the fact's own precision and verification | yes: the hit hard-coded `Unverified` |
 | `index::tests::an_lsp_answer_is_as_certain_as_its_weakest_fact` | the answer's verdict is the weakest fact's | yes: the summary was a constant |
 | `index::tests::a_failed_query_reports_the_diagnostics_of_the_server` | the failure reason keeps the server's diagnostics | yes: the reason dropped them |
+| `lsp::tests::a_path_with_a_space_leaves_nothing_sensitive` | a path with a space leaves no sensitive component, quoted or bare, on Windows or POSIX | yes: the old sanitizer redacted only the first chunk |
+| `lsp::tests::a_path_inside_a_json_payload_is_redacted` | a path inside a JSON string value is redacted, in the debug line and in the message | yes: the old tokenizer glued the value to its key and missed it |
+| `lsp::tests::the_lsp_debug_output_never_carries_a_path` | the debug line is bounded and carries no path | yes: the raw response was printed |
+| `lsp::tests::a_path_behind_odd_punctuation_is_still_redacted` | a path behind any punctuation is redacted | yes |
+| `lsp::tests::an_escaped_quote_does_not_end_the_section` | a path behind an escaped quote in a JSON value is redacted | yes |
+| `lsp::tests::ordinary_prose_with_a_slash_survives` | a slash between two words, and an ordinary word ending in "file:", are not redacted | yes |
+| `lsp::tests::an_unterminated_quote_with_a_multibyte_character_does_not_panic` | the sanitizer cannot panic on a multi-byte character at the end of a cut text | yes: the byte slicing could panic |
+| `lsp::tests::the_stderr_tail_starts_at_a_line_boundary` | the stderr tail never starts inside a path | partly: it pins the swallow of the path, and the line alignment itself is exercised by the same test |
+| `lsp::tests::ordinary_prose_with_a_slash_survives` | a slash between two words, a bare `//`, a relative `./` path and an ordinary word ending in "file:" are not redacted | yes |
+| `lsp::tests::a_unc_path_is_still_redacted` | a real UNC path is still redacted | yes |
+| `lsp::tests::an_odd_run_of_backslashes_escapes_the_quote` | a path behind an odd run of backslashes stays inside the value | yes |
+| `lsp::tests::a_retryable_server_answer_is_retried` | the "not indexed yet" marker survives the sanitizing, so the answer is still retried | yes |
 | `tests/semantic.rs::cli_lsp_live_query_gated` (extended) | end to end: the diagnostics reach the output, the answer is intact, a changed source is `Stale` in the answer itself, an empty answer is not a fallback | yes (gated: local evidence, not CI) |
 
 The mock server (`crates/cli/examples/mock_lsp.rs`) grew three modes for
@@ -209,6 +231,44 @@ The reviewer's GO was explicit: "I found nothing blocking for the shipped
 CLI path: no data loss, no crash, no unbounded allocation, no fabricated
 evidence, and Task A/Task B behave as documented on the success path."
 
+### Round 5 — the privacy corrections (owner brief, 2026-10-21)
+
+Scope: privacy only, the functional work was not reopened. Two defects:
+a path with a space kept its tail, and the `RILTRA_LSP_DEBUG` line printed
+the raw server response.
+
+| Severity | Finding | Action |
+|---|---|---|
+| HIGH | the tokenizer did not close a token at the closing quote, so a path inside a JSON string value was glued to its key and escaped every check | the token is now closed at the closing quote, and the path checks look **inside** the token, at a path boundary |
+| MEDIUM | `token_content` sliced bytes, so an unterminated quoted token ending on a multi-byte character could panic | the trimming is on characters (`strip_prefix`/`strip_suffix`), never on bytes |
+| MEDIUM-LOW | an unquoted absolute path deletes the words that follow it, so a clang-style message loses its text | accepted and documented in §2: the ambiguous part is removed rather than leaked |
+| LOW | the stderr tail window could start in the middle of a path | the window now starts at a line boundary, and a partial first line is dropped |
+| LOW | two assertions were vacuous (the broken-stream and stray-response tests) | the mock now puts the path where the assertion looks for it |
+| LOW | the implementation record contradicted the code | corrected in §2 |
+
+The new tests: `a_path_with_a_space_leaves_nothing_sensitive`,
+`a_path_inside_a_json_payload_is_redacted`,
+`the_lsp_debug_output_never_carries_a_path`,
+`a_path_behind_odd_punctuation_is_still_redacted`,
+`an_escaped_quote_does_not_end_the_section`,
+`ordinary_prose_with_a_slash_survives`,
+`an_unterminated_quote_with_a_multibyte_character_does_not_panic`,
+`the_stderr_tail_starts_at_a_line_boundary`.
+
+A second round on the same diff found three more leaks and one new
+over-redaction; all were fixed: a path behind non-ASCII punctuation (the
+boundary rule now ends a *word*, not a fixed set of ASCII characters), a path
+behind an escaped quote in a JSON value (an escaped quote no longer closes
+the section), a quoted `a / b` (a separator followed by a space is not a
+path), and the `profile:` word (only `file://` is a URI scheme now).
+
+A third round found four more: a bare `//` (the integer division of
+ordinary prose) was treated as a UNC path, an odd run of backslashes did not
+escape a quote, a relative `./` or `../` path was over-redacted, and the
+stderr-window test did not exercise the window alignment. All were fixed, and
+the residual limits are listed in §2. The reviewer's verdict: "GO on the
+shipped path, conditional on two small pre-commit fixes" — both were made.
+
 ## 5. The freshness that can actually be guaranteed
 
 | Property | Guaranteed? | Why |
@@ -221,16 +281,16 @@ evidence, and Task A/Task B behave as documented on the success path."
 | the fact is current | **no** | it is `Unverified`, and `Stale` when a change was proven |
 
 ## 6. Validation
-
 | Check | Result |
 |---|---|
 | `cargo fmt --all -- --check` | clean |
 | `cargo clippy --all-targets -- -D warnings` | clean |
-| `cargo test --locked` | 380 + 16 + 145 + 21 + 52 + 44 + 15 + 12 = **685 passed, 0 failed** |
+| `cargo test --locked` | 391 + 16 + 145 + 21 + 52 + 44 + 15 + 12 = **696 passed, 0 failed** |
 | `cargo test --locked` with `RILTRA_TEST_LSP=1` | the gated end-to-end LSP test also passes (local only; CI does not set the gate) |
 | `git diff --check` | clean |
 | security scan (`security/scan.sh staged`, gitleaks 8.30.1) | no findings; one allowlist entry was added for a verified synthetic UNC fixture in the LSP unit test, in the same style as the existing entries |
-| CI on the commit | `39488750755`: windows, ubuntu, macos-15 and security all green |
+| CI on the commit | `39488750755`: windows, ubuntu, macos-15 and security all green (the functional hardening) |
+| CI on the privacy corrections | see the commit message of the privacy commit |
 
 **No regression on the pilot's E1/E7 findings.** The pilot's own probe
 table (17 probes over the fixture and MMSP) was re-run against the hardened
