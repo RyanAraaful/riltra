@@ -420,6 +420,20 @@ This path is correct and honest. clangd remains optional.
 is **CLI-only** today. The MCP server cannot answer a C++ definition
 question.
 
+> **Update (2026-10-21, after the clangd MCP integration).** The statement
+> above describes the MCP surface **as it was during this pilot**; the raw
+> evidence under `docs/pilots/clangd/raw/` is the frozen measurement and is
+> not edited. The MCP server now exposes a twelfth tool,
+> `riltra_code_semantic`, which answers a definition or references question
+> through the same language server and returns the same document as the
+> CLI's `semantic query --lsp-server` (the implementation and its evidence
+> are in `docs/m9-clangd-mcp-implementation.md`; the design is in
+> `docs/m9-clangd-mcp-integration-design.md`). The pilot's measurements are
+> unchanged, and its residual limits remain: the answer still depends on the
+> provider's index and compilation database, and the server's index can still
+> be stale for a file changed before the session (§7.3); the diagnostic loss
+> it reported (§7.2) was fixed by the LSP hardening change.
+
 ---
 
 ## 8. The minimum implementation plan

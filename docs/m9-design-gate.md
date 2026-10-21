@@ -149,12 +149,25 @@ enforce byte stability.
 
 ### 1.8 MCP interface (OpenCode-first)
 
-- `riltra mcp` serves 11 read-only tools over local stdio; reads never create
+- `riltra mcp` serves 12 tools over local stdio — eleven read-only ones and
+  `riltra_code_semantic`, the provider-backed tool (M9, §6 note below); reads
+  never create
   or migrate a store (`no-index` / `schema_outdated` / `schema_ahead` /
   `store_missing` classification); CLI/MCP parity is parser-defined and was
   proven 21/21 in CP7-A; the real-OpenCode interop smoke passed (revised G6);
   historical two-client G6 remains BLOCKED/untested (Claude Code deferred to
   post-MVP by the amendment).
+- **M9 note (2026-10-21, OWNER GO).** The twelfth tool answers a definition
+  or references question through the language server the operator configured
+  (`RILTRA_LSP_SERVER`, an absolute path), reusing the CLI's
+  `semantic query --lsp-server` path and its document. Because that server may
+  write its own index cache and may reach the network, the health document's
+  capability flags now describe the **potential** effects of the whole
+  server (`read_only: false`, `mutations: true`, `network: true`); Riltra
+  itself still mutates no index and no knowledge store through it. The
+  deferral of D-M9-2 is superseded **for this narrow scope only** — the
+  implementation is recorded in `docs/m9-clangd-mcp-implementation.md` and the
+  design in `docs/m9-clangd-mcp-integration-design.md`.
 
 ### 1.9 Verification assets and CI
 
@@ -519,7 +532,8 @@ Matrix summary (release-gate status at M9 entry; details per gate below):
 ### G-MCP — OpenCode interoperability (amended scope)
 
 - **Requirement (revised by the owner amendment).** A real OpenCode session
-  against the shipped `riltra mcp`: initialize, the 11 tools exposed,
+  against the shipped `riltra mcp`: initialize, the 12 tools exposed
+  (eleven read-only ones and the provider-backed `riltra_code_semantic`),
   representative calls, at least one classified error, no stdout pollution,
   read-only guard honored. JSON-RPC validity and no-stdout-logs rules
   unchanged. Claude Code / Codex are post-MVP and explicitly not PASS.
@@ -534,7 +548,7 @@ Matrix summary (release-gate status at M9 entry; details per gate below):
   OpenCode config; archived smoke transcript.
 - **Gaps.** No candidate-level smoke yet; upstream `rust-sdk#1353` remains an
   accepted, unresolved limitation.
-- **Acceptance test.** Recorded OpenCode run against the candidate: 11 tools,
+- **Acceptance test.** Recorded OpenCode run against the candidate: 12 tools,
   ≥1 successful MMSP query, ≥1 classified error, transport healthy; stdout
   carries only JSON-RPC.
 - **STOP.** Transport crash, stdout pollution, or a read tool creating /

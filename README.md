@@ -43,8 +43,9 @@ dependencies beyond itself:
   source digests, provenance, full-text search, and explicit
   fresh/stale/unknown freshness (`index`, `search`); one database file per
   repository under the local Riltra home.
-- **MCP server (read-only)** - `riltra mcp` serves eleven read-only tools over
-  local stdio for MCP clients. Reads never create or migrate a store: a missing
+- **MCP server** - `riltra mcp` serves twelve tools over local stdio: eleven
+  read-only ones and one provider-backed tool that starts the operator's
+  language server. Reads never create or migrate a store: a missing
   index returns `no-index` without creating files, and an unsupported schema is
   refused as `schema_outdated` with a CLI migration instruction.
 
@@ -100,15 +101,21 @@ Notes:
   missing executable — nothing is silently faked.
 - Run `cargo run -q -p riltra -- --help` for the full command list.
 
-## MCP server (read-only)
+## MCP server (eleven read-only tools, one provider-backed tool)
 
 `riltra mcp` starts a local stdio MCP server for coding agents. It exposes
-eleven read-only tools:
+twelve tools:
 
 - `riltra_repo_list`, `riltra_repo_status`, `riltra_health`
 - `riltra_code_search`, `riltra_code_callers`, `riltra_code_callees`,
   `riltra_code_trace`, `riltra_code_impact`
 - `riltra_knowledge_search`, `riltra_knowledge_show`, `riltra_knowledge_related`
+- `riltra_code_semantic` — definition or references at a position, answered by
+  the language server the operator configured in `RILTRA_LSP_SERVER` (an
+  absolute path). It is the one tool that starts a subprocess: the server may
+  write its own index cache and may reach the network, so the server is no
+  longer read-only as a whole. Riltra itself still creates, migrates and
+  replaces no database through it.
 
 The server never creates, migrates, or replaces a database. A missing index or
 knowledge store returns its documented empty/`no-index` result without creating

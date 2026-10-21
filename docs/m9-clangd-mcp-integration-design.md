@@ -1,20 +1,22 @@
 # M9 — clangd MCP integration design (proposal)
 
-**Status: PROPOSAL ONLY. This document authorizes no implementation.** It
-designs the minimum integration that lets an MCP client (OpenCode) ask a
-registered repository for a semantic *definition* or *references* answer
-produced by a language server, reusing the code the CLI already ships. No
-production code, schema, dependency, MCP tool, or frozen evidence is changed
-by this document.
+**Status: IMPLEMENTED under an OWNER GO (2026-10-21).** This document is the
+design of record: it specifies the minimum integration that lets an MCP
+client (OpenCode) ask a registered repository for a semantic *definition* or
+*references* answer produced by a language server, reusing the code the CLI
+already ships. The implementation is recorded in
+`docs/m9-clangd-mcp-implementation.md`; the owner approved OD-1..OD-7 as
+listed in §10 (Mode A, `RILTRA_LSP_SERVER`, no pagination, the compilation
+database provided by the operator, no readiness check, D-M9-2 superseded for
+this narrow scope, and the health flags describing the whole server's
+potential effects).
 
-- Date: 2026-10-21
+- Date: 2026-10-21 (design); implemented 2026-10-21
 - Branch: `m9-multirepo-release-candidate`
 - Base: `ee80646722031e8b67879d3ad970ceb78370703c` (the privacy-corrections
   commit; `0b453bf` and `22bc7b7` before it)
-- Scope: **design only**. The implementation described in §9 needs a separate
-  OWNER GO. It **proposes to supersede D-M9-2**
-  (`docs/m9-design-gate.md:806`) for the narrow scope in §9 — only that OWNER
-  GO can supersede it, not this document (OD-6, §10).
+- Scope: the design changes no production code itself; the implementation it
+  describes needs a separate OWNER GO, which it has (OD-6).
 - Out of scope, explicitly: MCP/graph integration beyond the single tool,
   E12 (construction vs declaration), LSP ingestion into the graph or the
   database, CP4, merge, release.

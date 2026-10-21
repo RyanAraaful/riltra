@@ -2,11 +2,13 @@
 //! Shared deterministic response assembly for the CLI and (M8 CP3+) the MCP
 //! server. One code path builds each response shape; callers add the trailing
 //! newline. This module is extraction-only: every byte matches the historical
-//! inline formatting in `main.rs`.
+//! inline formatting in `main.rs`. (The semantic query document is the one
+//! exception: it carries its own trailing newline, exactly as the CLI's
+//! inline version did.)
 
 use std::path::Path;
 
-use crate::{git, ignore, index, json, knowledge, knowledge_store, store};
+use crate::{git, ignore, index, json, knowledge, knowledge_store, semantic, store};
 
 /// One snapshot identity block, shared by search and index-status output.
 pub(crate) fn snapshot_json(snapshot: &store::Snapshot) -> String {
@@ -500,10 +502,133 @@ pub(crate) fn knowledge_related_result_json(
     )
 }
 
+// --- semantic query ----------------------------------------------------------
+
+/// One semantic hit: the shape the CLI and the MCP tool print. An LSP answer
+/// carries no symbol identity, so `symbol_uri` and `display_name` are null.
+pub(crate) fn semantic_hit_json(hit: &index::SemanticHit) -> String {
+    format!(
+        "{{\"symbol_uri\":{},\"display_name\":{},\"path\":\"{}\",\"span\":{{\"start_line\":{},\"start_col\":{},\"end_line\":{},\"end_col\":{},\"byte_start\":{},\"byte_end\":{}}},\"roles\":{},\"precision\":\"{}\",\"verification\":\"{}\"}}",
+        match &hit.symbol_uri {
+            Some(u) => format!("\"{}\"", json::escape(u)),
+            None => "null".to_string(),
+        },
+        match &hit.display_name {
+            Some(n) => format!("\"{}\"", json::escape(n)),
+            None => "null".to_string(),
+        },
+        json::escape(&hit.path),
+        hit.start_line,
+        hit.start_col,
+        hit.end_line,
+        hit.end_col,
+        hit.byte_start,
+        hit.byte_end,
+        hit.roles,
+        hit.precision,
+        hit.verification
+    )
+}
+
+/// The semantic query document: the CLI's `semantic query` answer, byte for
+/// byte, so the CLI and the MCP tool print the same document.
+///
+/// **The trailing newline is part of this format string** — unlike the other
+/// formatters in this module, whose callers add it.
+pub(crate) fn semantic_query_json(repo: &str, out: &index::SemanticQueryOut) -> String {
+    let defs: Vec<String> = out.definitions.iter().map(semantic_hit_json).collect();
+    let references: Vec<String> = out.references.iter().map(semantic_hit_json).collect();
+    let diags: Vec<String> = out
+        .server_diagnostics
+        .iter()
+        .map(|d| format!("\"{}\"", json::escape(d)))
+        .collect();
+    format!(
+        "{{\"repo\":\"{}\",\"definitions\":[{}],\"references\":[{}],\"provider\":\"{}\",\"provider_version\":\"{}\",\"verification\":\"{}\",\"server_diagnostics\":[{}],\"fallback\":{}}}\n",
+        json::escape(repo),
+        defs.join(","),
+        references.join(","),
+        json::escape(&out.provider_name),
+        json::escape(&out.provider_version),
+        out.verification,
+        diags.join(","),
+        match &out.fallback {
+            Some(reason) => semantic::fallback_report(&out.provider_name, reason),
+            None => "null".to_string(),
+        }
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    /// The semantic query document must stay byte-identical to the CLI's
+    /// historical inline format, trailing newline included. The expected
+    /// string is a verbatim copy of that format, so any change to the
+    /// formatter shows up here.
+    #[test]
+    fn the_semantic_query_document_is_byte_identical_to_the_cli_format() {
+        let hit = index::SemanticHit {
+            symbol_uri: None,
+            display_name: None,
+            path: "src/main.rs".to_string(),
+            start_line: 1,
+            start_col: 4,
+            end_line: 1,
+            end_col: 7,
+            byte_start: 10,
+            byte_end: 13,
+            roles: 1,
+            precision: "Heuristic".to_string(),
+            verification: "Unverified".to_string(),
+        };
+        let hit_json = format!(
+            "{{\"symbol_uri\":null,\"display_name\":null,\"path\":\"{}\",\"span\":{{\"start_line\":{},\"start_col\":{},\"end_line\":{},\"end_col\":{},\"byte_start\":{},\"byte_end\":{}}},\"roles\":{},\"precision\":\"{}\",\"verification\":\"{}\"}}",
+            hit.path,
+            hit.start_line,
+            hit.start_col,
+            hit.end_line,
+            hit.end_col,
+            hit.byte_start,
+            hit.byte_end,
+            hit.roles,
+            hit.precision,
+            hit.verification
+        );
+        let out = index::SemanticQueryOut {
+            definitions: vec![hit],
+            references: Vec::new(),
+            provider_name: "lsp-subprocess".to_string(),
+            provider_version: "clangd version 23.1.4".to_string(),
+            verification: "Unverified".to_string(),
+            server_diagnostics: vec!["note".to_string()],
+            fallback: None,
+        };
+        let expected = format!(
+            "{{\"repo\":\"demo\",\"definitions\":[{}],\"references\":[],\"provider\":\"lsp-subprocess\",\"provider_version\":\"clangd version 23.1.4\",\"verification\":\"Unverified\",\"server_diagnostics\":[\"note\"],\"fallback\":null}}\n",
+            hit_json
+        );
+        assert_eq!(semantic_query_json("demo", &out), expected);
+
+        // The fallback form is the contract's payload, and the document keeps
+        // the same shape.
+        let failed = index::SemanticQueryOut {
+            definitions: Vec::new(),
+            references: Vec::new(),
+            provider_name: "lsp-subprocess".to_string(),
+            provider_version: String::new(),
+            verification: "Unverified".to_string(),
+            server_diagnostics: Vec::new(),
+            fallback: Some("language server not found: 'x'".to_string()),
+        };
+        let expected_failed = format!(
+            "{{\"repo\":\"demo\",\"definitions\":[],\"references\":[],\"provider\":\"lsp-subprocess\",\"provider_version\":\"\",\"verification\":\"Unverified\",\"server_diagnostics\":[],\"fallback\":{}}}\n",
+            semantic::fallback_report("lsp-subprocess", "language server not found: 'x'")
+        );
+        assert_eq!(semantic_query_json("demo", &failed), expected_failed);
+    }
 
     fn snapshot() -> store::Snapshot {
         store::Snapshot {

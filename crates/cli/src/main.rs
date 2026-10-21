@@ -901,30 +901,6 @@ fn cmd_semantic_status(name: &str, out: &mut String, err: &mut String) -> i32 {
     }
 }
 
-fn semantic_hit_json(hit: &index::SemanticHit) -> String {
-    format!(
-        "{{\"symbol_uri\":{},\"display_name\":{},\"path\":\"{}\",\"span\":{{\"start_line\":{},\"start_col\":{},\"end_line\":{},\"end_col\":{},\"byte_start\":{},\"byte_end\":{}}},\"roles\":{},\"precision\":\"{}\",\"verification\":\"{}\"}}",
-        match &hit.symbol_uri {
-            Some(u) => format!("\"{}\"", json::escape(u)),
-            None => "null".to_string(),
-        },
-        match &hit.display_name {
-            Some(n) => format!("\"{}\"", json::escape(n)),
-            None => "null".to_string(),
-        },
-        json::escape(&hit.path),
-        hit.start_line,
-        hit.start_col,
-        hit.end_line,
-        hit.end_col,
-        hit.byte_start,
-        hit.byte_end,
-        hit.roles,
-        hit.precision,
-        hit.verification
-    )
-}
-
 fn cmd_semantic_query(
     name: &str,
     query: &QueryArgs<'_>,
@@ -963,27 +939,7 @@ fn cmd_semantic_query(
     };
     match answer {
         Ok(o) => {
-            let defs: Vec<String> = o.definitions.iter().map(semantic_hit_json).collect();
-            let references: Vec<String> = o.references.iter().map(semantic_hit_json).collect();
-            let diags: Vec<String> = o
-                .server_diagnostics
-                .iter()
-                .map(|d| format!("\"{}\"", json::escape(d)))
-                .collect();
-            *out = format!(
-                "{{\"repo\":\"{}\",\"definitions\":[{}],\"references\":[{}],\"provider\":\"{}\",\"provider_version\":\"{}\",\"verification\":\"{}\",\"server_diagnostics\":[{}],\"fallback\":{}}}\n",
-                json::escape(name),
-                defs.join(","),
-                references.join(","),
-                json::escape(&o.provider_name),
-                json::escape(&o.provider_version),
-                o.verification,
-                diags.join(","),
-                match &o.fallback {
-                    Some(reason) => semantic::fallback_report(&o.provider_name, reason),
-                    None => "null".to_string(),
-                }
-            );
+            *out = response::semantic_query_json(name, &o);
             0
         }
         Err(e) => {

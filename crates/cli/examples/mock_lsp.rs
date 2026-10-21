@@ -189,6 +189,52 @@ fn mutate_opened_file(uri: &str) {
     }
 }
 
+/// The character the client asked for, from the request body.
+fn requested_character(body: &str) -> u32 {
+    if let Some(at) = body.find("\"character\":") {
+        let rest = &body[at + 12..];
+        let end = rest
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(rest.len());
+        return rest[..end].parse().unwrap_or(0);
+    }
+    0
+}
+
+/// The barrier: this instance announces itself under the mock root and waits
+/// for a peer instance (bounded). Two overlapping calls therefore both reach
+/// the same point. The marker **stays** until the process exits: a peer that
+/// has already proceeded must still be visible to the one that waits.
+fn barrier() {
+    let root = std::env::var("RILTRA_MOCK_ROOT").unwrap_or_default();
+    let dir = format!("{root}/barrier");
+    let _ = std::fs::create_dir_all(&dir);
+    let mine = format!("wait-{}", std::process::id());
+    let _ = std::fs::write(format!("{dir}/{mine}"), "waiting");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        let peers = std::fs::read_dir(&dir)
+            .map(|entries| {
+                entries
+                    .filter_map(|entry| entry.ok())
+                    .filter(|entry| {
+                        let name = entry.file_name().to_string_lossy().into_owned();
+                        name.starts_with("wait-") && name != mine
+                    })
+                    .count()
+            })
+            .unwrap_or(0);
+        if peers > 0 {
+            return;
+        }
+        if std::time::Instant::now() > deadline {
+            let _ = std::fs::write(format!("{dir}/timeout-{}", std::process::id()), "timeout");
+            std::process::exit(1);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+}
+
 fn main() {
     let mode = std::env::var("RILTRA_MOCK_LSP").unwrap_or_default();
     let stdin = std::io::stdin();
@@ -383,6 +429,47 @@ fn main() {
                     ),
                 );
                 send("{\"jsonrpc\":\"2.0\",\"id\":\"C:/Windows/System32/private\",\"result\":{\"path\":\"C:/Windows/System32/private\"}}");
+                continue;
+            }
+            if mode == "huge-answer" {
+                // A location whose message is larger than the adapter's
+                // message cap: the adapter must refuse it instead of
+                // relaying it.
+                let uri = file_uri("main.rs");
+                let filler = "x".repeat(9 * 1024 * 1024);
+                respond(
+                    &id_of(&body),
+                    &format!(
+                        "{{\"uri\":\"{uri}\",\"range\":{{\"start\":{{\"line\":0,\"character\":0}},\"end\":{{\"line\":0,\"character\":1}}}},\"note\":\"{filler}\"}}"
+                    ),
+                );
+                continue;
+            }
+            if mode == "echo-position" {
+                // The answer carries back the character the client asked for,
+                // so the test can see which unit the adapter used.
+                let uri = file_uri("main.rs");
+                let character = requested_character(&body);
+                respond(
+                    &id_of(&body),
+                    &format!(
+                        "{{\"uri\":\"{uri}\",\"range\":{{\"start\":{{\"line\":1,\"character\":{character}}},\"end\":{{\"line\":1,\"character\":{}}}}}}}",
+                        character + 1
+                    ),
+                );
+                continue;
+            }
+            if mode == "barrier" {
+                // Two overlapping calls both reach this point, and only then
+                // does either answer.
+                barrier();
+                let uri = file_uri("main.rs");
+                respond(
+                    &id_of(&body),
+                    &format!(
+                        "{{\"uri\":\"{uri}\",\"range\":{{\"start\":{{\"line\":1,\"character\":4}},\"end\":{{\"line\":1,\"character\":7}}}}}}"
+                    ),
+                );
                 continue;
             }
             let uri = file_uri("main.rs");

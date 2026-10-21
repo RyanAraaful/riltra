@@ -2821,6 +2821,39 @@ mod tests {
     }
 
     #[test]
+    fn the_answer_verdict_is_the_weakest_fact() {
+        // The answer's verdict is the weakest fact in it: one stale fact
+        // makes the whole answer stale, never the other way round. (A mixed
+        // answer cannot be produced through the adapter — a changed queried
+        // file marks every fact stale — so the rule is proven here.)
+        let hit = |verification: &str| crate::index::SemanticHit {
+            symbol_uri: None,
+            display_name: None,
+            path: "a.rs".to_string(),
+            start_line: 1,
+            start_col: 2,
+            end_line: 1,
+            end_col: 5,
+            byte_start: 10,
+            byte_end: 13,
+            roles: 0,
+            precision: "Heuristic".to_string(),
+            verification: verification.to_string(),
+        };
+        assert_eq!(lsp_answer_verification(&[], &[]), "Unverified");
+        assert_eq!(
+            lsp_answer_verification(&[hit("Unverified")], &[]),
+            "Unverified"
+        );
+        assert_eq!(lsp_answer_verification(&[hit("Stale")], &[]), "Stale");
+        assert_eq!(
+            lsp_answer_verification(&[hit("Unverified")], &[hit("Stale")]),
+            "Stale",
+            "the weakest fact decides the answer's verdict"
+        );
+    }
+
+    #[test]
     fn lsp_hits_carry_the_facts_own_precision_and_verification() {
         // A provider fact is never presented as more certain than it is: the
         // hit travels with the fact's own precision and verification, so a
