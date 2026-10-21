@@ -298,6 +298,8 @@ build: every answer is the same file and line as the pilot measured, and
 the only expectation that does not hold is the E12 one — which is the
 finding, not a regression. The hardening changes what the caller is told
 about the answer (the diagnostics, the staleness), not what the answer is.
+The same table was re-run again after the privacy corrections, with the same
+result.
 
 The CI matrix does not set `RILTRA_TEST_LSP`, so the end-to-end LSP test is
 local evidence; the adapter-level tests are in CI. That is a known limit of
