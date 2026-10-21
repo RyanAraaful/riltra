@@ -70,10 +70,10 @@ miss:
 - The health document is **hand-written** and carries a hard-coded tool list
   and a server-level `read_only: true` (`mcp.rs:1240-1271`). A twelfth tool
   changes that document (OD-7).
-- The existing MCP test asserts `readOnlyHint == true` and
-  `idempotentHint == true` **for every advertised tool**
-  (`tests/mcp.rs:220-222`), and the health test asserts `read_only == true`
-  and a tool count of 11 (`tests/mcp.rs:458`, `:463`).
+- The existing MCP test asserts `readOnlyHint == true`,
+  `openWorldHint == false` and `idempotentHint == true` **for every
+  advertised tool** (`tests/mcp.rs:220-222`), and the health test asserts
+  `read_only == true` and a tool count of 11 (`tests/mcp.rs:458`, `:463`).
 - The MCP transport re-serializes the document: `doc()` parses the CLI text
   into a `serde_json::Value` and `CallToolResult::structured` renders it
   (`mcp.rs:390-398`). `serde_json` is used without the `preserve_order`
@@ -318,16 +318,30 @@ operator-controlled switches (`RILTRA_HOME`, `RILTRA_LSP_DEBUG`,
 `RILTRA_TEST_LSP`) and it is settable where the operator expects it:
 OpenCode's local MCP server configuration has an `environment` map
 (Context7: `opencode.ai/v2/docs/mcp-servers`), and `opencode mcp add --env
-KEY=VALUE` exists (Context7: `opencode.ai/v2/docs/cli/commands`). Example:
+KEY=VALUE` exists (Context7: `opencode.ai/v2/docs/cli/commands`). The **V2**
+shape matters and is easy to get wrong: servers live under
+`mcp.servers.<name>`, `enabled` became the inverse `disabled`, and
+`timeout` is an **object** — `{startup, catalog, execution}` — not the
+single number of V1 (Context7: `opencode.ai/v2/docs/migrate-v1`):
 
 ```jsonc
 { "$schema": "https://opencode.ai/config.json",
   "mcp": { "servers": { "riltra": {
       "type": "local",
       "command": ["riltra", "mcp"],
-      "environment": { "RILTRA_LSP_SERVER": "/opt/llvm/bin/clangd" },
-      "timeout": 120000 } } } }
+      "environment": { "RILTRA_LSP_SERVER": "/opt/llvm/bin/clangd" } } } } }
 ```
+
+**No timeout override is needed.** The default `execution` timeout is **12
+hours** (Context7: `opencode.ai/v2/docs/mcp-servers`), far above the
+provider's bounded worst case of under a minute (§7.2); the other two
+defaults are 30 s for `startup` and 30 s for `catalog`, which this server
+also fits inside. If the operator lowers it, the knob is
+`mcp.servers.riltra.timeout.execution` (or the global
+`mcp.timeout.execution` default) and it should stay comfortably above the
+adapter's worst case — 120 s is a reasonable margin (§7.2). The flat V1
+form `"timeout": 120000` is not the V2 shape and would be ignored or
+rejected.
 
 ### 3.3 What is validated before anything is spawned
 
@@ -365,7 +379,7 @@ test 10).
 
 ## 4. The read-only strategy and clangd's cache
 
-### 4.1 What clangd actually writes (verified)
+### 4.1 What clangd writes — and what it does not run (verified)
 
 - **Project index cache**: "Before indexing each file, the index checks for a
   cached `*.idx` file on disk. After indexing, it writes this file. These
@@ -379,18 +393,58 @@ test 10).
   library, they are in `clangd/index` under the user's cache directory
   (`$XDG_CACHE_HOME`, `DARWIN_USER_CACHE_DIR`, or `%LocalAppData%`)."
   (Context7, same page.) A write outside the repository, on the machine.
-- **Compilation database**: clangd *reads* `compile_commands.json`; it never
-  writes it. Riltra never generates one either (§4.5).
+- **Compilation database**: clangd *reads* `compile_commands.json` — the
+  pilot's frozen log shows only a load ("Loaded compilation database from
+  …", `docs/pilots/clangd/raw/env/clangd-check-fixture.txt:10`) and no
+  write — and Riltra never generates one either (§4.5).
 - **Background index**: on by default; `--background-index=0` turns it off
   (Context7: `clangd.llvm.org/troubleshooting`).
-- **Compile commands are executed.** clangd drives the compiler from the
-  compilation database (the pilot's MMSP run drove `cl.exe` with the MSVC
-  include paths, `docs/m9-clangd-pilot.md:606-611`). That is the same
-  "untrusted child" boundary the adapter already documents
-  (`lsp.rs:4-6`: "servers may run hooks/builds/network").
+- **The compilation database is interpreted, not built — and the compiler it
+  names is not executed either.** clangd "determines a virtual compiler
+  command for each file … Ideally this command comes from the build system"
+  (Context7: `clangd.llvm.org/design/compile-commands`), and the "tweaks
+  always applied" are: "`-fsyntax-only` is added because we're just parsing,
+  not compiling", "`-resource-dir=...` is added, because built-in headers
+  like `<stddef.h>` must be the ones installed with clangd", "certain
+  unsupported flags like `-plugin` are dropped", and bare command names are
+  made absolute by looking them up on the `$PATH` (the same page).
+  **Tweaks, not execution:** the pilot's own frozen log shows what clangd
+  does with the entry — it *reconstructs* a command line and parses it
+  in-process:
+  `"Compile command from CDB is: [… ] \"…\\cl.exe\" --driver-mode=cl /nologo /TP … -c \"-resource-dir=…\" -- \"…\\use_point.cc\""`,
+  then `"Parsing command..."`, then
+  `"internal (cc1) args are: -cc1 -triple x86_64-pc-windows-msvc19.34.31948 -O0 -fsyntax-only …"`
+  (`docs/pilots/clangd/raw/env/clangd-check-fixture.txt:11-13`; the same
+  for MMSP at `clangd-check-mmsp.txt:11-13`). The reconstructed argv
+  contains options `cl.exe` does not accept (`--driver-mode=cl`,
+  `-resource-dir=`) and the `-cc1` invocation is clangd's **own frontend**:
+  so the project's build step is never run — no object file, no link step,
+  no build script — and the binary the database names is **not executed**.
+  (The pilot's phrase "clangd really drives `cl.exe` with the MSVC include
+  paths", `docs/m9-clangd-pilot.md:606-611`, is a figure of speech about
+  cl-style flags and the MSVC standard-library include paths, not a
+  measurement of a child process; the frozen log is the measurement.)
+- **`--query-driver` is a different mechanism, and it is off by default.**
+  It is an *allowlist* for the driver clangd may execute **to infer include
+  paths**: "If the compile flags has `/custom/compiler` as the driver name,
+  clangd will run something similar to `/custom/compiler -E -xc++ -v
+  /dev/null` and parse its output … Since it implies executing arbitrary
+  binaries, that might be checked-in with the project, clangd does not
+  perform this inference automatically. You need to allowlist binaries you
+  deem safe for execution using `--query-driver`" (Context7:
+  `clangd.llvm.org/guides/system-headers`). It is **not** how the
+  compilation database is consumed, and Riltra does not use it.
 
-So: **a clangd run always writes something somewhere.** It is not a
-read-only program, and no configuration of Riltra can make it one.
+So the executable inside the trust boundary is the **operator-configured
+language server** (`lsp.rs:29-33`) — not a project-supplied binary. What
+the project controls is the **configuration and content the server reads**:
+the compilation database, a `.clangd` file, the source tree, and the
+provider's own index state. That is the same "untrusted child" boundary the
+adapter already documents (`lsp.rs:4-6`: "servers may run hooks/builds/
+network") — a *language server* may run build tools, whatever it is.
+
+So: **a clangd run may write something somewhere** (the caches above). It is
+not a read-only program, and no configuration of Riltra can make it one.
 
 ### 4.2 What the MCP annotation actually means
 
@@ -444,12 +498,40 @@ The remaining three hints, in both modes:
   cache; it deletes nothing of the user's.
 - `open_world_hint = true` — the specification's meaning is *"this tool may
   interact with an 'open world' of external entities"* (default: true). The
-  tool starts a language server that **executes the project's compile
-  commands** (§4.1), and those commands may reach the network. Riltra itself
-  makes no network call, but the tool's execution does, so the honest value
-  is `true` — which is also the specification's default, so the field can
-  simply be omitted. (The other eleven tools keep `open_world_hint = false`:
-  they talk to no process at all.)
+  tool starts a **provider the operator chose**, and Riltra does not restrict
+  what that provider may spawn: a language server such as rust-analyzer
+  runs the project's build tools, and those may reach the network. For
+  clangd specifically the pilot's frozen log shows the opposite — the
+  compilation database is parsed in-process and no project binary is
+  executed (§4.1). The honest value is therefore `true`: the risk is
+  **provider-dependent**, and the tool cannot know which provider the
+  operator configured. (The other eleven tools keep `open_world_hint =
+  false`: they start no process at all.)
+
+### 4.3.1 The health document's three capability flags
+
+The health document is hand-written (`mcp.rs:1240-1271`) and carries nine
+fields under `capabilities`, three of which this design has to scope —
+`read_only`, `mutations` and `network` — because "read-only", "mutates" and
+"network" are three different questions, and because the project already
+uses a *store-centric* reading of read-only elsewhere: the design gate says
+the server "serves 11 read-only tools … reads never create or migrate a
+store" (`docs/m9-design-gate.md:152-154`), and G-MCP's stop condition is "a
+read tool creating / migrating a store" (`:540-541`).
+
+| Flag | The readings | Value under each |
+|---|---|---|
+| `capabilities.read_only` | (i) **tool-level**: "the server exposes only read-only tools", in the MCP annotation's sense (§4.2) · (ii) **server-level**: "the server modifies nothing on the machine" · (iii) **store-level**, the design gate's own wording: "no tool creates or migrates a store" | (i) `false` — the twelfth tool is not `read_only_hint = true` · (ii) `false` — the provider writes its cache · (iii) `true` — the LSP path is store-free (§4.4) |
+| `capabilities.mutations` | (i) **narrow**: "a tool mutates Riltra's own state (the index, the knowledge store)" · (ii) **broad**: "the server mutates anything on the machine" | (i) `false`, unchanged · (ii) `true` — the provider writes its cache |
+| `capabilities.network` | (i) **narrow**: "Riltra opens a network connection" · (ii) **broad**: "the tool's execution may reach the network" | (i) `false`, unchanged — Riltra makes no network call · (ii) `true` — depends on the provider (a server that runs build tools may fetch, §4.3) |
+
+The table names the readings. The design **proposes** reading (i) for
+`read_only` (`false`) and the narrow readings for `mutations` and `network`
+(`false` and `false`) — OD-7 — while reading (iii), the gate's store-centric
+wording, would leave `read_only` **`true`**; the scope is the owner's to fix
+(OD-7), and this document does not present one reading as the answer. The
+broad readings are the honest ones if a client reads the flags as claims
+about the whole machine.
 
 ### 4.4 What Riltra itself guarantees (the provable part)
 
@@ -536,12 +618,12 @@ are the evidence; Riltra reports them.
   already cover: `success` (the default), `diagnostics`, `late-diagnostics`,
   `empty`, `retryable`, `stale-input`, `fail-after-diagnostics`,
   `client-request`, `stray-response`, `crash`, `hang`, `malformed`,
-  `pollution`, `stderr-flood`, `no-refs`, `progress`. Three modes are added
+  `pollution`, `stderr-flood`, `no-refs`, `progress`. Four modes are added
   by this design (the oversized answer, the mixed verdict, the echoed
-  position — §6.2 tests 6, 10, 13). It reads its mode and root from the
-  environment (`RILTRA_MOCK_LSP`, `RILTRA_MOCK_ROOT`), so the MCP test
-  harness sets them on the spawned server (`tests/mcp.rs:40-49` already has
-  a `configure` hook ✓).
+  position, the barrier — §6.2 tests 6, 10, 13, 14). It reads its mode and
+  root from the environment (`RILTRA_MOCK_LSP`, `RILTRA_MOCK_ROOT`), so the
+  MCP test harness sets them on the spawned server (`tests/mcp.rs:40-49`
+  already has a `configure` hook ✓).
 - **Locating the mock from an integration test**: `testutil::mock_lsp_bin`
   (`testutil.rs:56-72`) is inside `#[cfg(test)] mod testutil;`
   (`main.rs:32-33`), so an integration test cannot call it and duplicates
@@ -574,20 +656,22 @@ are the evidence; Riltra reports them.
 | 11 | `semantic_refuses_an_escaping_or_missing_path` | `../escape.cc`, an absolute path, a drive-qualified path, a missing file and a symlink pointing out of the repository are all refused `invalid_input` — each with its own text (the texts differ: `semantic.rs:319-350`), and the missing file's containment text is disclosed in the tool's description | mock + the existing symlink helper (`tests/mcp.rs:1007-1027`) |
 | 12 | `semantic_classifies_its_own_refusals` | an unknown repository → `not_registered`; a corrupt registry → `store_error`; a non-numeric `line` and an unknown `operation` → the SDK's schema refusal (both are added to the schema-refusal sweep, `tests/mcp.rs:617-664`). And the **order** of the checks: a known repository with an escaping path and **no provider configured** is refused `invalid_input` (the path), not `provider_unavailable` (§2.5) | MCP harness + env (no mock) |
 | 13 | `semantic_column_unit_is_utf16` | a position on a line with non-ASCII text resolves the same way in the CLI and in MCP, **and** the offset the adapter received is the expected UTF-16 offset (not the byte offset) — the unit is the negotiated `utf-16`; the `col` schema description says the column is not the graph tools' byte column | mock (a new mode that echoes the requested `character` back, so the test can read the unit the adapter actually sent) + a non-ASCII fixture |
+| 14 | `semantic_survives_two_calls_in_flight` | two `tools/call` requests in flight at the same time both return a **non-fallback** answer carrying the expected location (`fallback: null`) — a fallback document would not count, because a dead mock still produces one (`index.rs:2447-2458`, `:2466-2482`). The MCP session stays healthy and no stdout line is lost. The test **observes the overlap** with a barrier in the mock, under four rules: each instance writes a **per-process** marker under `RILTRA_MOCK_ROOT` (the PID-naming precedent is `mock_lsp.rs:116-117`), removes its marker when it proceeds or exits, the test starts from an **empty** marker directory, and a **barrier timeout is a hard failure** — the mock exits non-zero or answers with an error, and leaves a `timeout-<pid>` marker behind, so a non-fallback answer is impossible without the peer. The test asserts that no barrier timeout occurred (no `timeout-*` marker exists) and that both answers carry `fallback: null`. It must not assert per-call log receipts: the mock's log is a read-modify-write (`mock_lsp.rs:59-67`), so two concurrent instances can lose events. The provider-side half needs a real clangd and is local-only (§6.4) | MCP harness + the mock (a new barrier mode) |
 
 ### 6.3 The existing tests that change
 
 | Test | Change |
 |---|---|
 | `mcp_tools_list_advertises_exactly_eleven_readonly_tools` (`tests/mcp.rs:175`) | renamed (the count is no longer eleven) and the count becomes **twelve**; the per-tool annotation loop (`tests/mcp.rs:213-225`) asserts `readOnlyHint`, `openWorldHint` and `idempotentHint` **per tool**: the eleven keep their current values, and the new tool carries its own (`false`, `true`, `false`) |
-| `t1_health_composition_matches_cli_and_creates_nothing` (`tests/mcp.rs:427`, the assertions at `:458` and `:463`) | the health document lists the twelfth tool, and `capabilities.read_only` reflects the new tool (OD-7) |
+| `t1_health_composition_matches_cli_and_creates_nothing` (`tests/mcp.rs:427`, the assertions at `:458` and `:463`) | the health document lists the twelfth tool, and the three capability flags take the values of the scope the owner fixes (OD-7, §4.3.1) |
 | the G4 unknown-input-fields loop (the assertions at `tests/mcp.rs:610-616`) and the schema-refusal sweep (`tests/mcp.rs:617-664`) | the new tool is added to both |
 | the CLI's `semantic query` output | **unchanged** — the formatter is extracted byte-for-byte (test 1's unit test pins it) |
 
 The eleven existing tools keep their names, descriptions, schemas and
-annotations. The health tool's *output* changes (it must list the new tool
-and stop claiming a server-wide `read_only`) — that is an existing tool's
-output, and it needs the owner's approval (OD-7).
+annotations. The health tool's *output* changes (it must list the twelfth
+tool; whether `read_only` changes follows the owner's scope choice — OD-7,
+§4.3.1) — that is an existing tool's output, and it needs the owner's
+approval (OD-7).
 
 ### 6.4 The local-only evidence (not in CI)
 
@@ -599,6 +683,9 @@ output, and it needs the owner's approval (OD-7).
 - A **read-only filesystem** variant: the repository mounted read-only (or
   its `.cache` path made unwritable) — the answer is unchanged and the
   provider's failure to write is visible in its diagnostics.
+- A **parallel-cache** variant: two clangd processes against the same
+  repository with a cold index; afterwards the index cache is still readable
+  by a third run and every answer is well-formed (§7.5, test 2).
 
 ## 7. The performance impact and the limits
 
@@ -628,19 +715,27 @@ Three operational consequences:
   adapter's request deadline is 30 s (`lsp.rs:39`, applied at `lsp.rs:461`),
   the warm-up deadline is 15 s (`lsp.rs:844`), and a **timeout is not
   retried** — the retry loop only repeats the "unready" answer
-  (`lsp.rs:156-159`, the loops at `lsp.rs:977`/`:1012`). A pathological
-  provider can therefore hold a call for roughly half a minute, plus the
-  bounded shutdown. OpenCode's per-server `timeout` (Context7:
-  `opencode.ai/v2/docs/mcp-servers`) should be ≥120 s.
-- **Peak memory is per call, not cumulative**: the server process is killed
-  at the end of every call (`lsp.rs:1038` `shutdown`), so the 168–350 MiB is
-  transient. The MCP server's own footprint is unchanged.
+  (`lsp.rs:156-159`, the loops at `lsp.rs:977`/`:1012`). The whole bounded
+  worst case is therefore **under a minute**: the warm-up, the request
+  deadline, and the kill + bounded reap (5 s, `lsp.rs:412-427`). OpenCode's
+  default `execution` timeout is **12 hours** (Context7:
+  `opencode.ai/v2/docs/mcp-servers`), so the default already covers it and
+  no override is needed; if the operator sets one, it belongs in
+  `mcp.servers.riltra.timeout.execution` and 120 s is a comfortable margin
+  above that worst case — a chosen margin, not a derived minimum (§3.2).
+- **Peak memory is per call, not cumulative across sequential calls**: the
+  server process is killed at the end of every call (`lsp.rs:1038`
+  `shutdown`), so the 168–350 MiB is transient. The MCP server's own
+  footprint is unchanged. (Overlapping calls are a different matter — see
+  §7.5.)
 - **A client timeout does not cancel the call.** The tool runs on
   `tokio::task::spawn_blocking` (`mcp.rs:382-387`), and a blocking task
   cannot be cancelled; the child is reaped only when the call ends
-  (`lsp.rs:1038-1068`). A client that gives up and retries can therefore
-  have two providers alive at once (168–350 MiB each). The MCP server sets no
-  concurrency limit; that is a risk to state, not a defect to fix here.
+  (`lsp.rs:1038-1068`). If the dispatcher reads a retry while the first
+  call is still outstanding (§7.5 — not established by this repository), a
+  client that gives up and retries can therefore have two providers alive at
+  once (168–350 MiB each). The MCP server sets no **explicit** concurrency
+  limit; that is a risk to state, not a defect to fix here.
 
 ### 7.3 The limits
 
@@ -664,6 +759,69 @@ new database, a daemon, a new dependency, or an LSP ingest path"
 the process is spawned per question (`docs/m9-clangd-pilot.md:594-604`).
 That is the same behaviour the CLI has today, and the pilot gives no
 evidence that a persistent server would pay for its complexity.
+
+### 7.5 The risk of parallel calls against one provider cache
+
+Each `tools/call` spawns its own language server and kills it at the end of
+the call (§7.2), and the MCP server does **not** serialize them itself: the
+tool bodies run on `tokio::task::spawn_blocking` (`mcp.rs:382-387`) with no
+lock, a blocking task cannot be cancelled, and the child is reaped only when
+the call ends (`lsp.rs:1038-1068`). Whether the **rmcp dispatcher** reads a
+second request while the first is still outstanding is **not established by
+this repository** — rmcp 3.5.1 is a dependency, not vendored source — so the
+document states it as an open question and lets test 14 (§6.2) settle it
+with an observable barrier. If the dispatcher does overlap them, two
+overlapping calls mean **two provider processes against the same
+repository**, and with clangd they share the same project index cache
+(`.cache/clangd/index`, §4.1).
+
+What the evidence says, and what it does not:
+
+- The pilot measured a **readiness race** with a single process: the first
+  question after a cold index can be answered from the current translation
+  unit alone — the declaration instead of the definition
+  (`docs/m9-clangd-pilot.md:322-344`). That concurrent cold calls widen this
+  window is an **inference**, not a measurement.
+- **Two writers on the same `*.idx` cache is not something the pilot
+  measured**, and the adapter's contract says nothing about it: the cache is
+  the provider's own file format, written and read only by clangd. Whether
+  concurrent writers corrupt it, or merely race to refresh it, is **unknown
+  from the evidence available here**.
+- The MCP protocol gives no ordering guarantee for `tools/call`, and this
+  design adds no lock, no semaphore, no pool and no daemon (§7.4) —
+  deliberately.
+
+The minimum tests that would settle it, with no new machinery:
+
+1. **Client-side (CI, mock):** two `tools/call` requests in flight at the
+   same time both return a **non-fallback** answer carrying the expected
+   location (`fallback: null` — a fallback document would not count, because
+   a dead mock still produces one), the MCP session stays healthy, and no
+   stdout line is lost — and the test **observes the overlap** with a
+   barrier in the mock, under four rules that make a sequential dispatcher
+   unable to pass: each instance writes a **per-process** marker under
+   `RILTRA_MOCK_ROOT` (the PID-naming precedent is `mock_lsp.rs:116-117`)
+   and removes it when it proceeds or exits; the test starts from an
+   **empty** marker directory; and a **barrier timeout is a hard failure** —
+   the mock exits non-zero or answers with an error and leaves a
+   `timeout-<pid>` marker behind, so no non-fallback answer is possible
+   without the peer. The test asserts that no barrier timeout occurred (no
+   `timeout-*` marker exists) and that both answers carry `fallback: null`.
+   It must not assert per-call log receipts: the mock's log is a
+   read-modify-write (`mock_lsp.rs:59-67`), so two concurrent instances can
+   lose events. This settles the **transport and the adapter** for the
+   pinned rmcp version and the stdio transport; it says nothing about the
+   provider's cache.
+2. **Provider-side (local-only, real clangd):** two clangd processes against
+   the same repository with a cold index; afterwards the index cache is
+   still readable by a third run, and every answer is well-formed. This is
+   the measurement the pilot did not make, and it is the one that decides
+   whether a future decision — a lock, one long-lived provider, or
+   accepting the risk — is needed.
+
+Until test 2 exists, the risk is **recorded, not mitigated**: the design
+adds nothing to prevent it, and says so rather than pretending the
+one-process-per-question model makes it impossible.
 
 ## 8. The reviewer's findings and the follow-up
 
@@ -716,7 +874,7 @@ back for a third round.
 | Completeness | the README (`:46`, `:106`), the `mcp.rs` module header (`:5`) and the renamed tools-list test also state the tool count | §9.1 lists all three; §6.3 lists the rename |
 | Completeness | the M8/CP1/CP3 documents that state "11 tools" are historical records | §9.3 classifies them as historical (not amended); only the live design gate is amended |
 | Completeness | the `tests/semantic.rs` row in §9.1 contradicted §6.1 (the MCP test has its own locate helper) | the row is removed |
-| Completeness | `open_world_hint = false` was not defensible: the provider executes the project's compile commands, which may reach the network | §4.3 sets `open_world_hint = true` (also the specification's default) and gives the reason; the tool's description carries the provider caveat |
+| Completeness | `open_world_hint = false` was not defensible: the provider executes the project's compile commands, which may reach the network | §4.3 sets `open_world_hint = true` (also the specification's default) and gives the reason; the tool's description carries the provider caveat — **the premise of this finding was itself wrong** and was corrected in round 5 (§4.1: the compilation database is parsed in-process, no project binary is executed); the annotation value is unchanged, for a different reason |
 | Low nits | citation ranges, a duplicated citation, the health-test range, "each with its own kind" (the kind is the same; the texts differ), "all addressed" in the present tense, and the missing-file text | all corrected in §1.1, §1.3, §2.5, §6.2, §6.3, §8 and §11 |
 
 Rejected findings: none in either round.
@@ -755,6 +913,92 @@ on five Low corrections — all applied:
 The reviewer's closing words: *"No High or Medium defects remain, and the
 implementation stays out of scope pending its own OWNER GO."*
 
+### Round 5 — the owner-directed corrections, and their verification
+
+After round 4, the **owner** (not the reviewer) asked for four corrections:
+the OpenCode v2 configuration, the claim about clangd running compile
+commands, the health document's three flags, and the risk of parallel calls
+against one provider cache. They were applied to this document and then
+verified by the same reviewer.
+
+The verification found that **the second correction had replaced one
+overstatement with a larger factual error** — the correction had claimed
+that "the compiler binary the database names is executed as a frontend",
+which the repository's own frozen clangd log contradicts
+(`docs/pilots/clangd/raw/env/clangd-check-fixture.txt:11-13`: the
+reconstructed argv contains options `cl.exe` does not accept, and the
+`-cc1 … -fsyntax-only` arguments are clangd's **own in-process** frontend).
+The error had propagated into five places, including the client-visible tool
+description.
+
+| Severity | Finding | Correction |
+|---|---|---|
+| HIGH | "the compiler binary the database names is executed as a frontend" — contradicted by the frozen log; the database entry is **interpreted**, not executed, and no project binary runs (only `--query-driver` names a binary clangd may run, and it is not used here) | §4.1 rewritten with the log as evidence; the trust-boundary sentence now names the **operator-configured server** as the executable and the project's *configuration and content* as what the project controls; §4.3's `open_world_hint` rationale, the §9.2 tool description and its annotation comment were rewritten |
+| MEDIUM | test 14 ("two calls in flight") could not distinguish "two providers alive at once" from "one after the other", so it did not prove what §7.5 claimed | test 14 now **observes the overlap** with a bounded barrier in the mock, and §7.5 states that rmcp's dispatch model is not established by this repository; the mock's log race is called out |
+| MEDIUM | §4.3.1 scoped `read_only` to the tool list while scoping its siblings to the server, and the design gate's own store-centric wording would leave it `true` | §4.3.1 now names the three readings for each flag with the value under each, and the value is the owner's to fix (OD-7); the design proposes the narrow scope without presenting it as forced |
+| MEDIUM | the §8 round-2 row repeated the false premise | the row is annotated as superseded by this round |
+| LOW ×6 | "a clangd run always writes" → "may write"; the 120 s threshold was unexplained → now "comfortably above the adapter's under-a-minute worst case"; "peak memory is per call, not cumulative" → "not cumulative across **sequential** calls"; §11's row still described the V1 flat `timeout` → now the V2 object; "concurrent cold calls widen that window" was inference presented as measurement; the `$PATH` sentence is now cited with its source | all corrected in §3.2, §4.1, §7.2, §7.5 and §11 |
+
+Verification limits of this round: the OpenCode timeout defaults were **not**
+verified in round 5 (that review had no Context7 access). The main agent
+re-queried `opencode.ai/v2/docs/mcp-servers` on 2026-10-21 and confirmed
+startup 30 s, catalog 30 s, **execution 12 hours**. rmcp's request-dispatch
+model is not established here (the crate is not vendored).
+
+### Round 6 — the verification of the round-5 corrections
+
+The same reviewer verified the round-5 corrections. The High defect (the
+compiler-execution claim) was confirmed fixed against the frozen log
+(`clangd-check-fixture.txt:11-13`), and the Lows were applied — but the
+applications themselves left four Mediums and five Lows:
+
+| Severity | Finding | Correction |
+|---|---|---|
+| MEDIUM | §4.3.1 said both "this design does not pick one for `read_only`" and "the narrow scope … is what the design *proposes* (OD-7)", and claimed the proposal matched the gate's store-centric wording, which the table contradicts; §6.3's closing paragraph still required the health output to change | §4.3.1 now proposes reading (i) for `read_only` and leaves the scope to the owner; §6.3 defers to that choice |
+| MEDIUM | test 14's barrier rules were incomplete — a stale marker, a timeout that proceeded instead of failing, and a reused marker directory could let a sequential dispatcher pass | the four rules and the `timeout-*` marker were added; §7.5 scopes the result to the pinned rmcp version |
+| MEDIUM | §7.2 asserted "two providers alive at once" unconditionally, while §7.5 said the overlap is not established | §7.2's claim is now conditional and says "no **explicit** concurrency limit" |
+| MEDIUM | the §8 round-5 entry presented a Context7 confirmation as part of a round that had no Context7 access | the entry now attributes the re-query to the main agent and to 2026-10-21 |
+| LOW ×5 | the mock-mode count was three, not four; the tool description had lost the provider caveat; §4.1's heading was too narrow; §1.2 omitted `openWorldHint`; §11 had no row for the in-process interpretation | all corrected in §1.2, §4.1, §6.1, §9.1, §9.2 and §11 |
+
+### Round 7 — the verification of the round-6 corrections
+
+The same reviewer verified the round-6 corrections. Applied and confirmed:
+§4.3.1 and §6.3 now agree with OD-7 — the design **proposes** reading (i)
+for `read_only` (`false`) and the narrow readings for `mutations` and
+`network`, and leaves the scope to the owner; test 14 and §7.5 require a
+**non-fallback** answer and the `timeout-*` marker; §7.2's claim is
+conditional on the dispatcher overlap that §7.5 says is not established
+here; the round-5 entry attributes the Context7 re-query to the main agent;
+the fourth mock mode appears in §6.1 and §9.1; the tool description carries
+the provider caveat; §4.1's heading covers what clangd does not run; §1.2
+names all three asserted annotations (`tests/mcp.rs:220-222`); and §11 has
+the row for the in-process interpretation. The H1 correction was unchanged
+and still matches the frozen log (`clangd-check-fixture.txt:11-13`).
+
+One MEDIUM was found in the record: the new round-6 entry repeated round 5's
+findings (the §4.3.1 scoping, the test-14 indistinguishability, and round
+5's five Lows) instead of round 6's (the §4.3.1 contradiction, the
+barrier's missing rules, and that round's five Lows). It now records round
+6's findings and corrections. Two LOW findings: §4.3.1 said `capabilities`
+carries "eight fields" — it carries nine (`mcp.rs:1249-1271`); and §6.2's
+test 14 still said "well-formed answer" where §7.5 says "non-fallback" (a
+fallback document is well-formed; `index.rs:2447-2458`, `:2466-2482`). Both
+corrected.
+
+| Severity | Finding | Correction |
+|---|---|---|
+| MEDIUM | the §8 round-6 entry repeated round 5's findings instead of round 6's | the entry now records round 6's findings and corrections |
+| LOW | `capabilities` has nine fields, not eight (`mcp.rs:1249-1271`) | corrected |
+| LOW | test 14's "well-formed answer" included the fallback document | "non-fallback answer", matching §7.5 |
+
+No High or Medium defect remained after these corrections; **GO as a design
+proposal** — the implementation stays out of scope pending its own OWNER GO.
+
+Verification limits: this review had no Context7 access and ran no
+commands; the OpenCode timeout values remain the main agent's re-query, and
+the "only this file changed" and "696 tests pass" claims are the main
+agent's.
+
 ## 9. The proposed minimum implementation diff
 
 Not applied by this document. This is what an approved implementation would
@@ -769,7 +1013,7 @@ touch.
 | `crates/cli/src/mcp.rs` | the `SemanticInput` struct and the `Operation` enum, the `riltra_code_semantic` tool, the provider resolution (`RILTRA_LSP_SERVER`, absolute-path check), the semantic refusal classification, **the module header** (it says "eleven tools total", `mcp.rs:5`), **and the health document** (the twelfth tool in the list; `capabilities.read_only` per OD-7) | ~95 lines |
 | `crates/cli/src/index.rs` | nothing, unless Mode B is chosen — then `semantic_query_lsp` gains the fixed `--background-index=0` argument, which **changes the CLI path too** | 0, or ~5 lines in the shared path |
 | `crates/cli/tests/mcp.rs` | the acceptance tests of §6.2, the tools-list count 11 → 12 and the test's rename, the per-tool annotation assertions, the health test, the G4 sweep, and a small helper that locates the mock binary (the same build/locate logic `tests/semantic.rs:966-983` uses, duplicated because `testutil` is `#[cfg(test)]`-only) | ~320 lines |
-| `crates/cli/examples/mock_lsp.rs` | three new modes: the oversized answer (test 10), the mixed-verdict answer (test 6), the echoed position (test 13) | ~30 lines |
+| `crates/cli/examples/mock_lsp.rs` | four new modes: the oversized answer (test 10), the mixed-verdict answer (test 6), the echoed position (test 13), the barrier (test 14) | ~40 lines |
 | `README.md` | the section heading "MCP server (read-only)" (`:103`) and the bold summary at `:46` stop claiming a read-only server; the two sentences that say "eleven read-only tools" (`:46`, `:106`) become twelve, and the new tool's non-read-only annotation is stated | ~6 lines |
 | `docs/m9-clangd-pilot.md` | a dated note that the MCP surface now reaches the LSP — the pilot's own frozen measurements stay untouched (the precedent: the 2026-10-21 update note at `docs/m9-clangd-pilot.md:84-94`) | 1 paragraph |
 | `docs/m9-design-gate.md` | a dated note that D-M9-2 and G-MCP's "11 read-only tools" are amended **by an explicit OWNER GO** (OD-6, OD-7) | 1 paragraph |
@@ -805,12 +1049,12 @@ struct SemanticInput {
 }
 
 #[tool(name = "riltra_code_semantic",
-       description = "Definition or references of the symbol at a position, answered by a language server (the same document as CLI `semantic query --lsp-server`). References are locations, not call edges: they are never edges, and they are never a completeness claim — the provider's project index and compilation database may be incomplete. An empty answer means the provider found nothing at this position; it is not a claim that the symbol does not exist. A path that does not exist is reported as a path-containment refusal (`document path escapes repository`), never as an empty answer. The answer carries the provider's verification state and its diagnostics. The language server is a local process that the operator configured; it executes the project's own compile commands and may write its own index cache, so this tool is not read-only.",
+       description = "Definition or references of the symbol at a position, answered by a language server (the same document as CLI `semantic query --lsp-server`). References are locations, not call edges: they are never edges, and they are never a completeness claim — the provider's project index and compilation database may be incomplete. An empty answer means the provider found nothing at this position; it is not a claim that the symbol does not exist. A path that does not exist is reported as a path-containment refusal (`document path escapes repository`), never as an empty answer. The answer carries the provider's verification state and its diagnostics. The language server is a local process that the operator configured; it reads the project and may write its own index cache, and what it runs is provider-dependent — some servers run the project's build tools — so this tool is not read-only.",
        annotations(title = "Semantic definition or references",
                    read_only_hint = false,      // Mode A: the provider writes its own index cache (§4.3)
                    destructive_hint = false,
                    idempotent_hint = false,     // the provider writes its cache on every call (§4.3)
-                   open_world_hint = true))]    // the provider runs the project's compile commands (§4.3)
+                   open_world_hint = true))]    // the provider may spawn build tools (§4.3)
 async fn riltra_code_semantic(&self, Parameters(input): Parameters<SemanticInput>) -> CallToolResult {
     blocking(move || semantic_doc(&input)).await
 }
@@ -865,8 +1109,8 @@ preserved.
 
 - The eleven existing MCP tools: their names, descriptions, schemas and
   annotations are unchanged, and their behaviour is unchanged **except the
-  health tool's output** (it must list the twelfth tool and stop claiming a
-  server-wide `read_only`) — OD-7.
+  health tool's output** (it must list the twelfth tool, and its read-only
+  claim follows the scope the owner fixes — OD-7, §4.3.1).
 - The index and knowledge stores: unchanged — no schema change, no
   migration, no new table, no write from this tool.
 - The semantic contract (`semantic.rs`): unchanged — no new `Verification`
@@ -884,6 +1128,11 @@ preserved.
 
 ## 10. The decisions that still need the owner
 
+**None of these is decided.** They are proposals with a recommendation, put
+forward for the owner to accept, reject or replace; nothing here is an
+authorization, and the implementation in §9 stays out of scope until the
+owner says otherwise (OD-6).
+
 | # | Decision | Options | Recommendation |
 |---|---|---|---|
 | OD-1 | The MCP annotation for a provider-backed tool, given that clangd writes a cache inside the project | **A**: `read_only_hint = false` + the background index on, honest and documented; **B**: `read_only_hint = true` + `--background-index=0`, closer to the literal wording, at the (inferred) cost of the project index — and it changes the CLI's provider arguments | **A** — B's claim is still not literally true (the system-header cache) and it buys a degraded answer |
@@ -892,7 +1141,7 @@ preserved.
 | OD-4 | Who provides the compilation database | the operator (Riltra never generates one) | settled by the brief — listed so the record shows it was considered |
 | OD-5 | Whether the tool refuses to run when no compilation database exists | no pre-flight check; the provider's diagnostics carry it | settled by the brief (§5.3) — a readiness mechanism is forbidden |
 | OD-6 | The gate | this design **proposes** to supersede D-M9-2 (`docs/m9-design-gate.md:806`) for the scope in §9; only an explicit OWNER GO can do that. The C++ semantic gap in G-SEM stays `NOT YET VERIFIED` until the implementation's own evidence exists | an explicit OWNER GO naming this document |
-| OD-7 | The health document and the G-MCP text | the twelfth tool must appear in `capabilities.tools`, and `capabilities.read_only` must stop claiming a server-wide read-only (the new tool is not `read_only_hint = true`). The design gate's "11 read-only tools" (`docs/m9-design-gate.md:152`) and G-MCP's "the 11 tools exposed" (`:521-539`) need an amendment | amend both with the OWNER GO of OD-6; `capabilities.read_only` → `false`. `mutations: false` and `network: false` stay as they are: they describe **Riltra's own** behaviour (Riltra mutates no store and makes no network call), not the provider's |
+| OD-7 | The health document's three capability flags and the G-MCP text | the twelfth tool must appear in `capabilities.tools`. For the other three flags, §4.3.1 names the readings: `read_only` is `false` under the tool-level and server-level readings and `true` under the gate's store-level wording; `mutations` and `network` are `false` under the narrow (Riltra's own) reading and `true` under the broad one. The design gate's "11 read-only tools" (`docs/m9-design-gate.md:152`) and G-MCP's "the 11 tools exposed" (`:521-539`) need an amendment | amend the gate and the README with the OWNER GO of OD-6; the design **proposes reading (i) for `read_only` (`false`) and the narrow readings for `mutations` and `network` (`false` and `false`)** — §4.3.1 — while the gate's store-centric wording would leave `read_only` `true`; the scope is the owner's to fix, and the broad scope is stated in §4.3.1 so the choice is visible |
 
 ## 11. The evidence behind the design
 
@@ -904,13 +1153,18 @@ preserved.
 | The evidence contract | `crates/cli/src/semantic.rs:14-50`, `70-80`, `117-129`, `173-193`, `319-350`, `371-376`, `406-421` |
 | The hardening that keeps the diagnostics and the staleness marking | `docs/m9-lsp-hardening.md` (§2 limits, §5 guarantees) |
 | The measurements | `docs/m9-clangd-pilot.md:573-587`; the frozen raw evidence under `docs/pilots/clangd/raw/` |
+| clangd parses the database entry **in-process**: the reconstructed command line is converted to `-cc1 … -fsyntax-only …` arguments, so the named compiler is not executed (only `--query-driver` names a binary clangd may run, and it is not used here) | `docs/pilots/clangd/raw/env/clangd-check-fixture.txt:11-13`, `clangd-check-mmsp.txt:11-13` (the pilot's frozen clangd log); Context7, `clangd.llvm.org/guides/system-headers` (2026-10-21) |
 | The index cache lands next to the compilation database; the header cache lands in the user cache dir | Context7, `clangd.llvm.org/design/indexing` (2026-10-21) |
+| clangd builds a **virtual** compile command from the database entry and applies `-fsyntax-only`, `-resource-dir` and drops unsupported flags; the project's build step is never run | Context7, `clangd.llvm.org/design/compile-commands` (2026-10-21) |
+| `--query-driver` is an allowlist for the driver clangd may execute to *infer include paths*, and that inference is off unless allowlisted | Context7, `clangd.llvm.org/guides/system-headers` (2026-10-21) |
 | `--background-index=0` disables the background index | Context7, `clangd.llvm.org/troubleshooting` (2026-10-21) |
 | `--compile-commands-dir=<path>` exists | Context7, `clangd.llvm.org/faq` (2026-10-21) |
 | `readOnlyHint` means "does not modify its environment"; the other hints' meanings | Context7, `modelcontextprotocol.io/specification/2025-11-25/schema` (2026-10-21) |
 | A tool result carries `content` and `isError`; `structuredContent` is the structured form | Context7, `modelcontextprotocol.io/specification/2025-11-25/server/tools` (2026-10-21) |
 | `rmcp` 3.5.1 exposes `read_only_hint`, `destructive_hint`, `idempotent_hint`, `open_world_hint` on `ToolAnnotations` | Context7, `docs.rs/rmcp` (2026-10-21) |
-| OpenCode's local MCP server configuration has an `environment` map and a per-server `timeout`; `opencode mcp add --env` exists | Context7, `opencode.ai/v2/docs/mcp-servers`, `opencode.ai/v2/docs/cli/commands` (2026-10-21) |
+| OpenCode's local MCP server configuration has an `environment` map and a per-server `timeout` **object** (`startup`/`catalog`/`execution`); `opencode mcp add --env` exists | Context7, `opencode.ai/v2/docs/mcp-servers`, `opencode.ai/v2/docs/cli/commands` (2026-10-21) |
+| OpenCode V2 groups servers under `mcp.servers`, replaces `enabled` with `disabled`, and splits `timeout` into `{startup, catalog, execution}` | Context7, `opencode.ai/v2/docs/migrate-v1` (2026-10-21) |
+| The timeout defaults: startup 30 s, catalog 30 s, **execution 12 hours** | Context7, `opencode.ai/v2/docs/mcp-servers` (2026-10-21) |
 | The accepted L2 limitation: a read-only open can leave `-wal`/`-shm` companions | `docs/m8-design-gate.md:221-227`, `:239-242` |
 | The tool count is stated in the README, the module header and the live design gate | `README.md:46`, `:106`; `crates/cli/src/mcp.rs:5`; `docs/m9-design-gate.md:152`, `:522`, `:537` |
 | clangd is deferred until a proven need with its own proposal and OWNER GO | `docs/m9-design-gate.md:806` (D-M9-2), `:580-600` (G-SEM), `:152` and `:521-539` (the eleven read-only tools) |
