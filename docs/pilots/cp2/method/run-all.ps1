@@ -25,6 +25,9 @@ $raw = $cfg.Out
 $bench = $cfg.BenchRoot
 $snap = Assert-SnapshotPath -Path $cfg.Snapshot -Root $cfg.BenchRoot -MmspRoot $cfg.MmspRoot
 $method = $PSScriptRoot
+# Step 4 grades before the MCP smoke exists: never let ambient variables make
+# it read archived evidence instead of this run's.
+Remove-Item Env:CP2_MCP_SMOKE, Env:CP2_OPENCODE_SESSION -ErrorAction SilentlyContinue
 
 function Section([string]$t) { "`n================ $t ================" }
 
@@ -104,8 +107,17 @@ Section "10. the D.5 grading (the smoke and the session are the D.5 evidence)"
 # The D5 checks are graded from the smoke and the session, both of which are
 # produced after step 4, so the grading is redone here. The historical
 # grader graded before the smoke existed and reported D5-H1 as UNAVAILABLE.
+# The session is NOT run by this script (it needs the model provider): run
+# opencode-session.ps1 with -Out $raw first, and the grading picks its
+# summary up from there.
 $env:CP2_MCP_SMOKE = Join-Path $raw 'mcp\mcp-smoke.json'
-if ($env:CP2_OPENCODE_SESSION) { $env:CP2_OPENCODE_SESSION = Join-Path $raw 'mcp\opencode-session.json' }
+$sessionSummary = Join-Path $raw 'mcp\opencode-session.json'
+if (Test-Path -LiteralPath $sessionSummary) {
+  $env:CP2_OPENCODE_SESSION = $sessionSummary
+} else {
+  $env:CP2_OPENCODE_SESSION = ''
+  "  no session summary at ${sessionSummary}: D5-E1 will be UNAVAILABLE"
+}
 node (Join-Path $method 'grade.cjs') (Join-Path $raw 'queries') (Join-Path $raw 'grading.json')
 if ($LASTEXITCODE -ne 0) { throw "the D.5 grading failed with exit $LASTEXITCODE" }
 

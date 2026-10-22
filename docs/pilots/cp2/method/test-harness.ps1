@@ -224,6 +224,11 @@ Task 2: report the error text, quoted. Do not retry with another name.
         Check "opencode-session.ps1 asserts the isolated home" ($session -match 'Assert-IsolatedHome') "the isolation guard is not called"
         Check "opencode-session.ps1 computes the outcome from the tool calls" ($session -match 'Get-SessionExitCode') "the fail-closed outcome is not computed"
         Check "opencode-session.ps1 reads the answer from the event stream" ($session -match 'Get-SessionAnswer') "the answer is not read from the stream"
+        Check "opencode-session.ps1 guards and clears the stale summary before the session" (
+            ($session -match 'summaryPath = Assert-BenchPath') -and
+            ($session.IndexOf('Remove-Item -LiteralPath $summaryPath') -ge 0) -and
+            ($session.IndexOf('Remove-Item -LiteralPath $summaryPath') -lt $session.IndexOf('Start-Process'))
+        ) "the stale summary is not guarded and cleared before the session"
     }
 }
 finally {

@@ -16,7 +16,7 @@
 # tools is recorded as blocked, never as a passing session.
 #
 # Usage:
-#   pwsh -File opencode-session.ps1 -BenchRoot <dir> -Bin <riltra.exe> -Out <dir> -HomeDir <dir> -MmspRoot <dir>
+#   pwsh -File opencode-session.ps1 -BenchRoot <dir> -Bin <riltra.exe> -Out <dir> -HomeDir <dir> -MmspRoot <dir> [-TimeoutSec <s>]
 param(
   [string]$BenchRoot = '',
   [string]$Bin = '',
@@ -25,11 +25,22 @@ param(
   [string]$OpenCode = '',
   [string]$Model = 'opencode/deepseek-v4.1-flash-free',
   [Parameter(Mandatory = $true)][string]$MmspRoot,
-  [int]$TimeoutSec = 600
+  [int]$TimeoutSec = 3600
 )
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'common.ps1')
 $cfg = Initialize-Cp2Harness -BenchRoot $BenchRoot -Bin $Bin -Out $Out -MmspRoot $MmspRoot
+# A summary of an earlier run must never be graded as this run's evidence.
+# The deletion happens before the session starts, and every failure after it
+# (no CLI, a timeout, a throw) leaves no summary, so the grader sees the
+# evidence as missing.
+$summaryPath = Assert-BenchPath -Path (Join-Path $cfg.Out 'mcp\opencode-session.json') -Root $cfg.BenchRoot
+if (Test-Path -LiteralPath $summaryPath) {
+    Remove-Item -LiteralPath $summaryPath -Force -ErrorAction Stop
+    if (Test-Path -LiteralPath $summaryPath) {
+        throw "the previous session summary could not be removed: $summaryPath"
+    }
+}
 if (-not $HomeDir) { $HomeDir = Join-Path $cfg.BenchRoot 'home-main' }
 if (-not $OpenCode) {
   # The npm shim is a .cmd on Windows; Start-Process cannot run it directly.
@@ -40,11 +51,6 @@ if (-not $OpenCode) {
 $isBatch = $OpenCode -and ($OpenCode -match '\.(cmd|bat)$')
 $sessionDir = New-BenchDir -Path (Join-Path $cfg.BenchRoot 'cp2\opencode-session') -Root $cfg.BenchRoot
 $out = New-BenchDir -Path (Join-Path $cfg.Out 'mcp') -Root $cfg.BenchRoot
-# A summary of an earlier run must never be graded as this run's evidence:
-# every failure path (no CLI, a timeout, a throw) must leave no summary, so
-# the grader sees the evidence as missing.
-$summaryPath = Join-Path $out 'opencode-session.json'
-Remove-Item -LiteralPath $summaryPath -Force -ErrorAction SilentlyContinue
 
 function Home-Digest([string]$dir) {
   $items = @()
@@ -127,7 +133,7 @@ $after = Home-Digest $HomeDir
 "===== stderr (first 20 lines) ====="
 Get-Content $stderrFile -ErrorAction SilentlyContinue | Select-Object -First 20
 "===== stdout: tool calls used ====="
-$rawOut = Get-Content $stdoutFile -Raw
+$rawOut = Get-Content -LiteralPath $stdoutFile -Raw
 # The tool calls are read from the stream's structured events, never scraped
 # from the text: a tool name in a sentence is not a call.
 $toolCalls = @(Get-SessionToolCalls -StdoutFile $stdoutFile)
@@ -158,11 +164,12 @@ $citationsFound = ([regex]::Matches($answerText, $citationPattern)).Count
 # as blocked, never as a successful agent session. The error is the LAST
 # "message" in the stream: the first one can be an intermediate tool error
 # (the semantic tool's provider refusal), not the session's own failure.
-$errMatch = $rawOut | Select-String -Pattern '"message":"([^"]+)"' | Select-Object -Last 1
+$errMatches = [regex]::Matches($rawOut, '"message":"([^"]+)"')
+$errText = if ($errMatches.Count -gt 0) { $errMatches[$errMatches.Count - 1].Groups[1].Value } else { $null }
 $summary = [ordered]@{
   exit_code       = $effectiveExit
   reason          = if ($effectiveExit -eq 0) { $null } elseif (@($toolCalls | Where-Object { [string]$_.tool -like 'riltra_*' }).Count -eq 0) { 'mcp-server-not-reached' } else { 'session-failed' }
-  error           = if ($effectiveExit -ne 0 -and $errMatch) { $errMatch.Matches.Groups[1].Value } else { $null }
+  error           = if ($effectiveExit -ne 0) { $errText } else { $null }
   tools           = @($toolNames)
   tool_calls      = @($toolCalls | ForEach-Object { "$($_.tool):$($_.status)" })
   cited_sources   = $citedSources

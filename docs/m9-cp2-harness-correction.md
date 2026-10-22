@@ -146,19 +146,19 @@ measurement) and they are in the script the brief already puts in scope:
 
 Every change is a **limited amendment** to a method script. The "before" is
 the blob id at the baseline commit `ffe776d`; the "after" is the blob id in
-the commit that carries this record.
+the final tree of this correction.
 
 | File | Before (blob at `ffe776d`) | After | Why |
 |---|---|---|---|
 | `docs/pilots/cp2/method/common.ps1` | `c87e262d9c8d5e98fda5db5f7293c8e8d46b0478` | `484ef3eb05f5b460a0fb8bfe28ba42eb2b9bc5b3` | the copy helper, the isolation guard, the prompt flattening, the project-local config writer, the event-stream reader (the structured tool calls and the final message), the fail-closed outcome
-| `docs/pilots/cp2/method/run-all.ps1` | `ed570b4b066aa4f54862b08c2f011e03e3996f60` | `2cf3e6b042de74c39637c24b5cfc56c4f87c339a` | the copy step (defect A), the new test in step 0 and the D.5 re-grading after the MCP smoke
+| `docs/pilots/cp2/method/run-all.ps1` | `ed570b4b066aa4f54862b08c2f011e03e3996f60` | `3d14850f6483f19333c4f4fbcb837ed2c387cf8a` | the copy step (defect A), the new test in step 0 and the D.5 re-grading after the MCP smoke
 | `docs/pilots/cp2/method/grade.cjs` | `adec365656bf56cba1498e17d60fc720e17abc37` | `7c42958fbfc76a8c997fafc94c82a41d26efe8dd` | the twelve-tool catalog contract (defect B)
 | `docs/pilots/cp2/method/grade.test.cjs` | `4cda3e1c3ff7c6ef63f7d89db3ac947447cff090` | `2e68cade8bf5b0405a8064a9f3bc29131297c7c3` | the twelve regression cases for the catalog contract and the blocked-session verdict
-| `docs/pilots/cp2/method/opencode-session.ps1` | `e5c40dbb1718d4abbdf39f808cdda572e9c269f3` | `1be86b742f4bf8d6deb1b607119efece8a935d61` | the prompt, the project-local config, the isolation guard, the structured tool calls, the measured citations, the fail-closed outcome (defect C)
-| `docs/pilots/cp2/method/test-harness.ps1` | `(new file)` | `99a01f23ab86b75476bb96dbd0fadfc9a982c9fc` | the regression tests of the harness helpers
+| `docs/pilots/cp2/method/opencode-session.ps1` | `e5c40dbb1718d4abbdf39f808cdda572e9c269f3` | `e30343b9c149ceab634f9c5aa9aaabfa921d0713` | the prompt, the project-local config, the isolation guard, the structured tool calls, the measured citations, the fail-closed outcome (defect C)
+| `docs/pilots/cp2/method/test-harness.ps1` | `(new file)` | `3f2ee5aaaafb2051775294c5247adfed0550700f` | the regression tests of the harness helpers
 | `docs/pilots/cp2-reeval/method/run-steps.ps1` | `20420fdf544b99cfafee4a1056567f60a1401a6c` | `e674fd971cb7b1ab57b0f5ee7599cf552e2f215d` | explicit parameters instead of placeholder defaults; the behaviour of the 2026-10-21 run is unchanged
 | `docs/pilots/cp2-reeval/method/opencode-session-d5.ps1` | `698767591351337ddec6ca04f1263de9acc4d7ac` | `e836c934220fb734311294bab21915f65e634ed1` | the same, plus a note that the canonical harness now supersedes it
-| `docs/pilots/cp2/method/README.md` | `a38d8480eaabc6ee37b22e9407fc482159d54b2a` | `c7f4b57f322018f199eaf282e1aafd5da772b979` | the amended procedure and the new scripts
+| `docs/pilots/cp2/method/README.md` | `a38d8480eaabc6ee37b22e9407fc482159d54b2a` | `794cbc53b527cb1937c2c794c15878125b12c6cc` | the amended procedure and the new scripts
 | `docs/pilots/cp2-reeval/README.md` | `0fe9bc88a60f0d121a2b0892afe1fa28310f358b` | `dd4ec6274ee5b3693fac6533029001d5ec95cc37` | the reproduction commands with every parameter explicit
 
 **The historical evidence was produced with the historical harness.** The raw
@@ -190,7 +190,7 @@ archived evidence, as clearly separated additional evidence.
 | 11 | a session that never called a Riltra tool does not pass | `FAIL … (The term 'Get-SessionExitCode' is not recognized …)` | `PASS a session without Riltra tools fails closed` |
 | 12 | a tool name in the agent's **text** is not a tool call | `FAIL … (The term 'Get-SessionToolCalls' is not recognized …)` | `PASS a session whose text names a Riltra tool fails closed` + `PASS that session made no tool call` |
 | 13 | the answer is the agent's **final** message | `FAIL … (The term 'Get-SessionAnswer' is not recognized …)` | `PASS the answer is the last text part` + `PASS a citation in an intermediate note is not a citation of the answer` |
-| 14 | the procedure **uses** the corrected helpers | `FAIL opencode-session.ps1 reads the answer from the event stream (the answer is not read from the stream)` | the six call-site checks pass (`run-all.ps1` uses `Copy-BenchDir` and no longer copies a directory into an existing one; the session writes the project config, asserts the isolated home, computes the outcome from the tool calls and reads the answer from the stream) |
+| 14 | the procedure **uses** the corrected helpers | `FAIL opencode-session.ps1 reads the answer from the event stream (the answer is not read from the stream)` | the seven call-site checks pass (`run-all.ps1` uses `Copy-BenchDir` and no longer copies a directory into an existing one; the session writes the project config, asserts the isolated home, computes the outcome from the tool calls, reads the answer from the stream, and clears the stale summary before it starts) |
 | 15 | a home registering a **subdirectory or a parent** of the original is refused | `FAIL … (the refusal was: '')` | `PASS a home registering a subdirectory of the original is refused` + `PASS a home registering a parent of the original is refused` |
 | 16 | the isolation guard cannot be **switched off** | `FAIL … (the refusal was: '')` | `PASS the guard cannot be switched off by omitting the original repository` |
 | 17 | the copy refuses a **non-disjoint** source and destination, and a destination that is not empty | `FAIL copying a directory into itself is refused (the refusal was: 'Cannot overwrite the item … with itself.')` | `PASS copying a directory into itself is refused` + `PASS copying a directory into its own subdirectory is refused` + `PASS a destination with leftover content is refused` |
@@ -200,7 +200,7 @@ archived evidence, as clearly separated additional evidence.
 **The test commands** (all from the repository root):
 
 ```powershell
-pwsh -NoProfile -File docs/pilots/cp2/method/test-harness.ps1   # 40 checks
+pwsh -NoProfile -File docs/pilots/cp2/method/test-harness.ps1   # 41 checks
 node --test docs/pilots/cp2/method/grade.test.cjs               # 33 tests
 node --test docs/pilots/cp2/method/fact-digest.test.cjs         # 16 tests
 pwsh -NoProfile -File docs/pilots/cp2/method/test-path-safety.ps1
@@ -219,11 +219,13 @@ proof:
    `riltra index status --repo mmsp-pin` answers `fresh` with **exit 0**.
    The original MMSP clone was not modified — the same
    HEAD, the same two untracked entries, an empty diff and a `.git`
-   directory last written on 2026-10-20, before and after. The whole
+   directory last written on 2026-10-20. The whole
    record is archived as `raw/copy-smoke.txt`.
 2. **The corrected grader, against the archived evidence.** The corrected
-   `grade.cjs` was run over `docs/pilots/cp2-reeval/raw/queries/` and
-   `docs/pilots/cp2-reeval/raw/mcp/mcp-smoke.json` (read-only). The result is
+   `grade.cjs` was run over `docs/pilots/cp2-reeval/raw/queries/`,
+   `docs/pilots/cp2-reeval/raw/mcp/mcp-smoke.json` and **this run's**
+   session summary `docs/pilots/cp2-harness-fix/raw/opencode-session.json`
+   (all read-only). The result is
    archived as clearly separated additional evidence in
    `docs/pilots/cp2-harness-fix/raw/grading-corrected.json`: `D5-H1` is now
    **PASS** (`tool_count = 12`, `required_tools_present = true`), the grader
@@ -232,8 +234,8 @@ proof:
    PASS). The historical `raw/grading.json` still says `D5-H1 = FAIL`.
 3. **The session, against the real agent.** The corrected
    `opencode-session.ps1` ran a real OpenCode session in the pilot home
-   (the copied `home-main`), with the project-local configuration and
-   `-Model opencode/minimax-m3.1-flash-free`:
+   (the copied `home-main`), with the project-local configuration,
+   `-TimeoutSec 3600` and `-Model opencode/minimax-m3.1-flash-free`:
 
    | | |
    |---|---|
@@ -242,8 +244,8 @@ proof:
    | the prompt | **delivered**: the agent answered Task 1 (the D.5 question) and Task 2 (the unknown repository) |
    | the classified error | quoted exactly, as the tool returned it: `{"kind":"not_registered","message":"unknown repository: 'mmsp'"}` |
    | the answer | the agent's **final** message, with **29** repository-relative `path:line` citations (`cited_sources: true`, `citations_found: 29`, both measured from that message) and its own statement of what it could not resolve ("`riltra_code_search` cannot see the option", "`riltra_code_semantic` is unavailable", "all graph edges come back `kind: POTENTIAL_CALL` … `verification: Unverified`") |
-   | the agent's sources | the archived `execute` inputs (`raw/opencode-session.execute-inputs.txt`) show that the agent's four `execute` calls were Code Mode snippets calling `tools.riltra_*` — the Riltra MCP tools — and none of them reads the filesystem; the transcript contains **no** reference to the original clone, only the pilot snapshot's root |
-   | the original MMSP clone | **untouched**: the same HEAD, the same two untracked entries, an empty diff against HEAD, and the newest `.git` metadata still dated 2026-10-20 (`raw/copy-smoke.txt`). The agent did **not** register a server of its own this time |
+   | the agent's sources | the archived `execute` inputs (`raw/opencode-session.execute-inputs.txt`) show that the agent's four `execute` calls were Code Mode snippets: the first two call `tools.riltra_*` — the Riltra MCP tools — and the last two call `tools.opencode.list_mcp_resources`; **none of them reads the source filesystem**. The archived answer, summary and execute inputs contain **no** reference to the original clone, only the pilot snapshot's root |
+   | the original MMSP clone | **untouched**: the same HEAD, the same two untracked entries, an empty diff against HEAD, and the newest `.git` metadata still dated 2026-10-20 (`raw/copy-smoke.txt`). No second server appears in the tool-call record (the registration itself is a configuration action, which the archive does not contain) |
    | the store | the before/after digests are **identical** - the database, the two `-wal`/`-shm` sidecars and the registry are unchanged |
 
    **One disclosure.** An *earlier* session of the same corrected harness —

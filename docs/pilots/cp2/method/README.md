@@ -1,8 +1,8 @@
 # CP2 harness
 
-The scripts that produced the CP2 evidence. Every path is a parameter: no
-machine-local path is baked into the harness, and no placeholder has to be
-edited before a run.
+The scripts that produced the CP2 evidence. Every path is a parameter: no machine-local path is baked into the
+harness. The only placeholder left in the commands below is the original
+clone (`<original clone>`): replace it with the local value.
 
 ## Prerequisites
 
@@ -25,6 +25,7 @@ Every step script accepts the same switches:
 | `-Out` | the raw evidence directory | `<BenchRoot>/cp2/raw` |
 | `-HomeDir` | the `RILTRA_HOME` of the pilot index | `<BenchRoot>/home-main` |
 | `-ReleaseBin` | the release binary (parity step only) | `<repo>/target/release/riltra.exe` |
+| `-TimeoutSec` | the OpenCode session's maximum wall time, in seconds | `3600` |
 
 ## The steps
 

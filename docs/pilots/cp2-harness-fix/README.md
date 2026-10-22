@@ -16,11 +16,11 @@ re-grade anything in the frozen archives:
 
 | File | Content |
 |---|---|
-| `raw/grading-corrected.json` | the **corrected** grader applied to the **archived** evidence of the 2026-10-21 re-evaluation (its queries and its MCP smoke, read-only). `D5-H1` is `PASS` there (`tool_count = 12`, the catalog is exactly the approved set); every other verdict is unchanged. This is additional evidence for the next evaluation, not a replacement of the historical grading |
+| `raw/grading-corrected.json` | the **corrected** grader applied to the **archived** evidence: the re-evaluation's queries and MCP smoke (`docs/pilots/cp2-reeval/raw/`) and **this** run's session summary (`raw/opencode-session.json`, the one whose `tool_calls` the record lists). `D5-H1` is `PASS` there (`tool_count = 12`, the catalog is exactly the approved set); every other verdict is unchanged. This is additional evidence for the next evaluation, not a replacement of the historical grading |
 | `raw/copy-smoke.txt` | the copy smoke: the original clone's state before and after, the copy's shape (the registry and the index at the root of the copy, no nested source folder) and `riltra index status --repo mmsp-pin` answering `fresh` with **exit 0** on the copied home |
 | `raw/opencode-session.json` | the machine-readable summary of the corrected session harness: `exit_code`, `reason`, `error`, the tools the agent **called** (from the stream's structured `tool_use` events, with their statuses), `cited_sources` and `citations_found` (both measured from the agent's final message), the model, the wall time and the output sizes |
 | `raw/opencode-session.answer.txt` | the agent's final message: its answer to the D.5 question, with its repository-relative `path:line` citations and its own statement of what it could not resolve |
-| `raw/opencode-session.execute-inputs.txt` | the inputs of the agent's `execute` calls (its Code Mode snippets): each one calls `tools.riltra_*` — the Riltra MCP tools — and none of them reads the filesystem |
+| `raw/opencode-session.execute-inputs.txt` | the inputs of the agent's `execute` calls (its Code Mode snippets): the first two call `tools.riltra_*` — the Riltra MCP tools — and the last two call `tools.opencode.list_mcp_resources`; **none of them reads the source filesystem** |
 | `raw/home-digest-before.txt`, `raw/home-digest-after.txt` | the store's digest before and after the session: the two files are **identical** — the database, the two `-wal`/`-shm` sidecars and the registry are unchanged |
 
 The full model transcript was dropped as reproducible noise; the summary and
@@ -55,12 +55,12 @@ $env:RILTRA_HOME = $main
 
 # the grader smoke: the corrected grader over the archived evidence
 $env:CP2_MCP_SMOKE        = "<repo>/docs/pilots/cp2-reeval/raw/mcp/mcp-smoke.json"
-$env:CP2_OPENCODE_SESSION = "<repo>/docs/pilots/cp2-reeval/raw/mcp/opencode-session.json"
+$env:CP2_OPENCODE_SESSION = "<repo>/docs/pilots/cp2-harness-fix/raw/opencode-session.json"
 $env:CP2_QDIR = "<repo>/docs/pilots/cp2-reeval/raw/queries"
 node ../cp2/method/grade.cjs $env:CP2_QDIR "<out>/grading-corrected.json"
 
 # the session smoke: a real agent against the isolated pilot home
 pwsh -File ../cp2/method/opencode-session.ps1 -BenchRoot $bench -Bin $riltra `
     -Out "$bench/harness-fix" -HomeDir $main -MmspRoot $mmspOrig `
-    -Model opencode/minimax-m3.1-flash-free
+    -Model opencode/minimax-m3.1-flash-free -TimeoutSec 3600
 ```
