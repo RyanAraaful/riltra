@@ -164,17 +164,87 @@ Task 2: report the error text, quoted. Do not retry with another name.
         Check "the guard cannot be switched off by omitting the original repository" ($noOriginal -like '*original repository*' -or $noOriginal -like '*MmspRoot*') "the refusal was: '$noOriginal'"
     }
 
+    "===== the original repository and the home that contains it ====="
+    Test-That "the original repository must exist and be a directory" {
+        # A guard that compares against a path that does not exist compares
+        # against nothing: the isolation would be decided by a typo.
+        $pilotHome = Join-Path $benchRoot 'r1-pilot-home'
+        New-Item -ItemType Directory -Force -Path $pilotHome | Out-Null
+
+        $missing = Join-Path $tmp 'no-such-original'
+        $missingRefusal = Refusal { Assert-IsolatedHome -HomeDir $pilotHome -MmspRoot $missing | Out-Null }
+        Check "a nonexistent original repository is refused" ($missingRefusal -like '*does not exist*') "the refusal was: '$missingRefusal'"
+
+        $asFile = Join-Path $tmp 'original-is-a-file'
+        Set-Content -LiteralPath $asFile -Value 'not a repository' -Encoding UTF8
+        $fileRefusal = Refusal { Assert-IsolatedHome -HomeDir $pilotHome -MmspRoot $asFile | Out-Null }
+        Check "an original repository that is not a directory is refused" ($fileRefusal -like '*not a directory*') "the refusal was: '$fileRefusal'"
+    }
+
+    Test-That "a home that contains the original repository is refused" {
+        # workspace/
+        #   mmsp/          <- the original repository
+        #   mmsp-backup/   <- a sibling with a similar name: still outside
+        #   pilot-home/    <- the isolated pilot home
+        $workspace = Join-Path $tmp 'workspace'
+        $orig = Join-Path $workspace 'mmsp'
+        New-Item -ItemType Directory -Force -Path (Join-Path $orig 'source') | Out-Null
+        $pilotHome = Join-Path $workspace 'pilot-home'
+        New-Item -ItemType Directory -Force -Path $pilotHome | Out-Null
+        $similar = Join-Path $workspace 'mmsp-backup'
+        New-Item -ItemType Directory -Force -Path $similar | Out-Null
+
+        $ancestorRefusal = Refusal { Assert-IsolatedHome -HomeDir $workspace -MmspRoot $orig | Out-Null }
+        Check "a home that contains the original repository is refused" ($ancestorRefusal -like '*contains the original repository*') "the refusal was: '$ancestorRefusal'"
+
+        $deep = Join-Path $tmp 'deep\one\two\mmsp'
+        New-Item -ItemType Directory -Force -Path $deep | Out-Null
+        $deepRefusal = Refusal { Assert-IsolatedHome -HomeDir (Join-Path $tmp 'deep\one') -MmspRoot $deep | Out-Null }
+        Check "a home that contains the original repository several levels up is refused" ($deepRefusal -like '*contains the original repository*') "the refusal was: '$deepRefusal'"
+
+        Check "a sibling whose name starts with the original's name is accepted" (-not (Throws { Assert-IsolatedHome -HomeDir $similar -MmspRoot $orig | Out-Null })) "it was refused"
+        Check "the isolated pilot home is still accepted" (-not (Throws { Assert-IsolatedHome -HomeDir $pilotHome -MmspRoot $orig | Out-Null })) "it was refused"
+
+        # The home can be given in the verbatim form the registry uses, and a
+        # filesystem root contains every path on its volume.
+        $verbatim = '\\?\' + $orig + '\'
+        $verbatimRefusal = Refusal { Assert-IsolatedHome -HomeDir $verbatim -MmspRoot $orig | Out-Null }
+        Check "a home given in the verbatim form of the original is refused" ($verbatimRefusal -like '*as the session home*') "the refusal was: '$verbatimRefusal'"
+
+        $verbatimWorkspace = '\\?\' + $workspace + '\'
+        $verbatimAncestorRefusal = Refusal { Assert-IsolatedHome -HomeDir $verbatimWorkspace -MmspRoot $orig | Out-Null }
+        Check "a home given in the verbatim form of an ancestor is refused" ($verbatimAncestorRefusal -like '*contains the original repository*') "the refusal was: '$verbatimAncestorRefusal'"
+
+        $volumeRoot = [System.IO.Path]::GetPathRoot((Resolve-RealPath $orig))
+        $rootRefusal = Refusal { Assert-IsolatedHome -HomeDir $volumeRoot -MmspRoot $orig | Out-Null }
+        Check "a filesystem root is refused as the session home" ($rootRefusal -like '*filesystem root*') "the refusal was: '$rootRefusal'"
+
+        $verbatimOrig = Refusal { Assert-IsolatedHome -HomeDir $orig -MmspRoot ('\\?\' + $orig) | Out-Null }
+        Check "an original given in the verbatim form is refused" ($verbatimOrig -like '*as the session home*') "the refusal was: '$verbatimOrig'"
+
+    }
+
+    Test-That "a verbatim path is put in the form the comparison uses" {
+        # The registry stores its roots with the \\?\ prefix, and \\?\UNC\ for
+        # a network share. Both must become the path they stand for, and an
+        # ordinary path must not change.
+        Check "an ordinary path keeps its form" ((ConvertTo-ComparablePath 'C:\bench') -eq 'C:\bench') "it became: $(ConvertTo-ComparablePath 'C:\bench')"
+        Check "the verbatim drive prefix is stripped" ((ConvertTo-ComparablePath '\\?\C:\bench') -eq 'C:\bench') "it became: $(ConvertTo-ComparablePath '\\?\C:\bench')"
+        Check "the verbatim UNC prefix becomes a UNC path" ((ConvertTo-ComparablePath '\\?\UNC\server\share') -eq '\\server\share') "it became: $(ConvertTo-ComparablePath '\\?\UNC\server\share')"
+    }
+
     "===== the guard runs before the home is read ====="
     Test-That "a home that reaches the original is refused before its content is read" {
         # A temporary stand-in for the original repository. The real one is
         # never a test target.
-        $orig = Join-Path $tmp 'read-guard-original'
+        $workspace = Join-Path $tmp 'read-guard-workspace'
+        $orig = Join-Path $workspace 'mmsp'
         New-Item -ItemType Directory -Force -Path (Join-Path $orig 'colmap') | Out-Null
         Set-Content -LiteralPath (Join-Path $orig 'colmap\source.txt') -Value 'source bytes' -Encoding UTF8
 
-        # The three shapes that must be refused: the home IS the original, the
-        # home is INSIDE the original, and the home REGISTERS the original -
-        # the last one is the shape the guard exists for.
+        # The shapes that must be refused: the home IS the original, the home
+        # is INSIDE the original, the home REGISTERS the original, the home
+        # CONTAINS the original, and the original does not exist.
         $inside = Join-Path $orig 'inside'
         New-Item -ItemType Directory -Force -Path $inside | Out-Null
         $registering = Join-Path $benchRoot 'read-guard-registering'
@@ -184,11 +254,15 @@ Task 2: report the error text, quoted. Do not retry with another name.
             repos   = @([ordered]@{ name = 'repo'; root = ('\\?\' + $orig + '\') })
         } | ConvertTo-Json -Compress
         Set-Content -LiteralPath (Join-Path $registering 'registry.json') -Value $registry -Encoding UTF8
+        $pilotHome = Join-Path $benchRoot 'read-guard-pilot'
+        New-Item -ItemType Directory -Force -Path $pilotHome | Out-Null
 
         $shapes = @(
-            [ordered]@{ name = 'the original repository itself'; home = $orig }
-            [ordered]@{ name = 'a subdirectory of the original repository'; home = $inside }
-            [ordered]@{ name = 'a home that registers the original repository'; home = $registering }
+            [ordered]@{ name = 'the original repository itself'; home = $orig; root = $orig }
+            [ordered]@{ name = 'a subdirectory of the original repository'; home = $inside; root = $orig }
+            [ordered]@{ name = 'a home that registers the original repository'; home = $registering; root = $orig }
+            [ordered]@{ name = 'a home that contains the original repository'; home = $workspace; root = $orig }
+            [ordered]@{ name = 'a nonexistent original repository'; home = $pilotHome; root = (Join-Path $tmp 'no-such-original') }
         )
 
         $host_exe = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
@@ -206,11 +280,14 @@ Task 2: report the error text, quoted. Do not retry with another name.
 
             $stdoutFile = Join-Path $bench 'session.stdout.txt'
             $stderrFile = Join-Path $bench 'session.stderr.txt'
+            # A launch that cannot start: if the guard did not refuse, the
+            # session must still not run a real agent.
+            $fakeOpenCode = Join-Path $bench 'no-such-opencode.exe'
             $prev = $ErrorActionPreference
             $ErrorActionPreference = 'Continue'
             try {
                 & $host_exe -NoProfile -File (Join-Path $PSScriptRoot 'opencode-session.ps1') `
-                    -BenchRoot $bench -Bin $bin -Out $out -HomeDir $shape.home -MmspRoot $orig `
+                    -BenchRoot $bench -Bin $bin -Out $out -HomeDir $shape.home -MmspRoot $shape.root -OpenCode $fakeOpenCode `
                     1> $stdoutFile 2> $stderrFile
                 $code = $LASTEXITCODE
             }
@@ -222,7 +299,7 @@ Task 2: report the error text, quoted. Do not retry with another name.
             Check "the refusal for $($shape.name) names the original repository" (($stdout + $stderr) -like '*original repository*') "the output was: $stdout $stderr"
             Check "the home was not read before the refusal ($($shape.name))" ($stdout -notlike '*home digest before*') "the digest ran before the refusal: $stdout"
             Check "the earlier summary was not left as evidence ($($shape.name))" (-not (Test-Path -LiteralPath $stale)) "the stale summary survived"
-            Check "no agent was launched ($($shape.name))" (-not (Test-Path -LiteralPath (Join-Path $out 'mcp\opencode-session.stdout.json'))) "the agent was launched"
+            Check "the launch was never reached ($($shape.name))" (-not (Test-Path -LiteralPath (Join-Path $out 'mcp\opencode-session.stdout.json'))) "the session reached the launch stage"
         }
     }
 

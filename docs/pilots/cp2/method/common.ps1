@@ -216,6 +216,16 @@ function Get-DefaultBin {
     return (Join-Path $PSScriptRoot ('..\..\..\..\target\' + $Profile + '\riltra.exe'))
 }
 
+function ConvertTo-ComparablePath {
+    # The registry stores its roots with the \\?\ verbatim prefix, and
+    # \\?\UNC\ for a network share. The prefix is put back into the form the
+    # path stands for, so that two paths are compared in the same form. An
+    # ordinary path is not changed.
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    return (($Path -replace '^\\\\\?\\UNC\\', '\\') -replace '^\\\\\?\\', '')
+}
+
 function Assert-IsolatedHome {
     # The session's RILTRA_HOME must be the isolated pilot home. It must not
     # BE the original repository, must not live inside it, and must not
@@ -234,13 +244,43 @@ function Assert-IsolatedHome {
     if (-not $MmspRoot) {
         throw "refusing to run without the original repository: the isolation guard needs -MmspRoot"
     }
-    $homeFull = (Resolve-RealPath $HomeDir).TrimEnd('\')
-    $orig = (Resolve-RealPath $MmspRoot).TrimEnd('\')
+    # The original repository must be a real directory: Resolve-RealPath keeps
+    # a path that does not exist lexically, so a typo in -MmspRoot would leave
+    # the guard comparing against nothing.
+    if (-not (Test-Path -LiteralPath $MmspRoot)) {
+        throw "refusing to run: the original repository does not exist: $MmspRoot"
+    }
+    if (-not (Get-Item -LiteralPath $MmspRoot -Force).PSIsContainer) {
+        throw "refusing to run: the original repository is not a directory: $MmspRoot"
+    }
+    # The registry stores its roots with the \\?\ verbatim prefix; a home or an
+    # original given in that form is compared with the same paths.
+    $homeResolved = Resolve-RealPath (ConvertTo-ComparablePath $HomeDir)
+    $origResolved = Resolve-RealPath (ConvertTo-ComparablePath $MmspRoot)
+    $homeFull = $homeResolved.TrimEnd('\')
+    $orig = $origResolved.TrimEnd('\')
     if ($homeFull.Equals($orig, [System.StringComparison]::OrdinalIgnoreCase)) {
         throw "refusing the original repository as the session home: $homeFull"
     }
     if ($homeFull.StartsWith($orig + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
         throw "refusing a session home inside the original repository: $homeFull"
+    }
+    # A filesystem root contains every path on its volume, and it cannot be
+    # compared component by component: the root would be reduced to a drive
+    # relative path, and the verdict would depend on the working directory.
+    $homeVolume = [System.IO.Path]::GetPathRoot($homeResolved)
+    $origVolume = [System.IO.Path]::GetPathRoot($origResolved)
+    if ($homeVolume -and $homeVolume.Equals($origVolume, [System.StringComparison]::OrdinalIgnoreCase) -and
+        $homeFull.Equals($homeVolume.TrimEnd('\'), [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "refusing a session home that is a filesystem root containing the original repository: $homeVolume"
+    }
+    # The home must not CONTAIN the original either: a home that is an
+    # ancestor of it reads the original's content recursively. The comparison
+    # is component by component on the resolved paths, so a sibling whose name
+    # merely starts with the original's name stays outside.
+    $contains = Get-BenchPathState -Path $orig -Root $homeFull
+    if ($contains -eq 'inside' -or $contains -eq 'root') {
+        throw "refusing a session home that contains the original repository: $homeFull"
     }
     $registry = Join-Path $homeFull 'registry.json'
     if (Test-Path -LiteralPath $registry) {
@@ -258,7 +298,7 @@ function Assert-IsolatedHome {
             # The registry stores the root with the \\?\ verbatim prefix; the
             # resolved root is compared, so a subdirectory, a parent or a
             # junction of the original is caught too.
-            $normalized = ($root -replace '^\\\\\?\\', '').TrimEnd('\')
+            $normalized = (ConvertTo-ComparablePath $root).TrimEnd('\')
             $resolved = (Resolve-RealPath $normalized).TrimEnd('\')
             $state = Get-BenchPathState -Path $resolved -Root $orig
             if ($state -eq 'inside' -or $state -eq 'root') {

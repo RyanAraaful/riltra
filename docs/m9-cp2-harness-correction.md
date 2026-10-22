@@ -150,12 +150,12 @@ the final tree of this correction.
 
 | File | Before (blob at `ffe776d`) | After | Why |
 |---|---|---|---|
-| `docs/pilots/cp2/method/common.ps1` | `c87e262d9c8d5e98fda5db5f7293c8e8d46b0478` | `484ef3eb05f5b460a0fb8bfe28ba42eb2b9bc5b3` | the copy helper, the isolation guard, the prompt flattening, the project-local config writer, the event-stream reader (the structured tool calls and the final message), the fail-closed outcome
+| `docs/pilots/cp2/method/common.ps1` | `c87e262d9c8d5e98fda5db5f7293c8e8d46b0478` | `35804530e52094a93d16ee262fda01c377d6d066` | the copy helper, the isolation guard (a real original, and a home that contains it), the prompt flattening, the project-local config writer, the event-stream reader (the structured tool calls and the final message), the fail-closed outcome
 | `docs/pilots/cp2/method/run-all.ps1` | `ed570b4b066aa4f54862b08c2f011e03e3996f60` | `3d14850f6483f19333c4f4fbcb837ed2c387cf8a` | the copy step (defect A), the new test in step 0 and the D.5 re-grading after the MCP smoke
 | `docs/pilots/cp2/method/grade.cjs` | `adec365656bf56cba1498e17d60fc720e17abc37` | `7c42958fbfc76a8c997fafc94c82a41d26efe8dd` | the twelve-tool catalog contract (defect B)
 | `docs/pilots/cp2/method/grade.test.cjs` | `4cda3e1c3ff7c6ef63f7d89db3ac947447cff090` | `2e68cade8bf5b0405a8064a9f3bc29131297c7c3` | the twelve regression cases for the catalog contract and the blocked-session verdict
 | `docs/pilots/cp2/method/opencode-session.ps1` | `e5c40dbb1718d4abbdf39f808cdda572e9c269f3` | `0dad9a14de082512653c1ad2e2ac176c70d2e569` | the prompt, the project-local config, the isolation guard (before the home is read), the structured tool calls, the measured citations, the fail-closed outcome (defect C)
-| `docs/pilots/cp2/method/test-harness.ps1` | `(new file)` | `5969a2df30e3dee402fe005cc6f882afbb9f029b` | the regression tests of the harness helpers
+| `docs/pilots/cp2/method/test-harness.ps1` | `(new file)` | `0518bc38a5f0de51bec505e1d9516fe534ffcf74` | the regression tests of the harness helpers
 | `docs/pilots/cp2-reeval/method/run-steps.ps1` | `20420fdf544b99cfafee4a1056567f60a1401a6c` | `e674fd971cb7b1ab57b0f5ee7599cf552e2f215d` | explicit parameters instead of placeholder defaults; the behaviour of the 2026-10-21 run is unchanged
 | `docs/pilots/cp2-reeval/method/opencode-session-d5.ps1` | `698767591351337ddec6ca04f1263de9acc4d7ac` | `e836c934220fb734311294bab21915f65e634ed1` | the same, plus a note that the canonical harness now supersedes it
 | `docs/pilots/cp2/method/README.md` | `a38d8480eaabc6ee37b22e9407fc482159d54b2a` | `39d22ea7bc7ac7085fa6633045705f31ec1b1ec4` | the amended procedure and the new scripts
@@ -199,11 +199,21 @@ archived evidence, as clearly separated additional evidence.
 | 20 | the isolation guard runs **before** the home is read | `FAIL the home was not read before the refusal (the original repository itself) (the digest ran before the refusal: ===== home digest before (files=1) =====)`, the same for `a subdirectory of the original repository` and `a home that registers the original repository`, and `FAIL opencode-session.ps1 asserts the isolated home before it reads the home` | all four pass (the refusal happens before the digest, for every shape) |
 | 21 | a refused home leaves **no summary** and launches **no agent** | `PASS` (characterization: the stale-summary deletion already preceded the guard) | unchanged |
 | 22 | a valid isolated home is **accepted** and the flow continues | `PASS` (characterization) | unchanged |
+| 23 | the original repository must **exist** | `FAIL a nonexistent original repository is refused (the refusal was: '')` | `PASS a nonexistent original repository is refused` (the refusal names the missing path) |
+| 24 | the original repository must be a **directory** | `FAIL an original repository that is not a directory is refused (the refusal was: '')` | `PASS an original repository that is not a directory is refused` |
+| 25 | a home that **contains** the original is refused | `FAIL a home that contains the original repository is refused (the refusal was: '')` and `FAIL a home that contains the original repository several levels up is refused (the refusal was: '')` | both pass |
+| 26 | the refusal happens before the **read** for the new shapes too | `FAIL the home was not read before the refusal (a home that contains the original repository) (the digest ran before the refusal: ===== home digest before (files=1) =====)` and the same for `a nonexistent original repository` | both pass |
+| 27 | a **sibling** with a similar name and the isolated pilot are accepted | `PASS` (characterization) | unchanged |
+| 28 | a home in the **verbatim** form (`\\?\`) is compared with the same paths | `FAIL a home given in the verbatim form of the original is refused (the refusal was: '')` and `FAIL a home given in the verbatim form of an ancestor is refused (the refusal was: '')` | both pass |
+| 29 | a **filesystem root** is refused for the right reason | `FAIL a filesystem root is refused as the session home (the refusal was: 'refusing a session home that contains the original repository: C:')` — refused for the wrong reason, with a mangled path, and the verdict depended on the working directory | `PASS a filesystem root is refused as the session home` |
+| 30 | an **empty** original is refused | refused by the parameter binder (`Cannot bind argument to parameter 'MmspRoot' because it is an empty string.`) | unchanged (the guard's own check stays as a fallback) |
+| 31 | a verbatim path is put in the **form the comparison uses** | `FAIL a verbatim path is put in the form the comparison uses (The term 'ConvertTo-ComparablePath' is not recognized …)` | `PASS an ordinary path keeps its form` + `PASS the verbatim drive prefix is stripped` + `PASS the verbatim UNC prefix becomes a UNC path` |
+| 32 | an **original** given in the verbatim form is refused | `FAIL an original given in the verbatim form is refused (the refusal was: '')` (with the original's normalization reverted) | `PASS an original given in the verbatim form is refused` |
 
 **The test commands** (all from the repository root):
 
 ```powershell
-pwsh -NoProfile -File docs/pilots/cp2/method/test-harness.ps1   # 62 checks
+pwsh -NoProfile -File docs/pilots/cp2/method/test-harness.ps1   # 85 checks
 node --test docs/pilots/cp2/method/grade.test.cjs               # 33 tests
 node --test docs/pilots/cp2/method/fact-digest.test.cjs         # 16 tests
 pwsh -NoProfile -File docs/pilots/cp2/method/test-path-safety.ps1
@@ -330,7 +340,8 @@ The regression tests use temporary fixtures only: the original repository is
 never a test target. The negative case runs the **real** script in a child
 process, once for each shape that must be refused — the home **is** the
 original, the home is **inside** the original, and the home **registers** the
-original (the shape the guard exists for) — and asserts that the refusal
+original (the shape the guard exists for) — and, since §8, the two further
+shapes it adds — and asserts that the refusal
 happens before the digest, that the earlier summary is gone and that no agent
 was launched; the positive case runs it with a valid isolated home and a
 launch that cannot start, and asserts that the flow reaches the digest and
@@ -342,5 +353,62 @@ registry does not mention the original, and it does not require `-MmspRoot`
 to exist: `Resolve-RealPath` keeps a non-existent path lexically, so a typo
 in `-MmspRoot` makes the comparison meaningless. Both are pre-existing
 properties of the guard, not of this ordering fix, and changing the path
-validation contract needs a scope audit — they are recorded here and left
-untouched.
+validation contract needed a scope audit — they were recorded here and left
+untouched. **Both were later corrected under their own authorization: see
+§8.**
+
+---
+
+## 8. Follow-up: the original repository must be real, and the home must not contain it
+
+The two residual findings that §7 recorded were later authorized and
+corrected. Both are defects of the **test procedure**, in
+`Assert-IsolatedHome` (`common.ps1`); no production code, schema, dependency
+or MCP contract is involved.
+
+**R1 — the original repository must exist and be a directory.** `-MmspRoot`
+was mandatory but not required to exist, and `Resolve-RealPath` keeps a path
+that does not exist lexically. A typo therefore left the guard comparing
+against a path that is not the original. The guard now refuses an empty, a
+missing and a non-directory original with `Test-Path -LiteralPath` and
+`Get-Item … .PSIsContainer`, before the home is read. An **empty** value is
+in fact rejected by PowerShell's parameter binder before the body runs
+(`Cannot bind argument to parameter 'MmspRoot' because it is an empty
+string.`); the guard's own empty check remains as a fallback.
+
+**R2 — the home must not contain the original.** The guard refused a home
+that **is** the original or **inside** it, but not a home that is an
+**ancestor** of it: `Home-Digest` reads the home recursively, so a home that
+contains the original reads the original's content. The guard now refuses
+that shape with the existing component-aware containment helper
+(`Get-BenchPathState -Path $orig -Root $home`), so a sibling whose name
+merely starts with the original's name (`mmsp-backup` next to `mmsp`) stays
+outside, and the registry check is unchanged.
+
+Two details of that comparison were corrected with it. The paths must be
+**comparable**: the registry stores its roots with the `\\?\` verbatim prefix
+(`\\?\UNC\` for a network share), so a home or an original given in that form
+is put back into the form it stands for by `ConvertTo-ComparablePath` —
+otherwise the component comparison always answers "outside", and a verbatim
+UNC path would even be resolved as a relative one. And a **filesystem root**
+contains every path on its volume but cannot be compared component by
+component: it would be reduced to a drive-relative path, and the verdict
+would depend on the working directory. A root on the original's volume is
+therefore refused explicitly, before the comparison.
+
+The order fixed in §7 is unchanged: initialization and the stale-summary
+deletion, the resolution of `HomeDir`, `Assert-IsolatedHome`, `Home-Digest`,
+the configuration, the agent. Every refusal happens before the home is read
+and before the agent is launched. The RED → GREEN rows are 23–27 of §3; the
+child-process smoke covers the two new shapes next to the three from §7.
+
+**Verification limits.** The long OpenCode session and the full CP2
+benchmark were not repeated: the changed script was exercised end-to-end in
+the refusal paths and in the pre-launch failure path only. The original
+repository was never read or modified by any test.
+
+**The shared helpers were not changed.** `Resolve-RealPath` keeps a
+nonexistent path lexically and `Get-BenchPathState` reduces a volume root to
+a drive-relative path; both were left as they are, and the two cases were
+handled inside `Assert-IsolatedHome` instead of by changing a shared
+filesystem contract.
