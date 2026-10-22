@@ -34,6 +34,9 @@ $cfg = Initialize-Cp2Harness -BenchRoot $BenchRoot -Bin $Bin -Out $Out -MmspRoot
 # The deletion happens before the session starts, and every failure after it
 # (no CLI, a timeout, a throw) leaves no summary, so the grader sees the
 # evidence as missing.
+# shortcut: an Initialize-Cp2Harness failure (a missing binary) happens before
+# this point, so it cannot clear a prior summary; upgrade if setup can fail
+# after a previous session.
 $summaryPath = Assert-BenchPath -Path (Join-Path $cfg.Out 'mcp\opencode-session.json') -Root $cfg.BenchRoot
 if (Test-Path -LiteralPath $summaryPath) {
     Remove-Item -LiteralPath $summaryPath -Force -ErrorAction Stop
@@ -164,6 +167,8 @@ $citationsFound = ([regex]::Matches($answerText, $citationPattern)).Count
 # as blocked, never as a successful agent session. The error is the LAST
 # "message" in the stream: the first one can be an intermediate tool error
 # (the semantic tool's provider refusal), not the session's own failure.
+# shortcut: the text regex stops at an escaped quote; upgrade if the exact
+# error text becomes graded evidence.
 $errMatches = [regex]::Matches($rawOut, '"message":"([^"]+)"')
 $errText = if ($errMatches.Count -gt 0) { $errMatches[$errMatches.Count - 1].Groups[1].Value } else { $null }
 $summary = [ordered]@{
