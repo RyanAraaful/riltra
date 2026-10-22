@@ -26,3 +26,8 @@ CHECK_OPTION_LE (defined once, in an included header):
   colmap\src\colmap\mvs\patch_match_options.cc:30
   colmap\src\colmap\mvs\patch_match.h:35
   colmap\src\pycolmap\pipeline\mvs.cc:4
+== verified `value` declaration anchors (the same-name false-positive example) ==
+  colmap/src/colmap/controllers/base_option_manager.h:139:17  std::string value;
+  colmap/src/thirdparty/PoissonRecon/CmdLineParser.h:84:8     Type value;
+  colmap/src/thirdparty/VLFeat/mathop.h:55:38                 float value (inside an anonymous union)
+  the count (27 distinct declarations) is recorded at docs/m9-e7-slice1-implementation.md:194

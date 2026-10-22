@@ -238,11 +238,13 @@ The **code uses** (7) captured by the roles, per scope:
 So the include-scoped variant, as specified, **loses a relevant location**
 under every reading — and it loses the behaviourally most interesting one.
 The repository-wide variant loses nothing here; the price is that in general
-it returns every same-named member in the tree (measured on another name:
-`value` has **27** distinct declarations across first-party and third-party
-files, e.g. `colmap/src/colmap/controllers/base_option_manager.h:139:17`,
-`colmap/src/thirdparty/PoissonRecon/Geometry.h:634:79`,
-`colmap/src/thirdparty/VLFeat/mathop.h:55:38`), and without a binding those
+it returns every same-named member in the tree. The Slice 1 MMSP measurement
+recorded **27** distinct declarations of the name `value`
+(`docs/m9-e7-slice1-implementation.md:194`), across first-party and
+third-party files — verified anchors:
+`colmap/src/colmap/controllers/base_option_manager.h:139:17`,
+`colmap/src/thirdparty/PoissonRecon/CmdLineParser.h:84:8`,
+`colmap/src/thirdparty/VLFeat/mathop.h:55:38` — and without a binding those
 are indistinguishable from the one we want. **The material false-positive
 risk of the repository-wide scope is therefore not "wrong files" but "wrong
 declarations of the same name"** — and for `max_triangulation_angle` it is
