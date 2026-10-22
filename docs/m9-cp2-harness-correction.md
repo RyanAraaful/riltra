@@ -299,5 +299,6 @@ the archive as `FAIL`.
 
 ## 6. The commit
 
-The "after" blob ids of the amended files, the final remote HEAD and the CI
-run are recorded in the commit message and in the final report of this task.
+The "after" blob ids of the amended files are recorded in the table above;
+the final remote HEAD and the CI run are recorded in the final report of this
+task.
