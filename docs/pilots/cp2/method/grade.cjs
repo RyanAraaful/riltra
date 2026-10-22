@@ -25,6 +25,27 @@ const path = require("node:path");
 
 const V = { PASS: "PASS", FAIL: "FAIL", UNMET: "UNMET", UNAVAILABLE: "UNAVAILABLE" };
 
+// The approved MCP surface: twelve tools, the twelfth being the semantic
+// tool (riltra_code_semantic). The count alone is not the contract: the
+// catalog must be exactly this set, so a catalog of the right size that
+// lacks an approved tool (or repeats one) is a different surface and must
+// be rejected.
+const MCP_TOOL_COUNT = 12;
+const MCP_REQUIRED_TOOLS = [
+  "riltra_code_callees",
+  "riltra_code_callers",
+  "riltra_code_impact",
+  "riltra_code_search",
+  "riltra_code_semantic",
+  "riltra_code_trace",
+  "riltra_health",
+  "riltra_knowledge_related",
+  "riltra_knowledge_search",
+  "riltra_knowledge_show",
+  "riltra_repo_list",
+  "riltra_repo_status",
+];
+
 // ---------------------------------------------------------------- evidence
 
 function classifyError(raw) {
@@ -375,16 +396,24 @@ function gradeChecks(ctx) {
     add("D5-H1", "honesty", "the MCP surface answers a source-grounded query with the repository identity",
       V.UNAVAILABLE, "mcp-smoke-missing", {});
   } else {
-    const toolCount = Array.isArray(smoke.tool_list) ? smoke.tool_list.length : 0;
+    const toolList = Array.isArray(smoke.tool_list) ? smoke.tool_list : [];
+    const toolCount = toolList.length;
+    const sortedTools = toolList.slice().sort();
+    const expectedTools = MCP_REQUIRED_TOOLS.slice().sort();
+    const requiredToolsPresent =
+      sortedTools.length === expectedTools.length && sortedTools.every((t, i) => t === expectedTools[i]);
+    const surfaceOk = toolCount === MCP_TOOL_COUNT && requiredToolsPresent;
     const nonJson = smoke.stdout_pure ? smoke.stdout_pure.non_json : null;
     const stderrBytes = typeof smoke.stderr === "string" ? smoke.stderr.length : null;
     const calls = smoke.calls || [];
     const answered = calls.filter((c) => c.present && !c.is_error && c.text_len > 0);
     const grounded = answered.some((c) => (c.text || "").includes('"repo"'));
-    const ok = toolCount === 11 && nonJson === 0 && stderrBytes === 0 && answered.length > 0 && grounded;
+    const ok = surfaceOk && nonJson === 0 && stderrBytes === 0 && answered.length > 0 && grounded;
+    const reason = !surfaceOk ? "mcp-tool-surface-mismatch" : (ok ? null : "mcp-surface-did-not-answer-cleanly");
     add("D5-H1", "honesty", "the MCP surface answers a source-grounded query with the repository identity",
-      ok ? V.PASS : V.FAIL, ok ? null : "mcp-surface-did-not-answer-cleanly",
-      { tool_count: toolCount, tools: smoke.tool_list, stdout_non_json: nonJson, stderr_bytes: stderrBytes, answered_calls: answered.length });
+      ok ? V.PASS : V.FAIL, reason,
+      { tool_count: toolCount, required_tools: MCP_REQUIRED_TOOLS, required_tools_present: requiredToolsPresent,
+        tools: smoke.tool_list, stdout_non_json: nonJson, stderr_bytes: stderrBytes, answered_calls: answered.length });
     const errCall = calls.find((c) => c.is_error === true);
     const errText = errCall ? (errCall.text || "") : (smoke.classified_error_text || "");
     const errOk = !!errCall && /"kind"\s*:\s*"[a-z_]+"/.test(errText);
@@ -400,11 +429,18 @@ function gradeChecks(ctx) {
       { exit_code: session.exit_code, error: session.error });
   } else {
     const tools = session.tools || [];
-    add("D5-E1", "evidence", "the agent-side OpenCode session ran", V.PASS, null,
-      { exit_code: session.exit_code, tools });
-    add("D5-H3", "honesty", "the agent answers from tool results only and cites sources",
-      session.cited_sources ? V.PASS : V.FAIL, session.cited_sources ? null : "no-source-citations",
-      { tools, cited_sources: session.cited_sources });
+    if (tools.length === 0) {
+      // The session exited cleanly but never reached a tool: it answered
+      // nothing, so there is no agent-side evidence to grade.
+      add("D5-E1", "evidence", "the agent-side OpenCode session ran", V.UNAVAILABLE, "session-reached-no-tool",
+        { exit_code: session.exit_code });
+    } else {
+      add("D5-E1", "evidence", "the agent-side OpenCode session ran", V.PASS, null,
+        { exit_code: session.exit_code, tools });
+      add("D5-H3", "honesty", "the agent answers from tool results only and cites sources",
+        session.cited_sources ? V.PASS : V.FAIL, session.cited_sources ? null : "no-source-citations",
+        { tools, cited_sources: session.cited_sources });
+    }
   }
 
   return checks;

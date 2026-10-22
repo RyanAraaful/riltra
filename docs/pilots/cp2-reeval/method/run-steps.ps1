@@ -1,21 +1,31 @@
 # The CP2 re-evaluation, run with the frozen harness step by step.
 #
-# The difference from `run-all.ps1`: step 2 copies `home-cold1` to
-# `home-main` with `Copy-Item -Recurse`, which nests the folder when the
-# destination already exists — and `Reset-BenchDir` creates it, so the
-# registry ends up one level too deep and every query reports "unknown
-# repository". The frozen harness is not modified; this runner uses the
-# verified cold run 1 home directly, and runs the same steps in the same
-# order.
+# This is the method of the 2026-10-21 re-evaluation. It ran the frozen
+# harness steps in the frozen order, with one deviation: step 2 copied
+# `home-cold1` to `home-main` with `Copy-Item -Recurse`, which nests the
+# folder when the destination already exists - and `Reset-BenchDir` creates
+# it, so the registry ended up one level too deep and every query reported
+# "unknown repository". This runner therefore used the verified cold run 1
+# home directly.
+#
+# The defect is fixed in the canonical harness since
+# `docs/m9-cp2-harness-correction.md`: `run-all.ps1` now uses
+# `Copy-BenchDir` and runs as-is. This script stays as the record of how
+# the re-evaluation was actually run.
+#
+# Usage (every path is explicit):
+#   pwsh -File run-steps.ps1 -BenchRoot <workspace> -Bin <riltra.exe> `
+#       -MmspRoot <the original clone> [-Snapshot <dir>] [-Method <dir>]
 param(
-    [string]$BenchRoot = "<BENCH_ROOT>",
-    [string]$Bin = '<RILTRA_BIN>',
+    [Parameter(Mandatory = $true)][string]$BenchRoot,
+    [Parameter(Mandatory = $true)][string]$Bin,
     [string]$Snapshot = '',
-    [string]$MmspRoot = '<MMSP_ROOT>',
-    [string]$Method = '<CP2_METHOD>'
+    [Parameter(Mandatory = $true)][string]$MmspRoot,
+    [string]$Method = ''
 )
 $ErrorActionPreference = 'Stop'
 if (-not $Snapshot) { $Snapshot = Join-Path $BenchRoot 'mmsp-d62f06a' }
+if (-not $Method) { $Method = (Resolve-Path (Join-Path $PSScriptRoot '..\..\cp2\method')).Path }
 $raw = Join-Path $BenchRoot 'cp2\raw'
 $homeMain = Join-Path $BenchRoot 'home-cold1'   # the verified cold run 1
 New-Item -ItemType Directory -Force -Path $raw | Out-Null

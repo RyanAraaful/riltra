@@ -1,16 +1,26 @@
-# The agent-side OpenCode session for the CP2 re-evaluation.
+# The agent-side OpenCode session of the 2026-10-21 re-evaluation.
 #
-# Why this exists: the frozen harness's `opencode-session.ps1` passes a
-# multi-line prompt through a generated `.cmd` file, and the prompt never
-# reaches the agent ("No question came through in your message"). The frozen
-# harness is not modified; this runner delivers the same prompt as a single
-# argument, with a project-local OpenCode config that registers the pilot
-# snapshot's MCP server (so the agent cannot register its own).
+# Why this exists: the harness's `opencode-session.ps1` passed a multi-line
+# prompt through a generated `.cmd` file, and the prompt never reached the
+# agent ("No question came through in your message"), and it expected the
+# Riltra MCP server to be registered in the GLOBAL OpenCode configuration -
+# it is not, so the agent registered a server of its own, against another
+# repository. This runner delivers the same prompt as a single argument and
+# writes a project-local OpenCode config that registers the pilot
+# snapshot's MCP server.
+#
+# Both defects are fixed in the canonical harness since
+# `docs/m9-cp2-harness-correction.md`; this script stays as the record of
+# how the re-evaluation's agent session was actually run.
+#
+# Usage (every path is explicit):
+#   pwsh -File opencode-session-d5.ps1 -Bin <riltra.exe> -HomeDir <pilot home> `
+#       -SessionDir <dir> -Out <dir> [-Model <id>] [-TimeoutSec <n>]
 param(
-    [string]$Bin = '<RILTRA_BIN>',
-    [string]$HomeDir = "<BENCH_ROOT>\home-cold1",
-    [string]$SessionDir = "<BENCH_ROOT>\cp2\opencode-session",
-    [string]$Out = "<BENCH_ROOT>\cp2\raw\mcp",
+    [Parameter(Mandatory = $true)][string]$Bin,
+    [Parameter(Mandatory = $true)][string]$HomeDir,
+    [Parameter(Mandatory = $true)][string]$SessionDir,
+    [Parameter(Mandatory = $true)][string]$Out,
     [string]$Model = 'opencode/minimax-m3.1-flash-free',
     [int]$TimeoutSec = 1200
 )

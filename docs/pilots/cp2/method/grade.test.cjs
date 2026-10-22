@@ -20,7 +20,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 
-const { grade, classifyError, loadQuery, V } = require("./grade.cjs");
+const { grade, gradeChecks, classifyError, loadQuery, V } = require("./grade.cjs");
 
 // --- helpers -------------------------------------------------------------
 
@@ -310,4 +310,132 @@ test("an evidence check does not gate the capability of its workflow", () => {
   const result = grade(dir);
   assert.strictEqual(result.summary.gates.D3.capability.verdict, V.UNMET);
   assert.strictEqual(result.summary.gates.D3.evidence.verdict, V.UNAVAILABLE);
+});
+
+// --- the MCP tool surface -------------------------------------------------
+
+// The approved MCP surface: twelve tools. The twelfth is the semantic tool
+// (riltra_code_semantic). A catalog is accepted only when it has exactly
+// that many tools AND contains every required tool - the count alone is
+// not the contract.
+const TWELVE_TOOLS = [
+  "riltra_code_callees",
+  "riltra_code_callers",
+  "riltra_code_impact",
+  "riltra_code_search",
+  "riltra_code_semantic",
+  "riltra_code_trace",
+  "riltra_health",
+  "riltra_knowledge_related",
+  "riltra_knowledge_search",
+  "riltra_knowledge_show",
+  "riltra_repo_list",
+  "riltra_repo_status",
+];
+
+function smoke(overrides) {
+  return Object.assign(
+    {
+      tool_list: TWELVE_TOOLS.slice(),
+      stdout_pure: { lines: 6, parsed: 6, non_json: 0 },
+      stderr: "",
+      calls: [
+        { id: 3, name: "riltra_code_search", present: true, is_error: false, text_len: 709, text: '{"repo":"mmsp-pin","freshness":"fresh"}' },
+        { id: 5, name: "riltra_code_search", present: true, is_error: true, text_len: 74, text: '{"kind":"not_registered","message":"unknown repository"}' },
+      ],
+      classified_error: '{"kind":"not_registered","message":"unknown repository"}',
+    },
+    overrides || {},
+  );
+}
+
+function gradeSmoke(mcpSmoke) {
+  // No query evidence: only the D.5 surface checks are judged here.
+  return grade(writeQueries({}), { mcpSmoke: mcpSmoke });
+}
+
+test("the MCP surface with the approved twelve-tool catalog passes", () => {
+  const check = find(gradeSmoke(smoke()).checks, "D5-H1");
+  assert.strictEqual(check.verdict, V.PASS);
+  assert.strictEqual(check.evidence.tool_count, 12);
+});
+
+test("an eleven-tool catalog is rejected", () => {
+  const check = find(gradeSmoke(smoke({ tool_list: TWELVE_TOOLS.slice(0, 11) })).checks, "D5-H1");
+  assert.strictEqual(check.verdict, V.FAIL);
+  assert.strictEqual(check.reason, "mcp-tool-surface-mismatch");
+});
+
+test("a thirteen-tool catalog is rejected", () => {
+  const check = find(gradeSmoke(smoke({ tool_list: TWELVE_TOOLS.concat(["riltra_code_extra"]) })).checks, "D5-H1");
+  assert.strictEqual(check.verdict, V.FAIL);
+  assert.strictEqual(check.reason, "mcp-tool-surface-mismatch");
+});
+
+test("a twelve-tool catalog without the semantic tool is rejected", () => {
+  const without = TWELVE_TOOLS.filter((t) => t !== "riltra_code_semantic").concat(["riltra_code_other"]);
+  const check = find(gradeSmoke(smoke({ tool_list: without })).checks, "D5-H1");
+  assert.strictEqual(check.verdict, V.FAIL);
+  assert.strictEqual(check.reason, "mcp-tool-surface-mismatch");
+});
+
+test("a twelve-tool catalog missing another approved tool is rejected", () => {
+  // The count alone is not the contract: a catalog of the right size that
+  // lacks an approved tool is a different surface.
+  const without = TWELVE_TOOLS.filter((t) => t !== "riltra_code_callers").concat(["riltra_code_other"]);
+  const check = find(gradeSmoke(smoke({ tool_list: without })).checks, "D5-H1");
+  assert.strictEqual(check.verdict, V.FAIL);
+  assert.strictEqual(check.reason, "mcp-tool-surface-mismatch");
+});
+
+test("a twelve-tool catalog with a duplicate is rejected", () => {
+  const duplicated = TWELVE_TOOLS.slice(0, 11).concat([TWELVE_TOOLS[0]]);
+  const check = find(gradeSmoke(smoke({ tool_list: duplicated })).checks, "D5-H1");
+  assert.strictEqual(check.verdict, V.FAIL);
+  assert.strictEqual(check.reason, "mcp-tool-surface-mismatch");
+});
+
+test("a session that reached no tool is not a passing agent session", () => {
+  const dir = writeQueries({});
+  const result = grade(dir, {
+    opencodeSession: { exit_code: 0, reason: null, error: null, tools: [], cited_sources: false },
+  });
+  const check = find(result.checks, "D5-E1");
+  assert.strictEqual(check.verdict, V.UNAVAILABLE);
+  assert.strictEqual(check.reason, "session-reached-no-tool");
+  // A session that reached nothing has no answer to judge: the honesty
+  // check is not available either, exactly like a blocked session.
+  assert.strictEqual(result.checks.filter((c) => c.id === "D5-H3").length, 0);
+});
+
+test("a surface whose stdout is not pure is rejected", () => {
+  const check = find(gradeSmoke(smoke({ stdout_pure: { lines: 6, parsed: 5, non_json: 1 } })).checks, "D5-H1");
+  assert.strictEqual(check.verdict, V.FAIL);
+  assert.strictEqual(check.reason, "mcp-surface-did-not-answer-cleanly");
+});
+
+test("a surface that wrote to stderr is rejected", () => {
+  const check = find(gradeSmoke(smoke({ stderr: "warning" })).checks, "D5-H1");
+  assert.strictEqual(check.verdict, V.FAIL);
+  assert.strictEqual(check.reason, "mcp-surface-did-not-answer-cleanly");
+});
+
+test("a surface that answered no call is rejected", () => {
+  const check = find(gradeSmoke(smoke({ calls: [] })).checks, "D5-H1");
+  assert.strictEqual(check.verdict, V.FAIL);
+  assert.strictEqual(check.reason, "mcp-surface-did-not-answer-cleanly");
+});
+
+test("an answer without the repository identity is rejected", () => {
+  const calls = [{ id: 3, name: "riltra_code_search", present: true, is_error: false, text_len: 12, text: '{"total":1}' }];
+  const check = find(gradeSmoke(smoke({ calls: calls })).checks, "D5-H1");
+  assert.strictEqual(check.verdict, V.FAIL);
+  assert.strictEqual(check.reason, "mcp-surface-did-not-answer-cleanly");
+});
+
+test("the classified error check still requires a classified error", () => {
+  const calls = [{ id: 5, name: "riltra_code_search", present: true, is_error: true, text_len: 20, text: "it exploded" }];
+  const check = find(gradeSmoke(smoke({ calls: calls })).checks, "D5-H2");
+  assert.strictEqual(check.verdict, V.FAIL);
+  assert.strictEqual(check.reason, "no-classified-error");
 });

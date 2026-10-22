@@ -62,10 +62,27 @@ self-tests, which `run-all.ps1` also runs as step 0).
 | `db-include-probe.cjs`, `db-probe*.cjs` | the read-only diagnostics behind the decision package |
 | `mcp-smoke.cjs` | the MCP stdio smoke (needs `CP2_RILTRA`, `CP2_HOME`, `CP2_OUT`) |
 | `d5-mcp-sequence.cjs` | the D.5 tool sequence over the real MCP transport |
-| `opencode-session.ps1` | the agent-side OpenCode session |
+| `opencode-session.ps1` | the agent-side OpenCode session (project-local MCP configuration, isolated home, fail closed) |
+| `test-harness.ps1` | the regression tests of the harness helpers (the copy, the prompt, the configuration, the isolation guard, the fail-closed outcome) |
 | `measure.ps1` | the measurement wrapper (wall time, peak RSS) |
 | `redact.cjs` | redacts machine-local paths before archiving |
 | `common.ps1` | the path-safety helpers and the shared configuration |
+
+## The 2026-10-22 amendment
+
+The harness was corrected after the independent audit of `ffe776d`: the home
+copy nested the registry, the grader still demanded the eleven-tool MCP
+surface, and the OpenCode session neither delivered its prompt nor depended
+on a project-local MCP configuration. **The amendment, the root causes and
+the RED/GREEN evidence are recorded in
+[`docs/m9-cp2-harness-correction.md`](../../../m9-cp2-harness-correction.md).**
+
+The historical raw evidence under `docs/pilots/cp2/raw/` and
+`docs/pilots/cp2-reeval/raw/` was produced with the harness as it stood at
+its own commit and is **not** regenerated or re-graded: the D5-H1 verdict in
+the archived grading stays `FAIL`, because that is what the historical
+grader said about the historical evidence. The corrected grader applies to
+the next evaluation.
 
 ## The parity step
 

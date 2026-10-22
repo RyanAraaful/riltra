@@ -15,7 +15,7 @@ param(
   [string]$BenchRoot = '',
   [string]$Bin = '',
   [string]$Snapshot = '',
-  [string]$MmspRoot = '',
+  [Parameter(Mandatory = $true)][string]$MmspRoot,
   [string]$Out = ''
 )
 $ErrorActionPreference = 'Stop'
@@ -35,6 +35,8 @@ try {
   if ($LASTEXITCODE -ne 0) { throw "the fact-digest tests failed with exit $LASTEXITCODE" }
   node --test (Join-Path $method 'grade.test.cjs')
   if ($LASTEXITCODE -ne 0) { throw "the grader tests failed with exit $LASTEXITCODE" }
+  pwsh -NoProfile -File (Join-Path $method 'test-harness.ps1')
+  if ($LASTEXITCODE -ne 0) { throw "the harness tests failed with exit $LASTEXITCODE" }
   pwsh -NoProfile -File (Join-Path $method 'test-path-safety.ps1')
   if ($LASTEXITCODE -ne 0) { throw "the path-safety tests failed with exit $LASTEXITCODE" }
 } finally { Pop-Location }
@@ -44,9 +46,10 @@ Section "1. cold index x2"
 
 Section "2. home-main from the verified cold run 1"
 $homeMain = Reset-BenchDir (Join-Path $bench 'home-main') -Root $bench
-Copy-Item (Join-Path $bench 'home-cold1') $homeMain -Recurse -Force
+Copy-BenchDir -Source (Join-Path $bench 'home-cold1') -Destination $homeMain -Root $bench
 $env:RILTRA_HOME = $homeMain
 & $cfg.Bin index status --repo mmsp-pin
+if ($LASTEXITCODE -ne 0) { throw "the copied home does not answer: index status failed with exit $LASTEXITCODE" }
 
 Section "3. workflow queries (CP1 section D)"
 & (Join-Path $method 'queries.ps1') -BenchRoot $bench -Bin $cfg.Bin -Out $raw -HomeDir $homeMain
@@ -97,7 +100,16 @@ $env:CP2_RILTRA = $cfg.Bin
 node (Join-Path $method 'mcp-smoke.cjs')
 if ($LASTEXITCODE -ne 0) { throw "the MCP smoke failed with exit $LASTEXITCODE" }
 
-Section "10. isolation assertions"
+Section "10. the D.5 grading (the smoke and the session are the D.5 evidence)"
+# The D5 checks are graded from the smoke and the session, both of which are
+# produced after step 4, so the grading is redone here. The historical
+# grader graded before the smoke existed and reported D5-H1 as UNAVAILABLE.
+$env:CP2_MCP_SMOKE = Join-Path $raw 'mcp\mcp-smoke.json'
+if ($env:CP2_OPENCODE_SESSION) { $env:CP2_OPENCODE_SESSION = Join-Path $raw 'mcp\opencode-session.json' }
+node (Join-Path $method 'grade.cjs') (Join-Path $raw 'queries') (Join-Path $raw 'grading.json')
+if ($LASTEXITCODE -ne 0) { throw "the D.5 grading failed with exit $LASTEXITCODE" }
+
+Section "11. isolation assertions"
 "  snapshot HEAD  = $(git -C $snap rev-parse HEAD)"
 "  snapshot tree  = $(git -C $snap rev-parse 'HEAD^{tree}')"
 "  snapshot porcelain = $((git -C $snap status --porcelain | Measure-Object -Line).Lines) lines"

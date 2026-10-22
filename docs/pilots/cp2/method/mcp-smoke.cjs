@@ -1,5 +1,5 @@
 // CP2 step 7a: direct MCP stdio smoke against the Riltra MCP server.
-// Verifies: 11-tool surface, JSON-RPC stdout purity, classified error,
+// Verifies: 12-tool surface, JSON-RPC stdout purity, classified error,
 // non-mutating reads, transport health, repository selection.
 //
 // The binary and the paths come from the environment, so the script runs
