@@ -63,8 +63,8 @@ self-tests, which `run-all.ps1` also runs as step 0).
 | `db-include-probe.cjs`, `db-probe*.cjs` | the read-only diagnostics behind the decision package |
 | `mcp-smoke.cjs` | the MCP stdio smoke (needs `CP2_RILTRA`, `CP2_HOME`, `CP2_OUT`) |
 | `d5-mcp-sequence.cjs` | the D.5 tool sequence over the real MCP transport |
-| `opencode-session.ps1` | the agent-side OpenCode session (project-local MCP configuration, isolated home, fail closed) |
-| `test-harness.ps1` | the regression tests of the harness helpers (the copy, the prompt, the configuration, the isolation guard, the fail-closed outcome) |
+| `opencode-session.ps1` | the agent-side OpenCode session (project-local MCP configuration, isolated home asserted before it is read, fail closed) |
+| `test-harness.ps1` | the regression tests of the harness helpers (the copy, the prompt, the configuration, the isolation guard before the read, the fail-closed outcome) |
 | `measure.ps1` | the measurement wrapper (wall time, peak RSS) |
 | `redact.cjs` | redacts machine-local paths before archiving |
 | `common.ps1` | the path-safety helpers and the shared configuration |

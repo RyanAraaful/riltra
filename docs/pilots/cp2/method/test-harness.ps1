@@ -11,6 +11,8 @@
 #   - the session's MCP configuration is project-local, registers exactly
 #     one server and points at the isolated pilot home;
 #   - a home that registers the original repository is refused;
+#   - a home that reaches the original repository is refused BEFORE its
+#     content is read;
 #   - a session that never reached the Riltra tools does not pass.
 #
 # Usage: pwsh -NoProfile -File test-harness.ps1
@@ -162,6 +164,104 @@ Task 2: report the error text, quoted. Do not retry with another name.
         Check "the guard cannot be switched off by omitting the original repository" ($noOriginal -like '*original repository*' -or $noOriginal -like '*MmspRoot*') "the refusal was: '$noOriginal'"
     }
 
+    "===== the guard runs before the home is read ====="
+    Test-That "a home that reaches the original is refused before its content is read" {
+        # A temporary stand-in for the original repository. The real one is
+        # never a test target.
+        $orig = Join-Path $tmp 'read-guard-original'
+        New-Item -ItemType Directory -Force -Path (Join-Path $orig 'colmap') | Out-Null
+        Set-Content -LiteralPath (Join-Path $orig 'colmap\source.txt') -Value 'source bytes' -Encoding UTF8
+
+        # The three shapes that must be refused: the home IS the original, the
+        # home is INSIDE the original, and the home REGISTERS the original -
+        # the last one is the shape the guard exists for.
+        $inside = Join-Path $orig 'inside'
+        New-Item -ItemType Directory -Force -Path $inside | Out-Null
+        $registering = Join-Path $benchRoot 'read-guard-registering'
+        New-Item -ItemType Directory -Force -Path $registering | Out-Null
+        $registry = [ordered]@{
+            version = 1
+            repos   = @([ordered]@{ name = 'repo'; root = ('\\?\' + $orig + '\') })
+        } | ConvertTo-Json -Compress
+        Set-Content -LiteralPath (Join-Path $registering 'registry.json') -Value $registry -Encoding UTF8
+
+        $shapes = @(
+            [ordered]@{ name = 'the original repository itself'; home = $orig }
+            [ordered]@{ name = 'a subdirectory of the original repository'; home = $inside }
+            [ordered]@{ name = 'a home that registers the original repository'; home = $registering }
+        )
+
+        $host_exe = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        $bin = Join-Path $benchRoot 'riltra-stub.exe'
+        Set-Content -LiteralPath $bin -Value 'not a binary: no session may start' -Encoding UTF8
+
+        foreach ($shape in $shapes) {
+            $bench = Join-Path $benchRoot ('read-guard-bench-' + ($shape.name -replace '\W+', '-'))
+            $out = Join-Path $bench 'raw'
+            New-Item -ItemType Directory -Force -Path (Join-Path $out 'mcp') | Out-Null
+            # A summary of an earlier run: a refusal must never leave it in
+            # place to be graded as this run's evidence.
+            $stale = Join-Path $out 'mcp\opencode-session.json'
+            Set-Content -LiteralPath $stale -Value '{"exit_code":0,"reason":null}' -Encoding UTF8
+
+            $stdoutFile = Join-Path $bench 'session.stdout.txt'
+            $stderrFile = Join-Path $bench 'session.stderr.txt'
+            $prev = $ErrorActionPreference
+            $ErrorActionPreference = 'Continue'
+            try {
+                & $host_exe -NoProfile -File (Join-Path $PSScriptRoot 'opencode-session.ps1') `
+                    -BenchRoot $bench -Bin $bin -Out $out -HomeDir $shape.home -MmspRoot $orig `
+                    1> $stdoutFile 2> $stderrFile
+                $code = $LASTEXITCODE
+            }
+            finally { $ErrorActionPreference = $prev }
+
+            $stdout = [string](Get-Content -LiteralPath $stdoutFile -Raw -ErrorAction SilentlyContinue)
+            $stderr = [string](Get-Content -LiteralPath $stderrFile -Raw -ErrorAction SilentlyContinue)
+            Check "a home that reaches the original is refused ($($shape.name))" ($code -ne 0) "the exit code was $code"
+            Check "the refusal for $($shape.name) names the original repository" (($stdout + $stderr) -like '*original repository*') "the output was: $stdout $stderr"
+            Check "the home was not read before the refusal ($($shape.name))" ($stdout -notlike '*home digest before*') "the digest ran before the refusal: $stdout"
+            Check "the earlier summary was not left as evidence ($($shape.name))" (-not (Test-Path -LiteralPath $stale)) "the stale summary survived"
+            Check "no agent was launched ($($shape.name))" (-not (Test-Path -LiteralPath (Join-Path $out 'mcp\opencode-session.stdout.json'))) "the agent was launched"
+        }
+    }
+
+    Test-That "a valid isolated home is accepted and the session flow continues" {
+        $orig = Join-Path $tmp 'accept-guard-original'
+        New-Item -ItemType Directory -Force -Path $orig | Out-Null
+        $pilotHome = Join-Path $benchRoot 'accept-guard-home'
+        New-Item -ItemType Directory -Force -Path $pilotHome | Out-Null
+        Set-Content -LiteralPath (Join-Path $pilotHome 'registry.json') -Value '{"version":1,"repos":[]}' -Encoding UTF8
+
+        $bench = Join-Path $benchRoot 'accept-guard-bench'
+        $out = Join-Path $bench 'raw'
+        New-Item -ItemType Directory -Force -Path $bench | Out-Null
+        $bin = Join-Path $benchRoot 'riltra-stub-accept.exe'
+        Set-Content -LiteralPath $bin -Value 'not a binary: no session may start' -Encoding UTF8
+        # The launch cannot start; the guard, not the launch, is under test.
+        $fakeOpenCode = Join-Path $bench 'no-such-opencode.exe'
+
+        $host_exe = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        $stdoutFile = Join-Path $bench 'session.stdout.txt'
+        $stderrFile = Join-Path $bench 'session.stderr.txt'
+        $prev = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            & $host_exe -NoProfile -File (Join-Path $PSScriptRoot 'opencode-session.ps1') `
+                -BenchRoot $bench -Bin $bin -Out $out -HomeDir $pilotHome -MmspRoot $orig -OpenCode $fakeOpenCode `
+                1> $stdoutFile 2> $stderrFile
+            $code = $LASTEXITCODE
+        }
+        finally { $ErrorActionPreference = $prev }
+
+        $stdout = [string](Get-Content -LiteralPath $stdoutFile -Raw -ErrorAction SilentlyContinue)
+        $stderr = [string](Get-Content -LiteralPath $stderrFile -Raw -ErrorAction SilentlyContinue)
+        Check "the guard accepts the isolated home" ($stdout -like '*home digest before*') "the flow stopped at the guard: $stdout $stderr"
+        Check "the guard did not refuse the home" (($stdout + $stderr) -notlike '*refusing*') "the guard refused the home: $stderr"
+        Check "the flow reached the session configuration" (Test-Path -LiteralPath (Join-Path $bench 'cp2\opencode-session\opencode.json')) "the configuration was not written: $stdout $stderr"
+        Check "the launch failed, so no agent ran" ($code -ne 0) "the exit code was $code"
+    }
+
     "===== the copy guards ====="
     Test-That "the copy refuses a source and destination that are not disjoint" {
         $same = Refusal { Copy-BenchDir -Source $cold -Destination $cold -Root $benchRoot | Out-Null }
@@ -222,6 +322,14 @@ Task 2: report the error text, quoted. Do not retry with another name.
         $session = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'opencode-session.ps1') -Raw
         Check "opencode-session.ps1 writes the project-local configuration" ($session -match 'New-OpenCodeProjectConfig') "the configuration writer is not called"
         Check "opencode-session.ps1 asserts the isolated home" ($session -match 'Assert-IsolatedHome') "the isolation guard is not called"
+        Check "opencode-session.ps1 resolves the home before it asserts the isolation" (
+            ($session.IndexOf('if (-not $HomeDir)') -ge 0) -and
+            ($session.IndexOf('if (-not $HomeDir)') -lt $session.IndexOf('Assert-IsolatedHome -HomeDir'))
+        ) "the guard runs before the home default is resolved"
+        Check "opencode-session.ps1 asserts the isolated home before it reads the home" (
+            ($session.IndexOf('Assert-IsolatedHome -HomeDir') -ge 0) -and
+            ($session.IndexOf('Assert-IsolatedHome -HomeDir') -lt $session.IndexOf('Home-Digest $HomeDir'))
+        ) "the guard does not run before the home is read"
         Check "opencode-session.ps1 computes the outcome from the tool calls" ($session -match 'Get-SessionExitCode') "the fail-closed outcome is not computed"
         Check "opencode-session.ps1 reads the answer from the event stream" ($session -match 'Get-SessionAnswer') "the answer is not read from the stream"
         Check "opencode-session.ps1 guards and clears the stale summary before the session" (

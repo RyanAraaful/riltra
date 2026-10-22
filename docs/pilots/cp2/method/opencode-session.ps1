@@ -45,6 +45,10 @@ if (Test-Path -LiteralPath $summaryPath) {
     }
 }
 if (-not $HomeDir) { $HomeDir = Join-Path $cfg.BenchRoot 'home-main' }
+# The session must not be able to reach the original repository. The guard
+# runs BEFORE the home is read: a home that reaches the original must be
+# refused before any of its content is read.
+Assert-IsolatedHome -HomeDir $HomeDir -MmspRoot $cfg.MmspRoot | Out-Null
 if (-not $OpenCode) {
   # The npm shim is a .cmd on Windows; Start-Process cannot run it directly.
   $shim = Join-Path $env:APPDATA 'npm\opencode.cmd'
@@ -80,9 +84,6 @@ $promptArg = ConvertTo-SingleLinePrompt -Prompt $prompt
 
 $before = Home-Digest $HomeDir
 "===== home digest before (files=$($before.Split("`n").Count)) ====="
-
-# The session must not be able to reach the original repository.
-Assert-IsolatedHome -HomeDir $HomeDir -MmspRoot $cfg.MmspRoot | Out-Null
 
 # The project-local configuration: the Riltra MCP server, pointed at the
 # isolated pilot home. The global OpenCode configuration is untouched.

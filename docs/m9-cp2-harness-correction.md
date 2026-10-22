@@ -154,11 +154,11 @@ the final tree of this correction.
 | `docs/pilots/cp2/method/run-all.ps1` | `ed570b4b066aa4f54862b08c2f011e03e3996f60` | `3d14850f6483f19333c4f4fbcb837ed2c387cf8a` | the copy step (defect A), the new test in step 0 and the D.5 re-grading after the MCP smoke
 | `docs/pilots/cp2/method/grade.cjs` | `adec365656bf56cba1498e17d60fc720e17abc37` | `7c42958fbfc76a8c997fafc94c82a41d26efe8dd` | the twelve-tool catalog contract (defect B)
 | `docs/pilots/cp2/method/grade.test.cjs` | `4cda3e1c3ff7c6ef63f7d89db3ac947447cff090` | `2e68cade8bf5b0405a8064a9f3bc29131297c7c3` | the twelve regression cases for the catalog contract and the blocked-session verdict
-| `docs/pilots/cp2/method/opencode-session.ps1` | `e5c40dbb1718d4abbdf39f808cdda572e9c269f3` | `edee7a9c8b6691f466b30fd4b256b91fe78c4b8a` | the prompt, the project-local config, the isolation guard, the structured tool calls, the measured citations, the fail-closed outcome (defect C)
-| `docs/pilots/cp2/method/test-harness.ps1` | `(new file)` | `3f2ee5aaaafb2051775294c5247adfed0550700f` | the regression tests of the harness helpers
+| `docs/pilots/cp2/method/opencode-session.ps1` | `e5c40dbb1718d4abbdf39f808cdda572e9c269f3` | `0dad9a14de082512653c1ad2e2ac176c70d2e569` | the prompt, the project-local config, the isolation guard (before the home is read), the structured tool calls, the measured citations, the fail-closed outcome (defect C)
+| `docs/pilots/cp2/method/test-harness.ps1` | `(new file)` | `5969a2df30e3dee402fe005cc6f882afbb9f029b` | the regression tests of the harness helpers
 | `docs/pilots/cp2-reeval/method/run-steps.ps1` | `20420fdf544b99cfafee4a1056567f60a1401a6c` | `e674fd971cb7b1ab57b0f5ee7599cf552e2f215d` | explicit parameters instead of placeholder defaults; the behaviour of the 2026-10-21 run is unchanged
 | `docs/pilots/cp2-reeval/method/opencode-session-d5.ps1` | `698767591351337ddec6ca04f1263de9acc4d7ac` | `e836c934220fb734311294bab21915f65e634ed1` | the same, plus a note that the canonical harness now supersedes it
-| `docs/pilots/cp2/method/README.md` | `a38d8480eaabc6ee37b22e9407fc482159d54b2a` | `794cbc53b527cb1937c2c794c15878125b12c6cc` | the amended procedure and the new scripts
+| `docs/pilots/cp2/method/README.md` | `a38d8480eaabc6ee37b22e9407fc482159d54b2a` | `39d22ea7bc7ac7085fa6633045705f31ec1b1ec4` | the amended procedure and the new scripts
 | `docs/pilots/cp2-reeval/README.md` | `0fe9bc88a60f0d121a2b0892afe1fa28310f358b` | `dd4ec6274ee5b3693fac6533029001d5ec95cc37` | the reproduction commands with every parameter explicit
 
 **The historical evidence was produced with the historical harness.** The raw
@@ -187,20 +187,23 @@ archived evidence, as clearly separated additional evidence.
 | 8 | the prompt keeps its instruction content | `FAIL … (The term 'ConvertTo-SingleLinePrompt' is not recognized …)` | `PASS the flattened prompt has no line break` + the three instruction checks |
 | 9 | the MCP configuration is project-local, one server, pointing at the isolated home, the global configuration untouched | `FAIL … (The term 'New-OpenCodeProjectConfig' is not recognized …)` | the eight configuration checks pass |
 | 10 | a home that registers the original repository is refused | `FAIL … (the refusal was: 'The term 'Assert-IsolatedHome' is not recognized …')` | `PASS a home registering the original repository is refused` (the refusal names the original repository) |
-| 11 | a session that never called a Riltra tool does not pass | `FAIL … (The term 'Get-SessionExitCode' is not recognized …)` | `PASS a session without Riltra tools fails closed` |
+| 11 | a session that never called a Riltra tool does not pass | `FAIL … (The term 'Get-SessionExitCode' is not recognized …)` | `PASS a session whose text names a Riltra tool fails closed` |
 | 12 | a tool name in the agent's **text** is not a tool call | `FAIL … (The term 'Get-SessionToolCalls' is not recognized …)` | `PASS a session whose text names a Riltra tool fails closed` + `PASS that session made no tool call` |
 | 13 | the answer is the agent's **final** message | `FAIL … (The term 'Get-SessionAnswer' is not recognized …)` | `PASS the answer is the last text part` + `PASS a citation in an intermediate note is not a citation of the answer` |
-| 14 | the procedure **uses** the corrected helpers | `FAIL opencode-session.ps1 reads the answer from the event stream (the answer is not read from the stream)` | the seven call-site checks pass (`run-all.ps1` uses `Copy-BenchDir` and no longer copies a directory into an existing one; the session writes the project config, asserts the isolated home, computes the outcome from the tool calls, reads the answer from the stream, and clears the stale summary before it starts) |
+| 14 | the procedure **uses** the corrected helpers | `FAIL opencode-session.ps1 reads the answer from the event stream (the answer is not read from the stream)` | the nine call-site checks pass (`run-all.ps1` uses `Copy-BenchDir` and no longer copies a directory into an existing one; the session writes the project config, asserts the isolated home before it reads the home, computes the outcome from the tool calls, reads the answer from the stream, and clears the stale summary before it starts) |
 | 15 | a home registering a **subdirectory or a parent** of the original is refused | `FAIL … (the refusal was: '')` | `PASS a home registering a subdirectory of the original is refused` + `PASS a home registering a parent of the original is refused` |
 | 16 | the isolation guard cannot be **switched off** | `FAIL … (the refusal was: '')` | `PASS the guard cannot be switched off by omitting the original repository` |
 | 17 | the copy refuses a **non-disjoint** source and destination, and a destination that is not empty | `FAIL copying a directory into itself is refused (the refusal was: 'Cannot overwrite the item … with itself.')` | `PASS copying a directory into itself is refused` + `PASS copying a directory into its own subdirectory is refused` + `PASS a destination with leftover content is refused` |
 | 18 | a twelve-tool catalog missing **another** approved tool, or with a **duplicate**, is rejected | `not ok 26 …` / `not ok 27 …` (both were accepted) | `ok 26` / `ok 27` (reason `mcp-tool-surface-mismatch`) |
 | 19 | a session that reached **no tool** is not a passing agent session | `not ok 28 …` (it passed) | `ok 28` (the verdict is `UNAVAILABLE`, and no D5-H3 is produced) |
+| 20 | the isolation guard runs **before** the home is read | `FAIL the home was not read before the refusal (the original repository itself) (the digest ran before the refusal: ===== home digest before (files=1) =====)`, the same for `a subdirectory of the original repository` and `a home that registers the original repository`, and `FAIL opencode-session.ps1 asserts the isolated home before it reads the home` | all four pass (the refusal happens before the digest, for every shape) |
+| 21 | a refused home leaves **no summary** and launches **no agent** | `PASS` (characterization: the stale-summary deletion already preceded the guard) | unchanged |
+| 22 | a valid isolated home is **accepted** and the flow continues | `PASS` (characterization) | unchanged |
 
 **The test commands** (all from the repository root):
 
 ```powershell
-pwsh -NoProfile -File docs/pilots/cp2/method/test-harness.ps1   # 41 checks
+pwsh -NoProfile -File docs/pilots/cp2/method/test-harness.ps1   # 62 checks
 node --test docs/pilots/cp2/method/grade.test.cjs               # 33 tests
 node --test docs/pilots/cp2/method/fact-digest.test.cjs         # 16 tests
 pwsh -NoProfile -File docs/pilots/cp2/method/test-path-safety.ps1
@@ -303,3 +306,41 @@ the archive as `FAIL`.
 The "after" blob ids of the amended files are recorded in the table above;
 the final remote HEAD and the CI run are recorded in the final report of this
 task.
+
+---
+
+## 7. Follow-up: the isolation guard runs before the home is read
+
+An independent audit of this correction found one HIGH defect in the **order**
+of the session script: `opencode-session.ps1` read the home (`Home-Digest`)
+**before** `Assert-IsolatedHome` refused a home that reaches the original
+repository. A path that must be refused was therefore still read first. It is
+a defect of the **test procedure**, not of Riltra: no production code, no
+schema and no MCP contract is involved.
+
+The fix is a **move**, not a new mechanism: the existing `Assert-IsolatedHome`
+call now runs directly after `$HomeDir` is resolved — after the default is
+applied, before the home is read, before the session configuration is written
+and before the agent is launched. The stale-summary **deletion** stays where
+it is and still precedes the guard, so a refusal still leaves **no** summary
+that could be graded as this run's evidence, and the deletion itself still
+happens before any content of the home is read.
+
+The regression tests use temporary fixtures only: the original repository is
+never a test target. The negative case runs the **real** script in a child
+process, once for each shape that must be refused — the home **is** the
+original, the home is **inside** the original, and the home **registers** the
+original (the shape the guard exists for) — and asserts that the refusal
+happens before the digest, that the earlier summary is gone and that no agent
+was launched; the positive case runs it with a valid isolated home and a
+launch that cannot start, and asserts that the flow reaches the digest and
+the session configuration. The RED → GREEN rows are 20–22 of §3.
+
+**Findings outside this scope (recorded, not fixed).** `Assert-IsolatedHome`
+accepts a home that is an **ancestor** of the original when that home's
+registry does not mention the original, and it does not require `-MmspRoot`
+to exist: `Resolve-RealPath` keeps a non-existent path lexically, so a typo
+in `-MmspRoot` makes the comparison meaningless. Both are pre-existing
+properties of the guard, not of this ordering fix, and changing the path
+validation contract needs a scope audit — they are recorded here and left
+untouched.
