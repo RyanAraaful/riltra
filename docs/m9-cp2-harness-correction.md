@@ -234,8 +234,9 @@ proof:
    PASS). The historical `raw/grading.json` still says `D5-H1 = FAIL`.
 3. **The session, against the real agent.** The corrected
    `opencode-session.ps1` ran a real OpenCode session in the pilot home
-   (the copied `home-main`), with the project-local configuration,
-   `-TimeoutSec 3600` and `-Model opencode/minimax-m3.1-flash-free`:
+   (the copied `home-main`), with the project-local configuration and
+   `-Model opencode/minimax-m3.1-flash-free`. The session outlasted the old
+   600 s default, so the reproduction below passes `-TimeoutSec 3600`:
 
    | | |
    |---|---|
