@@ -12,7 +12,8 @@ use rusqlite::{params, Connection, OptionalExtension};
 pub const SCHEMA_VERSION: u32 = 4;
 /// Parser/extraction version. Bump whenever `syntax.rs` extraction changes;
 /// freshness treats a mismatch as stale (never silently current).
-pub const PARSER_VERSION: u32 = 1;
+/// 2: C++ data members are extracted as `field` symbols (E7 Slice 1).
+pub const PARSER_VERSION: u32 = 2;
 
 /// Grammar + runtime versions pinned in `Cargo.lock`. A test pins these
 /// against the lockfile so they cannot drift silently.

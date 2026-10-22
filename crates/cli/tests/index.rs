@@ -177,6 +177,144 @@ fn build_reopen_search_is_consistent() {
     assert!(snapshot_ids_consistent(&first));
 }
 
+/// A C++ header with a data member, a method declaration and a
+/// function-pointer member. The data member is on line 3, its identifier
+/// starts at column 10; the class spans the bytes 0..68.
+const CPP_FIELDS: &str =
+    "class Options {\n public:\n  double max_triangulation_angle = -1.0f;\n};\n";
+
+#[test]
+fn a_cpp_data_member_is_searchable_as_a_field() {
+    let h = home("field-search");
+    let repo = mkrepo(&h, "work");
+    std::fs::write(repo.join("options.h"), CPP_FIELDS).unwrap();
+    init_and_index(&h, &repo, "r");
+    let (code, out, err) = run(
+        &h,
+        &[
+            "search",
+            "--repo",
+            "r",
+            "--symbol",
+            "max_triangulation_angle",
+        ],
+    );
+    assert_eq!(code, 0, "search failed: {err}");
+    assert!(out.contains("\"kind\":\"field\""), "got: {out}");
+    assert!(
+        out.contains("\"name\":\"max_triangulation_angle\""),
+        "got: {out}"
+    );
+    assert!(out.contains("options.h"), "got: {out}");
+    // The symbol points at its NAME: line 3, column 10.
+    assert!(out.contains("\"start_line\":3"), "got: {out}");
+    assert!(out.contains("\"start_col\":10"), "got: {out}");
+}
+
+#[test]
+fn a_cpp_method_or_function_pointer_member_is_not_a_field() {
+    let h = home("field-exclude");
+    let repo = mkrepo(&h, "work");
+    std::fs::write(
+        repo.join("options.h"),
+        "class Options {\n public:\n  int process(int x);\n\n  int (*callback)();\n};\n",
+    )
+    .unwrap();
+    init_and_index(&h, &repo, "r");
+    for name in ["process", "callback"] {
+        let (code, out, err) = run(&h, &["search", "--repo", "r", "--symbol", name]);
+        assert_eq!(code, 0, "search failed: {err}");
+        assert!(
+            !out.contains("\"kind\":\"field\""),
+            "{name} must not be indexed as a data member: {out}"
+        );
+    }
+}
+
+#[test]
+fn a_data_member_does_not_change_the_anchor_inside_its_class() {
+    // Characterization: a position inside a class body anchors to the CLASS.
+    // The E7 Slice-1 field symbols must not change that (Slice 1 finds the
+    // declaration; anchoring on a member is later work).
+    let h = home("field-anchor");
+    let repo = mkrepo(&h, "work");
+    std::fs::write(repo.join("options.h"), CPP_FIELDS).unwrap();
+    init_and_index(&h, &repo, "r");
+    let (code, out, err) = run(
+        &h,
+        &[
+            "callers",
+            "--repo",
+            "r",
+            "--path",
+            "options.h",
+            "--line",
+            "3",
+            "--col",
+            "10",
+        ],
+    );
+    assert_eq!(code, 0, "callers failed: {err}");
+    assert!(
+        out.contains("\"span\":[0,68]"),
+        "the anchor must stay the class, not the data member: {out}"
+    );
+    assert!(!out.contains("\"span\":[34,57]"), "got: {out}");
+}
+
+#[test]
+fn an_index_from_the_previous_parser_version_is_rebuilt() {
+    let h = home("field-parser");
+    let repo = mkrepo(&h, "work");
+    std::fs::write(repo.join("options.h"), CPP_FIELDS).unwrap();
+    init_and_index(&h, &repo, "r");
+    // An index written by the previous parser version: the old parser
+    // version, and no field facts in it.
+    let db = h.join("index").join("r.db");
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute("UPDATE snapshots SET parser_version = 1", [])
+            .unwrap();
+        conn.execute("DELETE FROM symbols WHERE kind = 'field'", [])
+            .unwrap();
+    }
+    let (code, out, err) = run(
+        &h,
+        &[
+            "search",
+            "--repo",
+            "r",
+            "--symbol",
+            "max_triangulation_angle",
+        ],
+    );
+    assert_eq!(code, 0, "search failed: {err}");
+    assert!(
+        !out.contains("\"kind\":\"field\""),
+        "the old index must not have field facts: {out}"
+    );
+    let (code, out, err) = run(&h, &["index", "status", "--repo", "r"]);
+    assert_eq!(code, 0, "index status failed: {err}");
+    assert!(out.contains("\"freshness\":\"stale\""), "got: {out}");
+    assert!(out.contains("parser-changed"), "got: {out}");
+    let (code, out, err) = run(&h, &["index", "--repo", "r"]);
+    assert_eq!(code, 0, "index failed: {err}");
+    assert!(out.contains("\"mode\":\"fallback-full\""), "got: {out}");
+    assert!(out.contains("parser-changed"), "got: {out}");
+    let (code, out, err) = run(
+        &h,
+        &[
+            "search",
+            "--repo",
+            "r",
+            "--symbol",
+            "max_triangulation_angle",
+        ],
+    );
+    assert_eq!(code, 0, "search failed: {err}");
+    assert!(out.contains("\"kind\":\"field\""), "got: {out}");
+}
+
 #[test]
 fn dirty_without_head_change_is_stale_but_served() {
     let h = home("dirty");

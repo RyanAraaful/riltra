@@ -1270,7 +1270,10 @@ fn snapshot_byte_offset(
         return Ok(Some(col0 as usize));
     }
     let mut bases = BTreeSet::new();
-    let mut stmt = tx.prepare("SELECT start_line, start_col, byte_start, end_line, end_col, byte_end FROM symbols WHERE snapshot_id = ?1 AND file_id = ?2 AND (start_line = ?3 OR end_line = ?3) UNION ALL SELECT start_line, start_col, byte_start, end_line, end_col, byte_end FROM calls WHERE snapshot_id = ?1 AND file_id = ?2 AND (start_line = ?3 OR end_line = ?3) UNION ALL SELECT start_line, start_col, byte_start, end_line, end_col, byte_end FROM imports WHERE snapshot_id = ?1 AND file_id = ?2 AND (start_line = ?3 OR end_line = ?3)").map_err(|e| e.to_string())?;
+    // A data member is not a base for the byte-offset recovery either: the
+    // E7 Slice-1 field symbols must not change how a stale position is
+    // resolved. The symbol set is the one of the previous parser version.
+    let mut stmt = tx.prepare("SELECT start_line, start_col, byte_start, end_line, end_col, byte_end FROM symbols WHERE snapshot_id = ?1 AND file_id = ?2 AND kind <> 'field' AND (start_line = ?3 OR end_line = ?3) UNION ALL SELECT start_line, start_col, byte_start, end_line, end_col, byte_end FROM calls WHERE snapshot_id = ?1 AND file_id = ?2 AND (start_line = ?3 OR end_line = ?3) UNION ALL SELECT start_line, start_col, byte_start, end_line, end_col, byte_end FROM imports WHERE snapshot_id = ?1 AND file_id = ?2 AND (start_line = ?3 OR end_line = ?3)").map_err(|e| e.to_string())?;
     let mut rows = stmt
         .query(params![snapshot_id, file_id, line0 as i64 + 1])
         .map_err(|e| e.to_string())?;
@@ -1445,6 +1448,13 @@ pub fn resolve_edge_anchor(
     let mut best: Vec<&store::SymbolRow> = Vec::new();
     let defs = store::symbols_at(tx, snapshot_id, validated)?;
     for def in &defs {
+        // A data member is not an anchor: the E7 Slice-1 field symbols must
+        // not change which definition a position resolves to. Anchoring on a
+        // member is later work (Slice 2), and until then the enclosing
+        // definition stays the anchor, exactly as before.
+        if def.kind == "field" {
+            continue;
+        }
         if def.byte_start <= off && off < def.byte_end {
             let width = def.byte_end.saturating_sub(def.byte_start);
             if width < best_width {
@@ -3208,6 +3218,13 @@ mod tests {
         )
         .unwrap();
         std::fs::write(repo.join("c.js"), b"function gamma() { return 1; }\n").unwrap();
+        // A C++ data member: the parity check must cover the field facts the
+        // unchanged file carries through the incremental copy path.
+        std::fs::write(
+            repo.join("fields.cpp"),
+            b"struct S {\n  int value = 1;\n};\n",
+        )
+        .unwrap();
         std::fs::write(repo.join("bin.py"), b"\x00\x01").unwrap();
         std::fs::write(repo.join("note.xyz"), b"plain\n").unwrap();
         build_full(&home_b, "r", &repo).unwrap();

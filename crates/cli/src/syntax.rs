@@ -408,6 +408,82 @@ fn push_struct(facts: &mut FileFacts, node: tree_sitter::Node, src: &[u8]) {
     });
 }
 
+/// C++ data member: a `field_declaration` whose declarator ends in a
+/// `field_identifier`. The fact points at the NAME (the identifier), so the
+/// anchor of a member is its identifier, not its type.
+///
+/// A `function_declarator` is never a data member: a method declaration, a
+/// constructor and the ambiguous function-pointer form
+/// (`int (*target)();`) are all skipped rather than guessed.
+fn push_field(facts: &mut FileFacts, node: tree_sitter::Node, src: &[u8]) {
+    let mut cursor = node.walk();
+    for declarator in node.children_by_field_name("declarator", &mut cursor) {
+        let Some(name_node) = field_identifier_of(declarator) else {
+            continue;
+        };
+        let (span, byte_start, byte_end) = span_of(name_node);
+        facts.definitions.push(Fact {
+            kind: "field",
+            name: node_text(name_node, src).map(str::to_string),
+            text: None,
+            span,
+            byte_start,
+            byte_end,
+            callee: None,
+            tcallee: None,
+        });
+    }
+}
+
+/// The `field_identifier` at the end of a data-member declarator chain.
+/// Pointer, reference, array, parenthesized and attributed declarators wrap
+/// it; a `function_declarator` never does, so it yields nothing.
+fn field_identifier_of(declarator: tree_sitter::Node) -> Option<tree_sitter::Node> {
+    let mut current = declarator;
+    for _ in 0..6 {
+        match current.kind() {
+            "field_identifier" => return Some(current),
+            "function_declarator" => return None,
+            "pointer_declarator"
+            | "reference_declarator"
+            | "array_declarator"
+            | "parenthesized_declarator"
+            | "attributed_declarator" => {
+                current = inner_declarator(current)?;
+            }
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// The declarator inside a wrapper node: its `declarator` field when it has
+/// one, else the first named child that can carry it (the reference and
+/// parenthesized declarators have no field of their own).
+fn inner_declarator(node: tree_sitter::Node) -> Option<tree_sitter::Node> {
+    if let Some(inner) = node.child_by_field_name("declarator") {
+        return Some(inner);
+    }
+    for i in 0..node.named_child_count() {
+        let Some(child) = node.named_child(i) else {
+            continue;
+        };
+        if matches!(
+            child.kind(),
+            "field_identifier"
+                | "function_declarator"
+                | "pointer_declarator"
+                | "reference_declarator"
+                | "array_declarator"
+                | "parenthesized_declarator"
+                | "attributed_declarator"
+        ) {
+            return Some(child);
+        }
+    }
+    None
+}
+
 fn push_call(facts: &mut FileFacts, node: tree_sitter::Node, src: &[u8]) {
     let func = node.child_by_field_name("function");
     let callee = func.and_then(|f| node_text(f, src).map(|s| s.to_string()));
@@ -618,6 +694,7 @@ fn visit(lang: Language, node: tree_sitter::Node, src: &[u8], facts: &mut FileFa
             "function_definition" => push_c_def(facts, "function", node, src),
             "struct_specifier" => push_struct(facts, node, src),
             "class_specifier" => push_def(facts, "class", node, src),
+            "field_declaration" => push_field(facts, node, src),
             "preproc_include" => push_import(facts, node, src),
             "call_expression" => push_call(facts, node, src),
             "declaration" => push_direct_init_call(facts, node, src),
@@ -804,6 +881,108 @@ mod tests {
     fn language_names_are_stable() {
         assert_eq!(language_name(Language::Cpp), "cpp");
         assert_eq!(language_name(Language::Tsx), "tsx");
+    }
+
+    /// The C++ data members of a source: (name, start_line, start_col, text).
+    fn cpp_fields(src: &[u8]) -> Vec<(String, u32, u32, String)> {
+        parse_source(Language::Cpp, src)
+            .definitions
+            .iter()
+            .filter(|d| d.kind == "field")
+            .map(|d| {
+                (
+                    d.name.clone().unwrap_or_default(),
+                    d.span.start_line,
+                    d.span.start_col,
+                    String::from_utf8_lossy(&src[d.byte_start..d.byte_end]).into_owned(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn extracts_a_cpp_data_member_as_a_field() {
+        // A data member points at its NAME, so the anchor is the identifier
+        // (the frozen CP1 anchor `patch_match_options.h:56:10`).
+        let src = b"class Options {\n  double max_triangulation_angle = -1.0f;\n};\n";
+        let fields = cpp_fields(src);
+        assert_eq!(fields.len(), 1, "{fields:?}");
+        assert_eq!(fields[0].0, "max_triangulation_angle");
+        assert_eq!((fields[0].1, fields[0].2), (2, 10));
+        assert_eq!(fields[0].3, "max_triangulation_angle");
+    }
+
+    #[test]
+    fn a_cpp_field_with_an_initializer_is_a_field() {
+        let src = b"struct Holder { int value = 1; };\n";
+        let fields = cpp_fields(src);
+        assert_eq!(fields.len(), 1, "{fields:?}");
+        assert_eq!(fields[0].0, "value");
+        assert_eq!(fields[0].3, "value");
+    }
+
+    #[test]
+    fn multiple_cpp_declarators_are_separate_fields() {
+        let src = b"struct S { int a, b; };\n";
+        let fields = cpp_fields(src);
+        let names: Vec<&str> = fields.iter().map(|f| f.0.as_str()).collect();
+        assert_eq!(names, vec!["a", "b"], "{fields:?}");
+    }
+
+    #[test]
+    fn pointer_reference_and_array_members_are_fields() {
+        let src = b"struct S {\n  double* p;\n  double& r;\n  double arr[4];\n};\n";
+        let fields = cpp_fields(src);
+        let names: Vec<&str> = fields.iter().map(|f| f.0.as_str()).collect();
+        assert_eq!(names, vec!["p", "r", "arr"], "{fields:?}");
+    }
+
+    #[test]
+    fn a_cpp_method_declaration_is_not_a_field() {
+        // A method declaration is a field_declaration node whose declarator
+        // is a function declarator: it is never a data member.
+        let src = b"class W {\n public:\n  int process(int x);\n};\n";
+        assert!(cpp_fields(src).is_empty(), "a method is not a data member");
+    }
+
+    #[test]
+    fn a_cpp_function_pointer_member_is_not_a_field() {
+        // `int (*target)();` is a member, but its declarator is a function
+        // declarator: the ambiguous form is not indexed as a data member.
+        let src = b"struct Obj { int (*target)(); };\n";
+        assert!(
+            cpp_fields(src).is_empty(),
+            "a function-pointer declarator is not indexed"
+        );
+    }
+
+    #[test]
+    fn same_named_cpp_fields_stay_separate_symbols() {
+        let src = b"struct A { int value; };\nstruct B { int value; };\n";
+        let fields = cpp_fields(src);
+        assert_eq!(fields.len(), 2, "{fields:?}");
+        assert_eq!(fields[0].0, "value");
+        assert_eq!(fields[1].0, "value");
+        assert_ne!(fields[0].1, fields[1].1, "distinct declarations");
+    }
+
+    #[test]
+    fn qualified_and_derived_cpp_members_are_fields() {
+        // A static, a mutable, a bitfield and a member of an anonymous union
+        // are data members; a template class member is one too.
+        let src = b"class C {\n public:\n  static int counter;\n  mutable double ratio;\n  unsigned int flags : 3;\n  union { int raw; float as_float; };\n};\n";
+        let fields = cpp_fields(src);
+        let names: Vec<&str> = fields.iter().map(|f| f.0.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["counter", "ratio", "flags", "raw", "as_float"],
+            "{fields:?}"
+        );
+        // One row per declaration: a member is never indexed twice.
+        let mut unique = names.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), names.len(), "no duplicate field rows");
     }
 
     #[test]
