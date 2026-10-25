@@ -253,6 +253,32 @@ function gradeChecks(ctx) {
       { inspected_edges: allEdges.length, kinds, per_query: perQuery });
   }
 
+  // honesty (A-3, amendment §8): a candidate keeps the frozen labels, names no
+  // callee, and sits in a reference set that declares itself partial. The label
+  // and callee rules are frozen B.1 and B.9; the partial rule is frozen B.8.
+  const candidateRows = allEdges.filter((e) => e.kind === "POTENTIAL_CALL");
+  const d1h6 = "a candidate keeps the POTENTIAL_CALL, Heuristic and Unverified labels, names no callee, and sits in a reference set that declares itself partial";
+  if (candidateRows.length === 0) {
+    add("D1-H6", "honesty", d1h6, V.UNAVAILABLE, "no-candidate-returned", { inspected_candidates: 0 });
+  } else {
+    const mislabelled = candidateRows.filter((e) => e.precision !== "Heuristic" || e.verification !== "Unverified");
+    const named = candidateRows.filter((e) => e.callee != null);
+    const undeclared = referenceQueries.map(([name]) => name).filter((name) => {
+      const q = ctx.docs[name];
+      if (!q.available || !edgesOf(q.doc).some((e) => e.kind === "POTENTIAL_CALL")) return false;
+      return !(q.doc.completeness && q.doc.completeness.status === "partial");
+    });
+    const reason = mislabelled.length ? "candidate-mislabelled"
+      : named.length ? "candidate-names-a-callee"
+      : undeclared.length ? "candidate-set-not-declared-partial" : null;
+    add("D1-H6", "honesty", d1h6, reason ? V.FAIL : V.PASS, reason, {
+      inspected_candidates: candidateRows.length,
+      mislabelled: mislabelled.length,
+      named_callee: named.length,
+      undeclared_queries: undeclared,
+    });
+  }
+
   // ---- D.1 find a symbol and its references -------------------------------
   const sPrint = ctx.docs["d1-1-search-Print"];
   if (!sPrint.available) {

@@ -493,7 +493,7 @@ function defAt(root, rel, line) {
 function edgeAt(root, rel, line, fields) {
   const start = lineStart(root, rel, line);
   return Object.assign(
-    { kind: "POTENTIAL_CALL", precision: "Heuristic", unresolved: "dynamic", callee: null,
+    { kind: "POTENTIAL_CALL", precision: "Heuristic", verification: "Unverified", unresolved: "dynamic", callee: null,
       caller_path: rel, caller_span: [start, start + 4], callee_name: "X" },
     fields || {},
   );
@@ -522,7 +522,11 @@ function d1Root() {
 function d1Dir(root, buildEdges, withRoot) {
   const anchor = defAt(root, FX.pmCc, 118);
   const files = {
-    "d1-5-callers-PrintDef": JSON.stringify({ anchor: { path: FX.pmCc, line: 118, endpoint: anchor }, edges: buildEdges(root, anchor) }),
+    "d1-5-callers-PrintDef": JSON.stringify({
+      anchor: { path: FX.pmCc, line: 118, endpoint: anchor },
+      edges: buildEdges(root, anchor),
+      completeness: { status: "partial", unresolved: ["dynamic_calls"] },
+    }),
   };
   if (withRoot !== false) files["d1-1-search-Print"] = searchNamingRoot(root);
   return writeQueries(files);
@@ -568,6 +572,57 @@ test("D1-C6 is UNAVAILABLE without the snapshot source, never decided by a byte 
   const check = find(grade(dir).checks, "D1-C6");
   assert.strictEqual(check.verdict, V.UNAVAILABLE);
   assert.strictEqual(check.reason, "source-unavailable");
+});
+
+// --- A-3: the honesty side of the Print reference set (amendment §8)
+
+test("A-3: a partial answer that names only :667 passes the honesty labels, not the capability", () => {
+  const root = d1Root();
+  const dir = d1Dir(root, (r) => [edgeAt(r, FX.pmCc, 667, { callee_name: "Print" })]);
+  const result = grade(dir);
+  assert.strictEqual(find(result.checks, "D1-H6").verdict, V.PASS);
+  assert.strictEqual(find(result.checks, "D1-C6").verdict, V.UNMET);
+  assert.strictEqual(find(result.checks, "D1-C6").reason, "identity-not-proven-at-667");
+});
+
+test("A-3: a candidate with an Exact precision label fails the honesty labels", () => {
+  const root = d1Root();
+  const dir = d1Dir(root, (r) => [edgeAt(r, FX.pmCc, 667, { callee_name: "Print", precision: "Exact" })]);
+  const check = find(grade(dir).checks, "D1-H6");
+  assert.strictEqual(check.verdict, V.FAIL);
+  assert.strictEqual(check.reason, "candidate-mislabelled");
+});
+
+test("A-3: a candidate that names a callee fails the honesty labels", () => {
+  const root = d1Root();
+  const dir = d1Dir(root, (r, anchor) => [edgeAt(r, FX.pmCc, 667, { callee_name: "Print", callee: anchor })]);
+  const check = find(grade(dir).checks, "D1-H6");
+  assert.strictEqual(check.verdict, V.FAIL);
+  assert.strictEqual(check.reason, "candidate-names-a-callee");
+});
+
+test("A-3: a candidate set that does not declare itself partial fails the honesty labels", () => {
+  const root = d1Root();
+  const anchor = defAt(root, FX.pmCc, 118);
+  const dir = writeQueries({
+    "d1-1-search-Print": searchNamingRoot(root),
+    "d1-5-callers-PrintDef": JSON.stringify({
+      anchor: { path: FX.pmCc, line: 118, endpoint: anchor },
+      edges: [edgeAt(root, FX.pmCc, 667, { callee_name: "Print" })],
+      completeness: { status: "complete", unresolved: [] },
+    }),
+  });
+  const check = find(grade(dir).checks, "D1-H6");
+  assert.strictEqual(check.verdict, V.FAIL);
+  assert.strictEqual(check.reason, "candidate-set-not-declared-partial");
+});
+
+test("A-3: without any candidate the honesty labels have nothing to inspect", () => {
+  const root = d1Root();
+  const dir = d1Dir(root, (r, anchor) => [proven(r, FX.pmCc, 667, anchor, { callee_name: "Print" })]);
+  const check = find(grade(dir).checks, "D1-H6");
+  assert.strictEqual(check.verdict, V.UNAVAILABLE);
+  assert.strictEqual(check.reason, "no-candidate-returned");
 });
 
 // --- D2-C6: the three construction sites, proven to the class
