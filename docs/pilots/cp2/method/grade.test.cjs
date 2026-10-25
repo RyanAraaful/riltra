@@ -439,3 +439,307 @@ test("the classified error check still requires a classified error", () => {
   assert.strictEqual(check.verdict, V.FAIL);
   assert.strictEqual(check.reason, "no-classified-error");
 });
+
+// --- source-grounded capability predicates (correction of 2026-10-25) ---------
+//
+// Each fixture is a small source tree with known lines. The search output names
+// the tree as its root, as a real run does, so a span can be placed on a line.
+// The rule under test: a capability PASS needs a proven relation at the frozen
+// site, and a line-based check reads the source instead of comparing a byte
+// offset with a line number.
+
+const FX = {
+  pmCc: "colmap/src/colmap/mvs/patch_match.cc",
+  pmH: "colmap/src/colmap/mvs/patch_match.h",
+  pmCuda: "colmap/src/colmap/mvs/patch_match_cuda.cu",
+  pmCudaH: "colmap/src/colmap/mvs/patch_match_cuda.h",
+  fusionCc: "colmap/src/colmap/mvs/fusion.cc",
+  optH: "colmap/src/colmap/mvs/patch_match_options.h",
+  optCc: "colmap/src/colmap/mvs/patch_match_options.cc",
+  optMgrCc: "colmap/src/colmap/controllers/option_manager.cc",
+  mvsCc: "colmap/src/colmap/exe/mvs.cc",
+  autoCc: "colmap/src/colmap/controllers/automatic_reconstruction.cc",
+  denseCc: "colmap/src/colmap/ui/dense_reconstruction_widget.cc",
+};
+
+// A source tree: each file maps 1-based line numbers to text; other lines are
+// blank. Returns the root directory.
+function makeSnapshot(files) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "cp2-src-"));
+  for (const [rel, lines] of Object.entries(files)) {
+    const last = Math.max(...Object.keys(lines).map(Number));
+    const text = [];
+    for (let n = 1; n <= last; n++) text.push(lines[n] === undefined ? "" : lines[n]);
+    fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
+    fs.writeFileSync(path.join(root, rel), text.join("\n") + "\n");
+  }
+  return root;
+}
+
+// The byte offset at which a 1-based line starts, as Riltra reports spans.
+function lineStart(root, rel, line) {
+  const bytes = fs.readFileSync(path.join(root, rel));
+  let offset = 0;
+  for (let n = 1; n < line; n++) offset = bytes.indexOf(0x0a, offset) + 1;
+  return offset;
+}
+
+// A syntactic definition endpoint that starts on `line` of `rel`.
+function defAt(root, rel, line) {
+  return { type: "syntax_def", path: rel, byte_start: lineStart(root, rel, line), byte_end: lineStart(root, rel, line) + 1 };
+}
+
+// An edge whose caller starts on `line` of `rel`. The default is a candidate.
+function edgeAt(root, rel, line, fields) {
+  const start = lineStart(root, rel, line);
+  return Object.assign(
+    { kind: "POTENTIAL_CALL", precision: "Heuristic", unresolved: "dynamic", callee: null,
+      caller_path: rel, caller_span: [start, start + 4], callee_name: "X" },
+    fields || {},
+  );
+}
+
+// A relation the tool proved, from `line` of `rel` to `callee`.
+function proven(root, rel, line, callee, fields) {
+  return edgeAt(root, rel, line, Object.assign(
+    { kind: "CALLS", precision: "Exact", unresolved: null, callee: callee }, fields || {}));
+}
+
+// The search output that names the snapshot root, written as a real run writes it.
+function searchNamingRoot(root) {
+  return JSON.stringify({ root: "\\\\?\\" + root, results: [], total: 0 });
+}
+
+// --- D1-C6: the identity of the true reference at :667
+
+function d1Root() {
+  return makeSnapshot({
+    [FX.pmCc]: { 118: "void PatchMatch::Problem::Print() const {", 667: "  problem.Print();", 668: "  patch_match_options.Print();" },
+    [FX.fusionCc]: { 144: "  options_.Print();" },
+  });
+}
+
+function d1Dir(root, buildEdges, withRoot) {
+  const anchor = defAt(root, FX.pmCc, 118);
+  const files = {
+    "d1-5-callers-PrintDef": JSON.stringify({ anchor: { path: FX.pmCc, line: 118, endpoint: anchor }, edges: buildEdges(root, anchor) }),
+  };
+  if (withRoot !== false) files["d1-1-search-Print"] = searchNamingRoot(root);
+  return writeQueries(files);
+}
+
+test("D1-C6 passes only when the reference at :667 is proven to the anchored definition", () => {
+  const root = d1Root();
+  const dir = d1Dir(root, (r, anchor) => [
+    proven(r, FX.pmCc, 667, anchor, { callee_name: "Print" }),
+    edgeAt(r, FX.pmCc, 668, { callee_name: "Print" }),
+  ]);
+  const check = find(grade(dir).checks, "D1-C6");
+  assert.strictEqual(check.verdict, V.PASS);
+  assert.strictEqual(check.evidence.proven_at_667, true);
+});
+
+test("D1-C6 does not pass on name candidates alone", () => {
+  const root = d1Root();
+  const dir = d1Dir(root, (r) => [
+    edgeAt(r, FX.pmCc, 667, { callee_name: "Print" }),
+    edgeAt(r, FX.pmCc, 668, { callee_name: "Print" }),
+    edgeAt(r, FX.fusionCc, 144, { callee_name: "Print" }),
+  ]);
+  const check = find(grade(dir).checks, "D1-C6");
+  assert.strictEqual(check.verdict, V.UNMET);
+  assert.strictEqual(check.reason, "identity-not-proven-at-667");
+});
+
+test("D1-C6 fails when another reference is proven to the same definition", () => {
+  const root = d1Root();
+  const dir = d1Dir(root, (r, anchor) => [
+    proven(r, FX.pmCc, 667, anchor, { callee_name: "Print" }),
+    proven(r, FX.pmCc, 668, anchor, { callee_name: "Print" }),
+  ]);
+  const check = find(grade(dir).checks, "D1-C6");
+  assert.strictEqual(check.verdict, V.FAIL);
+  assert.strictEqual(check.reason, "other-site-proven-to-definition");
+});
+
+test("D1-C6 is UNAVAILABLE without the snapshot source, never decided by a byte offset", () => {
+  const root = d1Root();
+  const dir = d1Dir(root, (r, anchor) => [proven(r, FX.pmCc, 667, anchor, { callee_name: "Print" })], false);
+  const check = find(grade(dir).checks, "D1-C6");
+  assert.strictEqual(check.verdict, V.UNAVAILABLE);
+  assert.strictEqual(check.reason, "source-unavailable");
+});
+
+// --- D2-C6: the three construction sites, proven to the class
+
+function d2Root() {
+  return makeSnapshot({
+    [FX.pmH]: { 129: "class PatchMatchController : public BaseController {" },
+    [FX.mvsCc]: { 271: "  mvs::PatchMatchController controller(options," },
+    [FX.autoCc]: { 431: "    mvs::PatchMatchController patch_match_controller(" },
+    [FX.denseCc]: {
+      397: "      std::make_unique<ControllerThread<mvs::PatchMatchController>>(",
+      398: "          std::make_shared<mvs::PatchMatchController>(",
+    },
+  });
+}
+
+function d2Dir(root, buildEdges) {
+  const classDef = defAt(root, FX.pmH, 129);
+  return writeQueries({
+    "d1-1-search-Print": searchNamingRoot(root),
+    "p2-callers-class-PatchMatch": JSON.stringify({
+      anchor: { path: FX.pmH, line: 129, endpoint: classDef },
+      edges: buildEdges(root, classDef),
+    }),
+  });
+}
+
+test("D2-C6 passes only when all three construction sites are proven to the class", () => {
+  const root = d2Root();
+  const dir = d2Dir(root, (r, cls) => [
+    proven(r, FX.mvsCc, 271, cls, { callee_name: "PatchMatchController" }),
+    proven(r, FX.autoCc, 431, cls, { callee_name: "PatchMatchController" }),
+    proven(r, FX.denseCc, 398, cls, { callee_name: "PatchMatchController" }),
+  ]);
+  assert.strictEqual(find(grade(dir).checks, "D2-C6").verdict, V.PASS);
+});
+
+test("D2-C6 does not pass on candidates at the three construction sites", () => {
+  const root = d2Root();
+  const dir = d2Dir(root, (r) => [
+    edgeAt(r, FX.mvsCc, 271, { callee_name: "PatchMatchController" }),
+    edgeAt(r, FX.autoCc, 431, { callee_name: "PatchMatchController" }),
+    edgeAt(r, FX.denseCc, 398, { callee_name: "PatchMatchController", unresolved: "factory-template-argument" }),
+  ]);
+  const check = find(grade(dir).checks, "D2-C6");
+  assert.strictEqual(check.verdict, V.UNMET);
+  assert.strictEqual(check.reason, "candidate-only-attribution");
+});
+
+test("D2-C6 names a missing construction site instead of passing on file presence", () => {
+  const root = d2Root();
+  const dir = d2Dir(root, (r, cls) => [
+    proven(r, FX.autoCc, 431, cls, { callee_name: "PatchMatchController" }),
+    proven(r, FX.denseCc, 398, cls, { callee_name: "PatchMatchController" }),
+  ]);
+  const check = find(grade(dir).checks, "D2-C6");
+  assert.strictEqual(check.verdict, V.UNMET);
+  assert.strictEqual(check.reason, "construction-sites-not-attributed");
+});
+
+// --- D3-C5: the frozen chain, hop by hop
+
+function d3Root() {
+  return makeSnapshot({
+    [FX.pmCc]: {
+      191: "void PatchMatch::Run() {",
+      197: "  patch_match_cuda_->Run();",
+      268: "      thread_pool_->AddTask(&PatchMatchController::ProcessProblem,",
+      671: "  patch_match.Run();",
+    },
+    [FX.pmCuda]: { 1326: "void PatchMatchCuda::Run() {" },
+    [FX.pmCudaH]: { 54: "  void Run();" },
+  });
+}
+
+function d3Dir(root, edges) {
+  return writeQueries({
+    "d1-1-search-Print": searchNamingRoot(root),
+    "d3-1-trace-depth4": JSON.stringify({ disclaimer: "plausible-path-not-execution", paths: [{ edges: edges }] }),
+  });
+}
+
+test("D3-C5 passes on the frozen chain: a candidate dispatch, then two proven direct calls", () => {
+  const root = d3Root();
+  const dir = d3Dir(root, [
+    edgeAt(root, FX.pmCc, 268, { callee_name: "ProcessProblem" }),
+    proven(root, FX.pmCc, 671, defAt(root, FX.pmCc, 191), { callee_name: "Run" }),
+    proven(root, FX.pmCc, 197, defAt(root, FX.pmCuda, 1326), { callee_name: "Run" }),
+  ]);
+  assert.strictEqual(find(grade(dir).checks, "D3-C5").verdict, V.PASS);
+});
+
+test("D3-C5 does not pass on three proven edges that are not the frozen chain", () => {
+  const root = d3Root();
+  const dir = d3Dir(root, [
+    proven(root, FX.pmCc, 191, defAt(root, FX.pmCc, 191), { callee_name: "Run" }),
+    proven(root, FX.pmCc, 671, defAt(root, FX.pmCc, 191), { callee_name: "Run" }),
+    proven(root, FX.pmCc, 197, defAt(root, FX.pmCc, 191), { callee_name: "Run" }),
+  ]);
+  const check = find(grade(dir).checks, "D3-C5");
+  assert.strictEqual(check.verdict, V.UNMET);
+  assert.strictEqual(check.reason, "path-not-frozen-chain");
+});
+
+// --- D4-C5: the six frozen sites of max_triangulation_angle
+
+function d4Root() {
+  return makeSnapshot({
+    [FX.optH]: { 56: "  double max_triangulation_angle = -1.0f;" },
+    [FX.optCc]: {
+      58: "  PrintOption(max_triangulation_angle);",
+      91: "  if (max_triangulation_angle >= 0.0f) {",
+      92: "    CHECK_OPTION_LE(max_triangulation_angle, 180.0f);",
+      93: "    CHECK_OPTION_LE(min_triangulation_angle, max_triangulation_angle);",
+    },
+    [FX.pmCc]: {
+      361: "  const bool has_max_triangulation_angle =",
+      362: "      options_.max_triangulation_angle >= 0.0f;",
+      444: "      (!has_max_triangulation_angle ||",
+    },
+    [FX.optMgrCc]: { 1019: "                   &patch_match_stereo->max_triangulation_angle);" },
+  });
+}
+
+function d4Dir(root, buildEdges) {
+  const anchor = defAt(root, FX.optH, 56);
+  return writeQueries({
+    "d1-1-search-Print": searchNamingRoot(root),
+    "d4-1-impact-member": JSON.stringify({
+      verdict: "UNKNOWN",
+      anchor: { kind: "syntax-fallback", path: FX.optH, line: 56, col: 10, endpoint: anchor },
+      completeness: { status: "partial", unresolved: ["graph-completeness-unproven"] },
+      disclaimer: "plausible-impact-not-execution",
+      paths: [{ edges: buildEdges(root, anchor) }],
+      visits: { nodes: 1, edges: 0 },
+    }),
+  });
+}
+
+test("D4-C5 passes when each frozen site has a proven edge on its lines and the declaration is the anchor", () => {
+  const root = d4Root();
+  const dir = d4Dir(root, (r, anchor) => [
+    proven(r, FX.optCc, 58, anchor, { kind: "REFERENCES", callee_name: "max_triangulation_angle" }),
+    proven(r, FX.optCc, 92, anchor, { kind: "REFERENCES", callee_name: "max_triangulation_angle" }),
+    proven(r, FX.pmCc, 362, anchor, { kind: "REFERENCES", callee_name: "max_triangulation_angle" }),
+    proven(r, FX.pmCc, 444, anchor, { kind: "REFERENCES", callee_name: "max_triangulation_angle" }),
+    proven(r, FX.optMgrCc, 1019, anchor, { kind: "REFERENCES", callee_name: "max_triangulation_angle" }),
+  ]);
+  assert.strictEqual(find(grade(dir).checks, "D4-C5").verdict, V.PASS);
+});
+
+test("D4-C5 does not pass on one unrelated affected row", () => {
+  const root = d4Root();
+  const dir = d4Dir(root, (r, anchor) => [
+    proven(r, FX.pmCc, 362, anchor, { kind: "REFERENCES", callee_name: "max_triangulation_angle" }),
+  ]);
+  const check = find(grade(dir).checks, "D4-C5");
+  assert.strictEqual(check.verdict, V.UNMET);
+  assert.strictEqual(check.reason, "affected-set-incomplete");
+});
+
+test("D4-C5 does not count a candidate on a frozen site as covered", () => {
+  const root = d4Root();
+  const dir = d4Dir(root, (r, anchor) => [
+    edgeAt(r, FX.optCc, 58, { callee_name: "PrintOption" }),
+    proven(r, FX.optCc, 92, anchor, { kind: "REFERENCES", callee_name: "max_triangulation_angle" }),
+    proven(r, FX.pmCc, 362, anchor, { kind: "REFERENCES", callee_name: "max_triangulation_angle" }),
+    proven(r, FX.pmCc, 444, anchor, { kind: "REFERENCES", callee_name: "max_triangulation_angle" }),
+    proven(r, FX.optMgrCc, 1019, anchor, { kind: "REFERENCES", callee_name: "max_triangulation_angle" }),
+  ]);
+  const check = find(grade(dir).checks, "D4-C5");
+  assert.strictEqual(check.verdict, V.UNMET);
+  assert.strictEqual(check.reason, "affected-set-incomplete");
+  assert.strictEqual(check.evidence.covered.find((c) => c.site === "print").covered, false);
+});

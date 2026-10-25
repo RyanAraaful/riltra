@@ -17,7 +17,16 @@
 // terminus is unavailable because CUDA files are not indexed, not because the
 // source changed).
 //
+// The line-based capability checks read the source the queries ran on. The
+// search output names the snapshot root, and a span (a byte offset in Riltra's
+// output) is mapped to its line there. A capability PASS needs a proven
+// relation (CALLS or REFERENCES, Exact) at the frozen site: a name candidate
+// never passes one. The one candidate a frozen criterion allows is the
+// indirect thread-pool dispatch (B.2, B.3), which is never CALLS.
+//
 // Usage: node grade.cjs <query-dir> [out-file]
+// CP2_SOURCE_ROOT=<snapshot> overrides the source root (for a re-grade of an
+// archived output, whose search root is redacted).
 "use strict";
 
 const fs = require("node:fs");
@@ -90,6 +99,77 @@ function isCandidate(edge) {
   return edge && (edge.kind === "POTENTIAL_CALL" || edge.kind === "IMPORTS");
 }
 
+// A relation the tool proved. This mirrors the rule the impact traversal applies
+// before it follows an edge (crates/cli/src/edges.rs, traverse_impact): a CALLS
+// or REFERENCES edge with Exact precision and no unresolved reason.
+function isProven(edge) {
+  return !!edge && (edge.kind === "CALLS" || edge.kind === "REFERENCES") &&
+    edge.precision === "Exact" && edge.unresolved == null;
+}
+
+// Two endpoints name one definition: the same SCIP symbol, or the same
+// syntactic definition span in the same file.
+function sameDefinition(a, b) {
+  if (!a || !b || a.type !== b.type) return false;
+  if (a.symbol_uri || b.symbol_uri) return a.symbol_uri === b.symbol_uri;
+  return a.path === b.path && a.byte_start === b.byte_start;
+}
+
+// The frozen MMSP files that the line-based checks name.
+const FILES = {
+  patchMatchCc: "colmap/src/colmap/mvs/patch_match.cc",
+  patchMatchCuda: "colmap/src/colmap/mvs/patch_match_cuda.cu",
+  patchMatchCudaH: "colmap/src/colmap/mvs/patch_match_cuda.h",
+  fusionCc: "colmap/src/colmap/mvs/fusion.cc",
+  optionsH: "colmap/src/colmap/mvs/patch_match_options.h",
+  optionsCc: "colmap/src/colmap/mvs/patch_match_options.cc",
+  optionManagerCc: "colmap/src/colmap/controllers/option_manager.cc",
+  mvsCc: "colmap/src/colmap/exe/mvs.cc",
+  autoCc: "colmap/src/colmap/controllers/automatic_reconstruction.cc",
+  denseCc: "colmap/src/colmap/ui/dense_reconstruction_widget.cc",
+};
+
+// ------------------------------------------------------- source grounding
+//
+// Riltra reports spans as byte offsets from the start of a file, and the frozen
+// criteria name lines. A check that needs a line reads the file from the
+// snapshot that the search queries ran against (their `root`). Without that
+// file the check is UNAVAILABLE: a byte offset is never compared with a line.
+
+// The snapshot root without the Windows extended-length prefix, or null.
+function snapshotRootOf(ctx) {
+  const s = ctx.docs["d1-1-search-Print"];
+  const root = s && s.available && s.doc && typeof s.doc.root === "string" ? s.doc.root : null;
+  return root ? root.replace(/^\\\\\?\\/, "") : null;
+}
+
+const sourceCache = new Map();
+function sourceBytes(root, rel) {
+  const key = root + "\n" + rel;
+  if (!sourceCache.has(key)) {
+    const file = path.join(root, rel);
+    sourceCache.set(key, fs.existsSync(file) ? fs.readFileSync(file) : null);
+  }
+  return sourceCache.get(key);
+}
+
+// The 1-based line that holds a byte offset, with that line's text.
+function lineAt(root, rel, byteOffset) {
+  const bytes = root && typeof rel === "string" && Number.isInteger(byteOffset) ? sourceBytes(root, rel) : null;
+  if (!bytes || byteOffset < 0 || byteOffset > bytes.length) return null;
+  let line = 1;
+  let start = 0;
+  for (let i = 0; i < byteOffset; i++) {
+    if (bytes[i] === 0x0a) {
+      line += 1;
+      start = i + 1;
+    }
+  }
+  let end = bytes.indexOf(0x0a, start);
+  if (end < 0) end = bytes.length;
+  return { line, text: bytes.subarray(start, end).toString("utf8") };
+}
+
 // A reason that the tool actually reported. "missing-output" and
 // "unclassified-error" mean nothing was observed, so a check that needs an
 // observation must not pass on them.
@@ -117,6 +197,23 @@ function gradeChecks(ctx) {
   const checks = [];
   const add = (id, layer, criterion, verdict, reason, evidence) =>
     checks.push(makeCheck(id, layer, criterion, verdict, reason, evidence));
+
+  // Source grounding for the line-based checks (see lineAt above). A test may
+  // set ctx.sourceRoot; a run takes the root from the search output.
+  const root = ctx.sourceRoot !== undefined ? ctx.sourceRoot : snapshotRootOf(ctx);
+  const at = (rel, byteOffset) => lineAt(root, rel, byteOffset);
+  // Where an edge's caller sits: its file, line and line text. Null without source.
+  const siteOf = (edge) => {
+    const where = edge && Array.isArray(edge.caller_span) ? at(edge.caller_path, edge.caller_span[0]) : null;
+    return where ? Object.assign({ path: edge.caller_path }, where) : null;
+  };
+  const rowsOf = (doc) => edgesOf(doc).map((edge) => ({ edge, site: siteOf(edge) }));
+  const unsourced = (rows) => rows.some((r) => !r.site);
+  // Whether a definition endpoint starts on the given line of the given file.
+  const definedAt = (endpoint, rel, line) => {
+    const where = endpoint && endpoint.path === rel ? at(rel, endpoint.byte_start) : null;
+    return !!where && where.line === line;
+  };
 
   // Every reference edge returned by ANY workflow query must be a candidate.
   const referenceQueries = [
@@ -199,18 +296,38 @@ function gradeChecks(ctx) {
       { repo: d.repo, freshness: fresh, reasons: d.freshness ? d.freshness.reasons : undefined });
   }
 
-  // capability: the C++ method identity must be resolvable
+  // capability: the reference set resolves the identity of the true reference.
+  // Frozen D.1 #6: the answer separates patch_match.cc:667 from :668 and
+  // fusion.cc:144. The reference at :667 must be a proven edge to the anchored
+  // definition, and :668 or :144 must not be a proven edge to it. A candidate
+  // name match at :667 is not identity.
   const cPrint = ctx.docs["d1-5-callers-PrintDef"];
+  const d1Criterion = "the reference set resolves the C++ method identity (separates patch_match.cc:667 from :668 and fusion.cc:144)";
   if (!cPrint.available) {
-    add("D1-C6", "capability", "the reference set resolves the C++ method identity (separates patch_match.cc:667 from :668 and fusion.cc:144)",
-      V.UNAVAILABLE, cPrint.reason, {});
+    add("D1-C6", "capability", d1Criterion, V.UNAVAILABLE, cPrint.reason, {});
   } else {
-    const sites = edgesOf(cPrint.doc).map((e) => e.caller_path + ":" + (e.caller_span ? e.caller_span[0] : "?"));
-    const distinguished = sites.some((s) => s.includes("patch_match.cc:667") || s.includes("patch_match.cc:668")) &&
-      sites.some((s) => s.includes("fusion.cc:144"));
-    add("D1-C6", "capability", "the reference set resolves the C++ method identity (separates patch_match.cc:667 from :668 and fusion.cc:144)",
-      distinguished ? V.PASS : V.UNMET, distinguished ? null : "reference-set-empty-or-unresolved",
-      { edges_returned: sites.length, sites, anchor: cPrint.doc.anchor ? cPrint.doc.anchor.path + ":" + cPrint.doc.anchor.line : null });
+    const anchor = cPrint.doc.anchor ? cPrint.doc.anchor.endpoint : null;
+    const rows = rowsOf(cPrint.doc);
+    const onLine = (rel, line) => rows.filter((r) => r.site && r.site.path === rel && r.site.line === line);
+    const trueRef = onLine(FILES.patchMatchCc, 667).filter((r) => r.site.text.includes("Print"));
+    const otherRef = [...onLine(FILES.patchMatchCc, 668), ...onLine(FILES.fusionCc, 144)];
+    const proven = (r) => isProven(r.edge) && sameDefinition(r.edge.callee, anchor);
+    const evidence = {
+      edges_returned: rows.length,
+      sites: rows.map((r) => (r.site ? r.site.path + ":" + r.site.line : null)),
+      proven_at_667: trueRef.some(proven),
+      proven_elsewhere: otherRef.some(proven),
+    };
+    if (unsourced(rows)) {
+      add("D1-C6", "capability", d1Criterion, V.UNAVAILABLE, "source-unavailable", evidence);
+    } else if (otherRef.some(proven)) {
+      add("D1-C6", "capability", d1Criterion, V.FAIL, "other-site-proven-to-definition", evidence);
+    } else if (trueRef.some(proven)) {
+      add("D1-C6", "capability", d1Criterion, V.PASS, null, evidence);
+    } else {
+      add("D1-C6", "capability", d1Criterion, V.UNMET,
+        trueRef.length ? "identity-not-proven-at-667" : "site-667-not-returned", evidence);
+    }
   }
 
   // ---- D.2 callers and callees -------------------------------------------
@@ -293,19 +410,42 @@ function gradeChecks(ctx) {
     }
   }
 
-  // capability: the three external construction sites attributed to the class
+  // capability: the three external construction sites are attributed to the
+  // class by a proven edge. Frozen D.2 #5 requires the callers to be identity-
+  // resolved, so a candidate at the right line is not attribution.
   const p2 = ctx.docs["p2-callers-class-PatchMatch"];
+  const d2Criterion = "the three external construction sites are attributed to the class";
   if (!p2.available) {
-    add("D2-C6", "capability", "the three external construction sites are attributed to the class",
-      V.UNAVAILABLE, p2.reason, {});
+    add("D2-C6", "capability", d2Criterion, V.UNAVAILABLE, p2.reason, {});
   } else {
-    const callers = edgesOf(p2.doc).map((e) => e.caller_path);
-    const exe = callers.some((p) => p && p.includes("exe/mvs.cc"));
-    const auto = callers.some((p) => p && p.includes("automatic_reconstruction.cc"));
-    const dense = callers.some((p) => p && p.includes("dense_reconstruction_widget"));
-    add("D2-C6", "capability", "the three external construction sites are attributed to the class",
-      exe && auto && dense ? V.PASS : V.UNMET, exe && auto && dense ? null : "construction-sites-not-attributed",
-      { class_anchor_edges: callers, sites_expected: 3, sites_attributed: [exe, auto, dense].filter(Boolean).length });
+    const classDef = p2.doc.anchor ? p2.doc.anchor.endpoint : null;
+    const rows = rowsOf(p2.doc);
+    // The construction lines of frozen B.2. The factory site is the argument of
+    // make_shared / make_unique on line 398.
+    const expected = [
+      { site: "exe/mvs.cc:271", path: FILES.mvsCc, lines: [271, 271] },
+      { site: "automatic_reconstruction.cc:431", path: FILES.autoCc, lines: [431, 431] },
+      { site: "dense_reconstruction_widget.cc:397-398", path: FILES.denseCc, lines: [397, 398] },
+    ];
+    const sites = expected.map((s) => {
+      const hits = rows.filter((r) => r.site && r.site.path === s.path &&
+        r.site.line >= s.lines[0] && r.site.line <= s.lines[1] && r.site.text.includes("PatchMatchController"));
+      return {
+        site: s.site,
+        present: hits.length > 0,
+        proven: hits.some((r) => isProven(r.edge) && sameDefinition(r.edge.callee, classDef)),
+      };
+    });
+    const evidence = { sites, sites_expected: 3, class_callers_returned: rows.length };
+    if (unsourced(rows)) {
+      add("D2-C6", "capability", d2Criterion, V.UNAVAILABLE, "source-unavailable", evidence);
+    } else if (sites.some((s) => !s.present)) {
+      add("D2-C6", "capability", d2Criterion, V.UNMET, "construction-sites-not-attributed", evidence);
+    } else if (sites.some((s) => !s.proven)) {
+      add("D2-C6", "capability", d2Criterion, V.UNMET, "candidate-only-attribution", evidence);
+    } else {
+      add("D2-C6", "capability", d2Criterion, V.PASS, null, evidence);
+    }
   }
 
   // ---- D.3 trace a call path ---------------------------------------------
@@ -324,10 +464,39 @@ function gradeChecks(ctx) {
     add("D3-H3", "honesty", "the path does not claim a device-side definition",
       mentionsCu ? V.FAIL : V.PASS, mentionsCu ? "device-side-definition-claimed" : null,
       { mentions_cuda_source: mentionsCu, paths: pathsOf(tr.doc).length });
-    const maxHops = pathsOf(tr.doc).reduce((m, p) => Math.max(m, Array.isArray(p.edges) ? p.edges.length : 0), 0);
-    add("D3-C5", "capability", "the path spans the full frozen chain (4 nodes, 3 edges, including the indirect dispatch)",
-      maxHops >= 3 ? V.PASS : V.UNMET, maxHops >= 3 ? null : "trace-does-not-extend-beyond-the-first-hop",
-      { max_hops_returned: maxHops, paths: pathsOf(tr.doc).length, frozen_chain_nodes: 4, frozen_chain_edges: 3 });
+    const paths = pathsOf(tr.doc);
+    const maxHops = paths.reduce((m, p) => Math.max(m, Array.isArray(p.edges) ? p.edges.length : 0), 0);
+    const d3Criterion = "the path spans the full frozen chain (4 nodes, 3 edges, including the indirect dispatch)";
+    const evidence = { max_hops_returned: maxHops, paths: paths.length, frozen_chain_nodes: 4, frozen_chain_edges: 3 };
+    if (maxHops < 3) {
+      add("D3-C5", "capability", d3Criterion, V.UNMET, "trace-does-not-extend-beyond-the-first-hop", evidence);
+    } else {
+      // Frozen B.3, hop by hop. Hop 1 is the indirect ThreadPool dispatch of
+      // B.2: its address-of reference is a candidate at most, never CALLS. Hops
+      // 2 and 3 are direct calls, so each must be a proven edge that calls from
+      // the cited line and whose callee is the cited definition.
+      const calledFrom = (e, rel, lines, token) => {
+        const s = siteOf(e);
+        return !!s && s.path === rel && lines.includes(s.line) && s.text.includes(token);
+      };
+      const hop1 = (e) => e.callee_name === "ProcessProblem" && e.kind === "POTENTIAL_CALL" &&
+        calledFrom(e, FILES.patchMatchCc, [268, 292, 309], "ProcessProblem");
+      const hop2 = (e) => isProven(e) && calledFrom(e, FILES.patchMatchCc, [671], "Run") &&
+        definedAt(e.callee, FILES.patchMatchCc, 191);
+      const hop3 = (e) => isProven(e) && calledFrom(e, FILES.patchMatchCc, [197], "Run") &&
+        (definedAt(e.callee, FILES.patchMatchCuda, 1326) || definedAt(e.callee, FILES.patchMatchCudaH, 54));
+      const rows = paths.flatMap((p) => (Array.isArray(p.edges) ? p.edges : []))
+        .map((edge) => ({ edge, site: siteOf(edge) }));
+      const spanned = paths.some((p) => Array.isArray(p.edges) && p.edges.length >= 3 &&
+        hop1(p.edges[0]) && hop2(p.edges[1]) && hop3(p.edges[2]));
+      evidence.chain_matched = spanned;
+      if (unsourced(rows)) {
+        add("D3-C5", "capability", d3Criterion, V.UNAVAILABLE, "source-unavailable", evidence);
+      } else {
+        add("D3-C5", "capability", d3Criterion, spanned ? V.PASS : V.UNMET,
+          spanned ? null : "path-not-frozen-chain", evidence);
+      }
+    }
   }
 
   // The CUDA terminus: the tool must fail cleanly, and the reason must be
@@ -382,9 +551,46 @@ function gradeChecks(ctx) {
       { mentions_option_as_callee: wrong, paths: pathsOf(d).length, bridges: Array.isArray(d.bridges) ? d.bridges.length : 0,
         note: "the whole answer is inspected; the empty path set is the pre-registered pilot shape (CP1 D.4.5) and the answer states that it is not coverage proof" });
     const paths = pathsOf(d);
-    add("D4-C5", "capability", "the affected set contains the declaration, print, validation, read/filter and CLI binding sites",
-      paths.length > 0 ? V.PASS : V.UNMET, paths.length > 0 ? null : "affected-set-empty",
-      { paths: paths.length, visits: d.visits, note: "an empty affected set is reported as UNKNOWN, never as proof of safety" });
+    const d4Criterion = "the affected set contains the declaration, print, validation, read/filter and CLI binding sites";
+    // Frozen D.4 #5. The declaration is the anchor and is covered by its own
+    // source line. Each other site needs a proven edge that sits on its frozen
+    // lines and names the option, so a name match or an unrelated path cannot
+    // pass.
+    const TOKEN = "max_triangulation_angle";
+    const frozenSites = [
+      { site: "print", path: FILES.optionsCc, lines: [58, 58] },
+      { site: "validation", path: FILES.optionsCc, lines: [91, 93] },
+      { site: "read", path: FILES.patchMatchCc, lines: [361, 366] },
+      { site: "filter", path: FILES.patchMatchCc, lines: [443, 447] },
+      { site: "cli-binding", path: FILES.optionManagerCc, lines: [1018, 1019] },
+    ];
+    const rows = paths.flatMap((p) => (Array.isArray(p.edges) ? p.edges : []))
+      .map((edge) => ({ edge, site: siteOf(edge) }));
+    const anchorSite = d.anchor && d.anchor.endpoint ? at(d.anchor.path, d.anchor.endpoint.byte_start) : null;
+    const declared = !!anchorSite && d.anchor.path === FILES.optionsH &&
+      anchorSite.line === 56 && anchorSite.text.includes(TOKEN);
+    const covered = frozenSites.map((s) => ({
+      site: s.site,
+      covered: rows.some((r) => r.site && r.site.path === s.path &&
+        r.site.line >= s.lines[0] && r.site.line <= s.lines[1] &&
+        r.site.text.includes(TOKEN) && isProven(r.edge)),
+    }));
+    const evidence = {
+      paths: paths.length,
+      visits: d.visits,
+      declaration: declared,
+      covered,
+      note: "an empty affected set is reported as UNKNOWN, never as proof of safety",
+    };
+    if (paths.length === 0) {
+      add("D4-C5", "capability", d4Criterion, V.UNMET, "affected-set-empty", evidence);
+    } else if (unsourced(rows) || (d.anchor && d.anchor.endpoint && !anchorSite)) {
+      add("D4-C5", "capability", d4Criterion, V.UNAVAILABLE, "source-unavailable", evidence);
+    } else if (declared && covered.every((c) => c.covered)) {
+      add("D4-C5", "capability", d4Criterion, V.PASS, null, evidence);
+    } else {
+      add("D4-C5", "capability", d4Criterion, V.UNMET, "affected-set-incomplete", evidence);
+    }
   }
 
   // ---- D.5 natural-language question via OpenCode/MCP ---------------------
@@ -492,7 +698,10 @@ function grade(queryDir, options) {
   const docs = {};
   const cudaTargets = opts.cudaTargets || ["d3-2-trace-to-cuda"];
   for (const name of names) docs[name] = loadQuery(queryDir, name);
-  const checks = gradeChecks({ docs, mcpSmoke: opts.mcpSmoke, opencodeSession: opts.opencodeSession, cudaTargets: cudaTargets });
+  const checks = gradeChecks({
+    docs, mcpSmoke: opts.mcpSmoke, opencodeSession: opts.opencodeSession, cudaTargets: cudaTargets,
+    sourceRoot: opts.sourceRoot,
+  });
   const summary = summarize(checks);
   return { generated_at: new Date().toISOString(), query_dir: queryDir, summary, checks };
 }
@@ -509,6 +718,9 @@ if (require.main === module) {
   if (process.env.CP2_OPENCODE_SESSION) {
     try { opts.opencodeSession = JSON.parse(fs.readFileSync(process.env.CP2_OPENCODE_SESSION, "utf8")); } catch (e) { opts.opencodeSession = null; }
   }
+  // An archived output names a redacted snapshot root, so a re-grade names the
+  // snapshot here. Without it the source comes from the search output's root.
+  if (process.env.CP2_SOURCE_ROOT) opts.sourceRoot = process.env.CP2_SOURCE_ROOT;
   const result = grade(queryDir, opts);
   if (outFile) fs.writeFileSync(outFile, JSON.stringify(result, null, 2));
   for (const c of result.checks) {
