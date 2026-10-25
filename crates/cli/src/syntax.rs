@@ -488,21 +488,6 @@ fn push_call(facts: &mut FileFacts, node: tree_sitter::Node, src: &[u8]) {
     let func = node.child_by_field_name("function");
     let callee = func.and_then(|f| node_text(f, src).map(|s| s.to_string()));
     let (span, byte_start, byte_end) = span_of(node);
-    let (callee_span, terminal_span) = match func {
-        Some(f) => {
-            let (cspan, cbs, cbe) = span_of(f);
-            let callee_span = CalleeSpan {
-                start_line: cspan.start_line,
-                start_col: cspan.start_col,
-                end_line: cspan.end_line,
-                end_col: cspan.end_col,
-                byte_start: cbs,
-                byte_end: cbe,
-            };
-            (Some(callee_span), terminal_span(src, cbs, cbe))
-        }
-        None => (None, None),
-    };
     facts.calls.push(Fact {
         kind: "call",
         name: callee,
@@ -510,9 +495,22 @@ fn push_call(facts: &mut FileFacts, node: tree_sitter::Node, src: &[u8]) {
         span,
         byte_start,
         byte_end,
-        callee: callee_span,
-        tcallee: terminal_span,
+        callee: func.map(callee_span_of),
+        tcallee: func.and_then(|f| terminal_span(src, f)),
     });
+}
+
+/// Span and byte range of a node, as a call fact records its callee.
+fn callee_span_of(node: tree_sitter::Node) -> CalleeSpan {
+    let (span, byte_start, byte_end) = span_of(node);
+    CalleeSpan {
+        start_line: span.start_line,
+        start_col: span.start_col,
+        end_line: span.end_line,
+        end_col: span.end_col,
+        byte_start,
+        byte_end,
+    }
 }
 
 /// C++ direct initialization (`T var(args);`) has no `call_expression` node:
@@ -560,16 +558,8 @@ fn push_direct_init_call(facts: &mut FileFacts, node: tree_sitter::Node, src: &[
     let Some((ty, args)) = direct_init_parts(node) else {
         return;
     };
-    let (ty_span, ty_start, ty_end) = span_of(ty);
+    let (ty_span, ty_start, _) = span_of(ty);
     let (args_span, _, args_end) = span_of(args);
-    let callee_span = CalleeSpan {
-        start_line: ty_span.start_line,
-        start_col: ty_span.start_col,
-        end_line: ty_span.end_line,
-        end_col: ty_span.end_col,
-        byte_start: ty_start,
-        byte_end: ty_end,
-    };
     let span = Span {
         start_line: ty_span.start_line,
         start_col: ty_span.start_col,
@@ -583,17 +573,45 @@ fn push_direct_init_call(facts: &mut FileFacts, node: tree_sitter::Node, src: &[
         span,
         byte_start: ty_start,
         byte_end: args_end,
-        callee: Some(callee_span),
-        tcallee: terminal_span(src, ty_start, ty_end),
+        callee: Some(callee_span_of(ty)),
+        tcallee: terminal_span(src, ty),
     });
 }
 
-/// Terminal identifier/property of a callee expression: the text after the
+/// Name node of a callee whose last name carries a template argument list:
+/// `make_shared` in `std::make_shared<T>`, `get` in `obj.get<T>()` and
+/// `ptr->template get<T>()`, `vector` in `std::vector<T> v(n)`. `None` for
+/// every other callee shape, including template arguments that only appear in
+/// a scope (`Foo<T>::create`).
+fn template_name(callee: tree_sitter::Node) -> Option<tree_sitter::Node> {
+    let mut node = callee;
+    loop {
+        match node.kind() {
+            "template_function" | "template_method" | "template_type" => {
+                return node.child_by_field_name("name");
+            }
+            "qualified_identifier" => node = node.child_by_field_name("name")?,
+            "field_expression" => node = node.child_by_field_name("field")?,
+            "dependent_name" => node = node.named_child(0)?,
+            _ => return None,
+        }
+    }
+}
+
+/// Terminal identifier/property of a callee expression. A callee whose last
+/// name has template arguments takes its terminal from the grammar: the text
+/// after a separator would start inside the arguments (`PatchMatchController>`
+/// for `std::make_shared<mvs::PatchMatchController>`) and the arguments are
+/// not part of the called name. Every other callee takes the text after the
 /// last `.`, `::`, or `->` separator. Separators are ASCII, so byte
-/// arithmetic on the UTF-8 source is exact. Returns `None` when no
-/// separator-split terminal exists (plain `foo`) — callers treat the whole
-/// callee as the terminal — or when the range is empty.
-fn terminal_span(src: &[u8], callee_bs: usize, callee_be: usize) -> Option<CalleeSpan> {
+/// arithmetic on the UTF-8 source is exact. Returns `None` when the callee
+/// ends in a separator or is not valid UTF-8; a plain `foo` is its own
+/// terminal.
+fn terminal_span(src: &[u8], callee: tree_sitter::Node) -> Option<CalleeSpan> {
+    if let Some(name) = template_name(callee) {
+        return Some(callee_span_of(name));
+    }
+    let (callee_bs, callee_be) = (callee.start_byte(), callee.end_byte());
     let text = std::str::from_utf8(src.get(callee_bs..callee_be)?).ok()?;
     let mut cut: Option<usize> = None;
     let bytes = text.as_bytes();
@@ -1144,8 +1162,8 @@ mod tests {
     #[test]
     fn cpp_template_type_direct_initialization_is_a_call() {
         // A template type is a qualified_identifier in the type field, so
-        // the call is recorded. The terminal keeps the template arguments
-        // (`vector<int>`), which is the known terminal-mangling limit.
+        // the call is recorded. The callee stays as written; the terminal is
+        // the template name without its arguments.
         let src = b"void caller() {\n  std::vector<int> v(10);\n}\n";
         let facts = parse_source(Language::Cpp, src);
         assert_eq!(facts.calls.len(), 1);
@@ -1156,6 +1174,111 @@ mod tests {
             &src[callee.byte_start..callee.byte_end],
             b"std::vector<int>"
         );
+        assert_eq!(terminal_text(src, call), "vector");
+    }
+
+    #[test]
+    fn cpp_template_type_direct_initialization_terminal_ignores_argument_separators() {
+        let src = b"void caller() {\n  std::vector<ns::Item> items(10);\n}\n";
+        let facts = parse_source(Language::Cpp, src);
+        assert_eq!(facts.calls.len(), 1);
+        assert_eq!(terminal_text(src, &facts.calls[0]), "vector");
+    }
+
+    /// Text covered by the terminal span of a call fact.
+    fn terminal_text<'a>(src: &'a [u8], call: &super::Fact) -> &'a str {
+        let terminal = call.tcallee.as_ref().expect("terminal span recorded");
+        std::str::from_utf8(&src[terminal.byte_start..terminal.byte_end]).unwrap()
+    }
+
+    /// Terminal of the single call in `void caller() { <expr>; }`.
+    fn cpp_terminal_of(expr: &str) -> String {
+        let src = format!("void caller() {{\n  {expr};\n}}\n");
+        let facts = parse_source(Language::Cpp, src.as_bytes());
+        assert_eq!(facts.calls.len(), 1, "one call in {expr:?}");
+        terminal_text(src.as_bytes(), &facts.calls[0]).to_string()
+    }
+
+    #[test]
+    fn cpp_template_call_terminal_is_the_function_not_the_type_argument() {
+        // `mvs::PatchMatchController` is a template type argument of the
+        // called function `make_shared`, not part of the called name. The
+        // callee stays as written; the terminal is the function name.
+        let src = b"void caller() {\n  std::make_shared<mvs::PatchMatchController>(options);\n}\n";
+        let facts = parse_source(Language::Cpp, src);
+        assert_eq!(facts.calls.len(), 1);
+        let call = &facts.calls[0];
+        assert_eq!(
+            call.name.as_deref(),
+            Some("std::make_shared<mvs::PatchMatchController>")
+        );
+        let callee = call.callee.as_ref().expect("callee span recorded");
+        assert_eq!(
+            &src[callee.byte_start..callee.byte_end],
+            b"std::make_shared<mvs::PatchMatchController>"
+        );
+        assert_eq!(terminal_text(src, call), "make_shared");
+        // The line/column pair agrees with the byte range (1-based).
+        let terminal = call.tcallee.as_ref().expect("terminal span recorded");
+        assert_eq!(
+            (
+                terminal.start_line,
+                terminal.start_col,
+                terminal.end_line,
+                terminal.end_col
+            ),
+            (2, 8, 2, 19)
+        );
+    }
+
+    #[test]
+    fn cpp_template_call_terminal_excludes_every_template_argument_list() {
+        // The terminal is the called name for every shape that carries a
+        // template argument list, whatever the arguments contain.
+        let cases = [
+            (
+                "std::make_unique<std::vector<std::string>>(n)",
+                "make_unique",
+            ),
+            ("make<ns::Thing>(x)", "make"),
+            ("std::get<0>(t)", "get"),
+            ("obj.get<ns::Thing>()", "get"),
+            ("ptr->get<ns::Thing>()", "get"),
+            ("ptr->template get<ns::Thing>()", "get"),
+            ("Foo<ns::T>::template create<ns::U>(x)", "create"),
+        ];
+        for (expr, terminal) in cases {
+            assert_eq!(cpp_terminal_of(expr), terminal, "terminal of {expr:?}");
+        }
+    }
+
+    #[test]
+    fn cpp_call_terminal_is_unchanged_without_a_template_argument_list() {
+        // Calls that were already identified correctly keep their terminal,
+        // including template arguments that only appear in a scope.
+        let cases = [
+            ("foo(1)", "foo"),
+            ("ns::inner::run(x)", "run"),
+            ("a.b.c(x)", "c"),
+            ("ptr->run(x)", "run"),
+            ("Foo<ns::T>::create(x)", "create"),
+            ("ns::Foo<ns::Bar>::Baz<ns::Qux>::run(x)", "run"),
+        ];
+        for (expr, terminal) in cases {
+            assert_eq!(cpp_terminal_of(expr), terminal, "terminal of {expr:?}");
+        }
+    }
+
+    #[test]
+    fn cpp_unqualified_template_call_has_no_receiver() {
+        // Nothing precedes the called name, so the terminal starts where the
+        // callee starts (the graph reads this as "no receiver").
+        let src = b"void caller() {\n  make<ns::Thing>(x);\n}\n";
+        let facts = parse_source(Language::Cpp, src);
+        let call = &facts.calls[0];
+        let callee = call.callee.as_ref().expect("callee span recorded");
+        let terminal = call.tcallee.as_ref().expect("terminal span recorded");
+        assert_eq!(terminal.byte_start, callee.byte_start);
     }
 
     #[test]

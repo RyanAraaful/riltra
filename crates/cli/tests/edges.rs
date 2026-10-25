@@ -379,6 +379,52 @@ fn cli_same_name_no_false_link() {
 }
 
 #[test]
+fn cli_cpp_template_call_names_the_function_not_the_type_argument() {
+    let h = home("cpp-template");
+    let dir = repo_with(
+        &h,
+        "sem",
+        &[(
+            "patch.cpp",
+            "void run_patch(Options options) {\n  auto c = std::make_shared<mvs::PatchMatchController>(options);\n  make<mvs::PatchMatchController>(options);\n}\n",
+        )],
+    );
+    do_index(&h);
+    let v = query_json(&h, "callees", "patch.cpp", &[]);
+    let src = std::fs::read(dir.join("patch.cpp")).unwrap();
+    let text = |span: &serde_json::Value| {
+        let a = span[0].as_u64().unwrap() as usize;
+        let b = span[1].as_u64().unwrap() as usize;
+        String::from_utf8(src[a..b].to_vec()).unwrap()
+    };
+    let edges = v["edges"].as_array().expect("edges");
+    assert_eq!(edges.len(), 2, "{v}");
+    // (callee as written, called name, reason): a qualified call has a
+    // receiver (`dynamic`), an unqualified one has none (`no-overlap`).
+    for (callee, terminal, reason) in [
+        (
+            "std::make_shared<mvs::PatchMatchController>",
+            "make_shared",
+            "dynamic",
+        ),
+        ("make<mvs::PatchMatchController>", "make", "no-overlap"),
+    ] {
+        let edge = edges
+            .iter()
+            .find(|e| text(&e["evidence"]["callee_span"]) == callee)
+            .unwrap_or_else(|| panic!("edge for {callee}: {v}"));
+        assert_eq!(edge["callee_name"], terminal, "{edge}");
+        assert_eq!(text(&edge["evidence"]["terminal_span"]), terminal, "{edge}");
+        // Syntax only: a candidate, never a proven call and never a
+        // constructor call of the template type argument.
+        assert_eq!(edge["kind"], "POTENTIAL_CALL", "{edge}");
+        assert_eq!(edge["precision"], "Heuristic", "{edge}");
+        assert_eq!(edge["unresolved"], reason, "{edge}");
+    }
+    assert!(!v.to_string().contains("\"CALLS\""), "{v}");
+}
+
+#[test]
 fn cli_stale_edit_reports_stale_not_current() {
     let h = home("stale");
     scip_imported(&h);

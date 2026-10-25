@@ -131,30 +131,31 @@ fn call_owner<'a>(
         .filter(|s| (s.byte_start, s.byte_end) == *bounds)
 }
 
-/// Terminal identifier/property of a dotted callee name. ASCII separators
-/// only, mirroring `syntax::terminal_span` byte arithmetic.
-fn terminal_of(name: &str) -> &str {
-    let mut cut = 0;
-    let bytes = name.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'.' {
-            cut = i + 1;
-            i += 1;
-        } else if bytes.get(i..i + 2) == Some(b"::".as_slice())
-            || bytes.get(i..i + 2) == Some(b"->".as_slice())
-        {
-            cut = i + 2;
-            i += 2;
-        } else {
-            i += 1;
-        }
-    }
-    &name[cut..]
+/// Called name of a call: the part of the callee text that the stored
+/// terminal span covers, empty when the call has no terminal. Reading the
+/// stored span keeps graph names in step with the syntax facts instead of
+/// splitting the text a second time.
+fn terminal_text(call: &store::CallRow) -> &str {
+    let (Some(name), Some(callee), Some(terminal)) = (
+        call.name.as_deref(),
+        call.callee.as_ref(),
+        call.tcallee.as_ref(),
+    ) else {
+        return "";
+    };
+    let (Some(start), Some(end)) = (
+        terminal.byte_start.checked_sub(callee.byte_start),
+        terminal.byte_end.checked_sub(callee.byte_start),
+    ) else {
+        return "";
+    };
+    name.get(start..end).unwrap_or("")
 }
 
-fn has_receiver(name: &str) -> bool {
-    terminal_of(name).len() != name.len()
+/// A receiver or scope (`obj.`, `ns::`, `ptr->`) precedes the called name
+/// when the terminal starts after the callee does.
+fn has_receiver(call: &store::CallRow) -> bool {
+    matches!((&call.callee, &call.tcallee), (Some(c), Some(t)) if t.byte_start > c.byte_start)
 }
 
 fn evidence_json(path: &str, span_bs: usize, span_be: usize, extra: &str) -> String {
@@ -211,11 +212,7 @@ pub fn derive_syntax_edges(
             byte_end: o.byte_end,
         });
         let full = call.name.as_deref().unwrap_or("");
-        let terminal = call
-            .tcallee
-            .as_ref()
-            .map(|_| terminal_of(full))
-            .filter(|t| !t.is_empty());
+        let terminal = Some(terminal_text(call)).filter(|t| !t.is_empty());
         let reason: Option<String> = if call.callee.is_none() {
             Some("no-callee".to_string())
         } else if caller.is_none() {
@@ -244,7 +241,7 @@ pub fn derive_syntax_edges(
                 Some("alias".to_string())
             } else if candidates > 1 {
                 Some(format!("ambiguous:{candidates}"))
-            } else if has_receiver(full) {
+            } else if has_receiver(call) {
                 Some("dynamic".to_string())
             } else {
                 Some("no-overlap".to_string())
@@ -408,7 +405,7 @@ pub fn upsert_semantic_edges(
                         byte_start: o.byte_start,
                         byte_end: o.byte_end,
                     }),
-                    call.name.as_deref().map(terminal_of).unwrap_or_default(),
+                    terminal_text(call),
                     &format!("ambiguous:{}", targets.len()),
                 ));
                 stats.potential += 1;
@@ -444,7 +441,7 @@ pub fn upsert_semantic_edges(
                             byte_start: o.byte_start,
                             byte_end: o.byte_end,
                         });
-                    let terminal = call.name.as_deref().map(terminal_of).unwrap_or_default();
+                    let terminal = terminal_text(call);
                     out.push(EdgeRow {
                         snapshot_id,
                         file_id: call.file_id,
@@ -482,7 +479,7 @@ pub fn upsert_semantic_edges(
                         byte_start: o.byte_start,
                         byte_end: o.byte_end,
                     });
-                    let terminal = call.name.as_deref().map(terminal_of).unwrap_or_default();
+                    let terminal = terminal_text(call);
                     out.push(potential_row(
                         (snapshot_id, import_id),
                         call.file_id,
@@ -506,7 +503,7 @@ pub fn upsert_semantic_edges(
                     byte_start: o.byte_start,
                     byte_end: o.byte_end,
                 });
-                let terminal = call.name.as_deref().map(terminal_of).unwrap_or_default();
+                let terminal = terminal_text(call);
                 out.push(potential_row(
                     (snapshot_id, import_id),
                     call.file_id,
@@ -528,7 +525,7 @@ pub fn upsert_semantic_edges(
                     byte_start: o.byte_start,
                     byte_end: o.byte_end,
                 });
-                let terminal = call.name.as_deref().map(terminal_of).unwrap_or_default();
+                let terminal = terminal_text(call);
                 out.push(potential_row(
                     (snapshot_id, import_id),
                     call.file_id,

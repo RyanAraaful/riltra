@@ -3738,21 +3738,35 @@ mod tests {
         assert!(fresh.reasons.iter().any(|r| r == "config-changed"));
     }
 
-    #[test]
-    fn parser_version_mismatch_is_stale() {
-        let home = tmpdir("idx-parser-home");
-        let repo = plain_repo("idx-parser");
+    /// A snapshot recorded by parser `version` must read as stale.
+    fn assert_parser_version_is_stale(tag: &str, version: u32) {
+        let home = tmpdir(&format!("{tag}-home"));
+        let repo = plain_repo(tag);
         // Fabricate a snapshot recorded by a different parser build.
         let db = store::db_path(&home, "r");
         std::fs::create_dir_all(db.parent().unwrap()).unwrap();
         let conn = store::open_live(&db).unwrap();
         let mut snap = fabricated_snapshot("r", &repo);
-        snap.parser_version = super::super::store::PARSER_VERSION + 1;
+        snap.parser_version = version;
         store::insert_snapshot(&conn, &snap).unwrap();
         drop(conn);
         let fresh = evaluate(&home, "r", &repo);
         assert_eq!(fresh.status, "stale");
         assert!(fresh.reasons.iter().any(|r| r == "parser-changed"));
+    }
+
+    #[test]
+    fn parser_version_mismatch_is_stale() {
+        assert_parser_version_is_stale("idx-parser", super::super::store::PARSER_VERSION + 1);
+    }
+
+    #[test]
+    fn parser_two_snapshot_is_stale_because_template_terminals_changed() {
+        // Parser 2 recorded the template arguments of a C++ call in its
+        // terminal span (`PatchMatchController>` for
+        // `std::make_shared<mvs::PatchMatchController>`), so an index it
+        // wrote must be rebuilt, never read as fresh.
+        assert_parser_version_is_stale("idx-parser-two", 2);
     }
 
     #[test]

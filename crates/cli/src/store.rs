@@ -13,7 +13,8 @@ pub const SCHEMA_VERSION: u32 = 4;
 /// Parser/extraction version. Bump whenever `syntax.rs` extraction changes;
 /// freshness treats a mismatch as stale (never silently current).
 /// 2: C++ data members are extracted as `field` symbols (E7 Slice 1).
-pub const PARSER_VERSION: u32 = 2;
+/// 3: the terminal span of a C++ call excludes template arguments.
+pub const PARSER_VERSION: u32 = 3;
 
 /// Grammar + runtime versions pinned in `Cargo.lock`. A test pins these
 /// against the lockfile so they cannot drift silently.
