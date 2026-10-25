@@ -315,6 +315,71 @@ fn impact_at_a_data_member_is_unknown_and_anchored_at_the_member() {
 }
 
 #[test]
+fn callers_of_an_out_of_line_method_match_calls_by_the_method_name() {
+    // `Widget::run` is defined out of line, so its symbol name is the
+    // qualified text, while a call is recorded by its terminal name `run`.
+    let h = home("qualified-callers");
+    let repo = mkrepo(&h, "work");
+    std::fs::write(
+        repo.join("widget.cc"),
+        "struct Widget {\n  void run();\n  void again();\n};\nvoid Widget::run() {}\nvoid Widget::again() {\n  run();\n}\n",
+    )
+    .unwrap();
+    init_and_index(&h, &repo, "r");
+    let doc = edge_doc(&h, "callers", "widget.cc", "5", "8");
+    let edges = doc["edges"].as_array().unwrap();
+    assert_eq!(edges.len(), 1, "{doc}");
+    assert_eq!(edges[0]["kind"], "POTENTIAL_CALL");
+    assert_eq!(edges[0]["precision"], "Heuristic");
+    assert_eq!(edges[0]["callee_name"], "run");
+    assert_eq!(
+        edges[0]["callee"],
+        serde_json::Value::Null,
+        "never resolved"
+    );
+}
+
+#[test]
+fn callers_of_an_out_of_line_method_reach_the_files_that_include_its_declaring_header() {
+    // `Widget::run` is defined in widget.cc but declared in widget.h, which
+    // main.cc includes: the call in main.cc is a candidate. other.cc includes
+    // nothing, so its `run` call is out of scope.
+    let h = home("declaring-header");
+    let repo = mkrepo(&h, "work");
+    std::fs::write(
+        repo.join("widget.h"),
+        "struct Widget {\n  void run();\n};\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("widget.cc"),
+        "#include \"widget.h\"\nvoid Widget::run() {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("main.cc"),
+        "#include \"widget.h\"\nvoid go(Widget& w) {\n  w.run();\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("other.cc"),
+        "void stray(Other& o) {\n  o.run();\n}\n",
+    )
+    .unwrap();
+    init_and_index(&h, &repo, "r");
+    let doc = edge_doc(&h, "callers", "widget.cc", "2", "8");
+    let callers: Vec<&str> = doc["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["caller_path"].as_str().unwrap())
+        .collect();
+    assert_eq!(callers, vec!["main.cc"], "{doc}");
+    assert_eq!(doc["edges"][0]["kind"], "POTENTIAL_CALL");
+    assert_eq!(doc["edges"][0]["callee"], serde_json::Value::Null);
+}
+
+#[test]
 fn callers_of_a_data_member_never_list_a_same_named_call() {
     // A member is not callable: a call named like the member (here the method
     // `Box::value`) is no caller of the member `Holder::value`.

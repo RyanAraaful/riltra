@@ -1653,6 +1653,14 @@ fn unique_suffix_match<'a>(
     found
 }
 
+/// The name a call site records for a definition. A call keeps only its
+/// terminal name (`run` in `w.run()`), while an out-of-line C++ definition
+/// keeps its qualified text (`Widget::run`), so the part after the last `::`
+/// is what the call sites are matched against.
+fn called_name(definition: &str) -> &str {
+    definition.rsplit("::").next().unwrap_or(definition)
+}
+
 fn caller_candidate_paths(
     tx: &rusqlite::Connection,
     snapshot_id: i64,
@@ -1667,53 +1675,136 @@ fn caller_candidate_paths(
     // Local SCIP identities never gain cross-document name candidates.
     if anchor.doc.is_none() {
         let imports = store::imports_for(tx, snapshot_id)?;
-        for import in &imports {
-            if let (Some(path), Some(text)) = (paths.get(&import.file_id), import.text.as_deref()) {
-                if import_mentions_path(path, &import.language, text, &anchor.path) {
-                    linked.insert((*path).to_string());
-                }
+        let mut targets = vec![anchor.path.clone()];
+        targets.extend(declaring_headers(
+            tx,
+            snapshot_id,
+            anchor,
+            &imports,
+            &id_map,
+            &paths,
+        )?);
+        for target in &targets {
+            linked.insert(target.clone());
+            link_includers(&mut linked, &imports, &id_map, &paths, target);
+        }
+    }
+    Ok(linked.into_iter().collect())
+}
+
+/// Add every file whose imports name `target`.
+fn link_includers(
+    linked: &mut BTreeSet<String>,
+    imports: &[store::ImportRow],
+    id_map: &BTreeMap<String, (i64, String)>,
+    paths: &BTreeMap<i64, &str>,
+    target: &str,
+) {
+    for import in imports {
+        if let (Some(path), Some(text)) = (paths.get(&import.file_id), import.text.as_deref()) {
+            if import_mentions_path(path, &import.language, text, target) {
+                linked.insert((*path).to_string());
             }
         }
-        // A C/C++ include is written against an include root the repository
-        // does not record, so its literal rarely equals the target's
-        // repository-relative path. A unique path suffix may widen this
-        // candidate scope; it stays a candidate and never an identity.
-        // shortcut: a unique suffix is not proof of the compiler's choice —
-        // a literal the compiler resolves through another include root stays
-        // a candidate only; upgrade by reading the build system's roots.
-        let anchors = suffix_anchors(&anchor.path);
-        if !anchors.is_empty() {
-            let mut resolved: BTreeMap<String, Option<&str>> = BTreeMap::new();
-            for import in &imports {
-                let path = match paths.get(&import.file_id) {
-                    Some(path) => *path,
-                    None => continue,
-                };
-                if !matches!(import.language.as_str(), "c" | "cpp") {
-                    continue;
-                }
-                let literal = match import.text.as_deref().and_then(cpp_include_literal) {
-                    Some(literal) => literal,
-                    None => continue,
-                };
-                if !anchors.contains(&literal.as_str()) {
-                    continue;
-                }
-                let hit = match resolved.get(literal.as_str()) {
-                    Some(hit) => *hit,
-                    None => {
-                        let hit = unique_suffix_match(&literal, id_map.keys());
-                        resolved.insert(literal.clone(), hit);
-                        hit
-                    }
-                };
-                if hit == Some(anchor.path.as_str()) {
-                    linked.insert(path.to_string());
+    }
+    // A C/C++ include is written against an include root the repository
+    // does not record, so its literal rarely equals the target's
+    // repository-relative path. A unique path suffix may widen this
+    // candidate scope; it stays a candidate and never an identity.
+    // shortcut: a unique suffix is not proof of the compiler's choice —
+    // a literal the compiler resolves through another include root stays
+    // a candidate only; upgrade by reading the build system's roots.
+    let anchors = suffix_anchors(target);
+    if anchors.is_empty() {
+        return;
+    }
+    let mut resolved: BTreeMap<String, Option<&str>> = BTreeMap::new();
+    for import in imports {
+        let path = match paths.get(&import.file_id) {
+            Some(path) => *path,
+            None => continue,
+        };
+        if !matches!(import.language.as_str(), "c" | "cpp") {
+            continue;
+        }
+        let literal = match import.text.as_deref().and_then(cpp_include_literal) {
+            Some(literal) => literal,
+            None => continue,
+        };
+        if !anchors.contains(&literal.as_str()) {
+            continue;
+        }
+        let hit = match resolved.get(literal.as_str()) {
+            Some(hit) => *hit,
+            None => {
+                let hit = unique_suffix_match(&literal, id_map.keys());
+                resolved.insert(literal.clone(), hit);
+                hit
+            }
+        };
+        if hit == Some(target) {
+            linked.insert(path.to_string());
+        }
+    }
+}
+
+/// The closest qualifier of an out-of-line C++ definition name:
+/// `Widget` for `Widget::run`, `Problem` for `PatchMatch::Problem::Print`,
+/// `Foo` for `Foo<T>::bar`. `None` for an unqualified name.
+fn qualifier_of(definition: Option<&str>) -> Option<&str> {
+    let mut parts = definition?.rsplit("::");
+    parts.next()?;
+    let owner = parts.next()?;
+    let owner = owner.split('<').next().unwrap_or(owner).trim();
+    (!owner.is_empty()).then_some(owner)
+}
+
+/// Headers that declare the class of an out-of-line C++ definition. A call to
+/// `Widget::run` is written in files that include the header declaring
+/// `Widget`, not in files that include `widget.cc`, so the headers that the
+/// definition's file includes and that hold a class or struct of the
+/// qualifier's name widen the candidate scope. A candidate, never an identity.
+fn declaring_headers(
+    tx: &rusqlite::Connection,
+    snapshot_id: i64,
+    anchor: &EdgeAnchor,
+    imports: &[store::ImportRow],
+    id_map: &BTreeMap<String, (i64, String)>,
+    paths: &BTreeMap<i64, &str>,
+) -> Result<Vec<String>, String> {
+    let (Some(owner), Some((anchor_id, _))) = (
+        qualifier_of(anchor.display.as_deref()),
+        id_map.get(&anchor.path),
+    ) else {
+        return Ok(Vec::new());
+    };
+    let mut included = BTreeSet::new();
+    for import in imports
+        .iter()
+        .filter(|i| i.file_id == *anchor_id && matches!(i.language.as_str(), "c" | "cpp"))
+    {
+        if let Some(literal) = import.text.as_deref().and_then(cpp_include_literal) {
+            if let Some(hit) = unique_suffix_match(&literal, id_map.keys()) {
+                included.insert(hit.to_string());
+            }
+        }
+    }
+    if included.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut headers = BTreeSet::new();
+    for symbol in store::symbols_for(tx, snapshot_id)? {
+        if matches!(symbol.kind.as_str(), "class" | "struct")
+            && symbol.name.as_deref() == Some(owner)
+        {
+            if let Some(path) = paths.get(&symbol.file_id) {
+                if included.contains(*path) && *path != anchor.path {
+                    headers.insert((*path).to_string());
                 }
             }
         }
     }
-    Ok(linked.into_iter().collect())
+    Ok(headers.into_iter().collect())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2062,7 +2153,7 @@ pub(crate) fn edge_query_conn(
         endpoint: &endpoint,
         inbound: request.direction == EdgeDir::Callers,
         candidate_name: if by_name {
-            anchor.display.as_deref()
+            anchor.display.as_deref().map(called_name)
         } else {
             None
         },
