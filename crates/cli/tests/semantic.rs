@@ -275,6 +275,10 @@ fn num(json: &str, key: &str) -> i64 {
 const FOO: &str = "scip-test test test-pkg 1.0.0 src/a.ts/foo().";
 
 fn ab_repo(home: &Path) -> (PathBuf, String) {
+    ab_repo_with_tool(home, "scip-test-cli")
+}
+
+fn ab_repo_with_tool(home: &Path, tool: &str) -> (PathBuf, String) {
     let dir = repo_with(
         home,
         "sem",
@@ -293,7 +297,7 @@ fn ab_repo(home: &Path) -> (PathBuf, String) {
         false,
     );
     let b = document("src/b.ts", &[occurrence(FOO, 0x0, 1, 0, 3)], &[], false);
-    let payload = index_bytes(&dir, &[a, b], &[]);
+    let payload = index_bytes_with_tool(&dir, tool, &[a, b], &[]);
     let scip = dir.join("index.scip");
     std::fs::write(&scip, &payload).unwrap();
     (dir, scip.to_string_lossy().to_string())
@@ -303,6 +307,49 @@ fn do_index(home: &Path) -> String {
     let (code, out, err) = run(home, &["index", "--repo", "sem"]);
     assert_eq!(code, 0, "index failed: {err}");
     out
+}
+
+#[test]
+fn cli_f1_scip_status_names_the_transport_and_keeps_producer_metadata() {
+    // A SCIP import is served by the scip-import transport. The producer name
+    // and version are artifact metadata; status must not call it unsupported.
+    let h = home("f1-transport");
+    let (_dir, scip) = ab_repo_with_tool(&h, "scip-typescript");
+    do_index(&h);
+    let (code, _, err) = run(
+        &h,
+        &["semantic", "import", "--repo", "sem", "--scip", &scip],
+    );
+    assert_eq!(code, 0, "{err}");
+    let (code, out, err) = run(&h, &["semantic", "status", "--repo", "sem"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("\"provider\":\"scip-typescript\""), "{out}");
+    assert!(out.contains("\"provider_version\":\"1.0\""), "{out}");
+    assert!(
+        out.contains("\"capability\":\"definitions,references\""),
+        "{out}"
+    );
+    assert!(out.contains("not checked by riltra"), "{out}");
+    assert!(!out.contains("unsupported"), "{out}");
+}
+
+#[test]
+fn cli_f1_unknown_producer_is_reported_as_unchecked_metadata() {
+    // No producer joins the registry. An unknown producer still imports
+    // through the transport; its name stays visible, marked as unchecked.
+    let h = home("f1-unknown");
+    let (_dir, scip) = ab_repo_with_tool(&h, "unknown-indexer");
+    do_index(&h);
+    let (code, _, err) = run(
+        &h,
+        &["semantic", "import", "--repo", "sem", "--scip", &scip],
+    );
+    assert_eq!(code, 0, "{err}");
+    let (code, out, err) = run(&h, &["semantic", "status", "--repo", "sem"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("\"provider\":\"unknown-indexer\""), "{out}");
+    assert!(out.contains("not checked by riltra"), "{out}");
+    assert!(!out.contains("unsupported"), "{out}");
 }
 
 #[test]

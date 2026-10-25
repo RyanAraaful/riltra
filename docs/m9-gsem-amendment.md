@@ -142,3 +142,21 @@ observed.
 - CUDA semantics: unsupported.
 - Provider coverage is fixture-level only. MMSP-scale provider behaviour is not
   measured here.
+
+## Revision 2026-10-25: F1 resolved
+
+F1 is resolved. `semantic status` checks every stored import against the
+`scip-import` transport (`SCIP_IMPORT` in `crates/cli/src/semantic.rs`). A
+`scip-typescript` import no longer reports `unsupported semantic provider`.
+The producer name and version stay in the row metadata. The limitation now
+reads: "producer name and version are artifact metadata, not checked by
+riltra". An unknown producer still appears with its name, marked as unchecked.
+No producer joins the registry, and the test that rejects `scip-typescript`
+as a registry key is unchanged.
+
+Tests (red before the fix, green after):
+`cli_f1_scip_status_names_the_transport_and_keeps_producer_metadata` and
+`cli_f1_unknown_producer_is_reported_as_unchecked_metadata`.
+
+The original findings above are kept as recorded. F2 and F5 are unchanged in
+this revision.

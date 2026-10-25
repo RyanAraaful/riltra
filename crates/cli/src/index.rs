@@ -952,10 +952,11 @@ pub fn semantic_status(
         } else {
             crate::semantic::Verification::Stale
         };
-        // Provider names in the database must resolve against the static
-        // capability registry: an unknown name is reported, never trusted.
-        let limitation = match crate::semantic::resolve(&import.provider_name) {
-            Ok(_) => "single-hop def/ref only (M6 owns traversal); Current unreachable without independent producer attestation".to_string(),
+        // Every stored row came through the SCIP importer, so its capability is
+        // the scip-import transport's. The producer name and version are
+        // artifact metadata; riltra checks them against no registry.
+        let limitation = match crate::semantic::resolve(crate::semantic::SCIP_IMPORT) {
+            Ok(_) => "single-hop def/ref only (M6 owns traversal); Current unreachable without independent producer attestation; producer name and version are artifact metadata, not checked by riltra".to_string(),
             Err(e) => e,
         };
         rows.push(SemanticStatusRow {
