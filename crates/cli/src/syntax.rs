@@ -140,8 +140,6 @@ pub const ROLE_MACRO_ARGUMENT: &str = "macro-argument";
 /// Confidence of an occurrence, derived from its role and never stored: the
 /// syntax proves the role and the location (`observed`), or the role needs an
 /// assumption outside the syntax (`candidate`).
-// Read by the occurrence section of the search response (E7 Slice 2, S3).
-#[allow(dead_code)]
 pub fn occurrence_confidence(role: &str) -> &'static str {
     match role {
         ROLE_MEMBER_ACCESS | ROLE_ADDRESS_OF_BINDING => "observed",

@@ -8,7 +8,7 @@
 
 use std::path::Path;
 
-use crate::{git, ignore, index, json, knowledge, knowledge_store, semantic, store};
+use crate::{git, ignore, index, json, knowledge, knowledge_store, semantic, store, syntax};
 
 /// One snapshot identity block, shared by search and index-status output.
 pub(crate) fn snapshot_json(snapshot: &store::Snapshot) -> String {
@@ -46,6 +46,43 @@ pub(crate) struct SearchResponse<'a> {
     pub offset: usize,
     pub total: usize,
     pub hits: &'a [store::Hit],
+    /// The opt-in occurrence census (`--occurrences`); `None` leaves the
+    /// document byte-identical to a search without the flag.
+    pub occurrences: Option<&'a store::OccurrenceList>,
+}
+
+fn occurrence_item_json(hit: &store::OccurrenceHit) -> String {
+    format!(
+        "{{\"path\":\"{}\",\"role\":\"{}\",\"confidence\":\"{}\",\"span\":{{\"start_line\":{},\"start_col\":{},\"end_line\":{},\"end_col\":{}}},\"bytes\":[{},{}],\"provenance\":{{\"provider\":\"{}\",\"grammar\":\"{}\",\"language\":\"{}\"}}}}",
+        json::escape(&hit.path),
+        json::escape(&hit.role),
+        syntax::occurrence_confidence(&hit.role),
+        hit.start_line,
+        hit.start_col,
+        hit.end_line,
+        hit.end_col,
+        hit.byte_start,
+        hit.byte_end,
+        hit.provider,
+        hit.grammar,
+        hit.language
+    )
+}
+
+/// The occurrence section. `scope` and `binding` are literals that say what
+/// the list is: a repository-wide census of an exact name, bound to no
+/// declaration. They are present even when the list is empty, so an empty
+/// list is never read as proof of absence.
+fn occurrences_json(list: &store::OccurrenceList, offset: usize) -> String {
+    let items: Vec<String> = list.items.iter().map(occurrence_item_json).collect();
+    format!(
+        "{{\"scope\":\"repository-wide-exact-name\",\"binding\":\"unbound\",\"field_declarations\":{},\"symbol_declarations\":{},\"total\":{},\"truncated\":{},\"items\":[{}]}}",
+        list.field_declarations,
+        list.symbol_declarations,
+        list.total,
+        offset + items.len() < list.total,
+        items.join(",")
+    )
 }
 
 fn search_hit_json(hit: &store::Hit) -> String {
@@ -73,8 +110,17 @@ fn search_hit_json(hit: &store::Hit) -> String {
 pub(crate) fn search_response_json(response: &SearchResponse<'_>) -> String {
     let results: Vec<String> = response.hits.iter().map(search_hit_json).collect();
     let truncated = response.offset + results.len() < response.total;
+    let occurrences = response
+        .occurrences
+        .map(|list| {
+            format!(
+                ",\"occurrences\":{}",
+                occurrences_json(list, response.offset)
+            )
+        })
+        .unwrap_or_default();
     format!(
-        "{{\"repo\":\"{}\",\"root\":\"{}\",\"snapshot\":{},\"freshness\":\"{}\",\"reasons\":[{}],\"query\":{{\"symbol\":\"{}\",\"limit\":{},\"offset\":{}}},\"total\":{},\"results\":[{}],\"truncated\":{}}}",
+        "{{\"repo\":\"{}\",\"root\":\"{}\",\"snapshot\":{},\"freshness\":\"{}\",\"reasons\":[{}],\"query\":{{\"symbol\":\"{}\",\"limit\":{},\"offset\":{}}},\"total\":{},\"results\":[{}],\"truncated\":{}{}}}",
         json::escape(response.repo),
         json::escape(response.root),
         match response.snapshot {
@@ -88,7 +134,8 @@ pub(crate) fn search_response_json(response: &SearchResponse<'_>) -> String {
         response.offset,
         response.total,
         results.join(","),
-        truncated
+        truncated,
+        occurrences
     )
 }
 
@@ -711,6 +758,7 @@ mod tests {
             offset: 0,
             total: 0,
             hits: &[],
+            occurrences: None,
         });
         assert_eq!(
             text,
@@ -732,6 +780,7 @@ mod tests {
             offset: 0,
             total: 0,
             hits: &[],
+            occurrences: None,
         });
         assert_eq!(
             text,
@@ -754,6 +803,7 @@ mod tests {
             offset: 0,
             total: 2,
             hits: &hits,
+            occurrences: None,
         });
         assert_eq!(
             text,
@@ -776,10 +826,51 @@ mod tests {
             offset: 1,
             total: 2,
             hits: &hits,
+            occurrences: None,
         });
         assert_eq!(
             text,
             r#"{"repo":"demo","root":"C:\\repo","snapshot":{"id":7,"created_unix":100,"head":"abc","branch":null,"dirty":false,"status_at_write":"fresh","nonce":"n"},"freshness":"fresh","reasons":[],"query":{"symbol":"x","limit":1,"offset":1},"total":2,"results":[{"path":"lib.py","kind":"function","name":null,"span":{"start_line":1,"start_col":1,"end_line":2,"end_col":13},"bytes":[0,26],"provenance":{"provider":"syntax","grammar":"python:0.25.0","language":"python"},"snapshot":7}],"truncated":false}"#
+        );
+    }
+
+    #[test]
+    fn search_occurrence_section_shape_is_byte_stable() {
+        let snap = snapshot();
+        let list = store::OccurrenceList {
+            field_declarations: 1,
+            symbol_declarations: 2,
+            total: 3,
+            items: vec![store::OccurrenceHit {
+                path: "use.cc".to_string(),
+                role: "macro-argument".to_string(),
+                start_line: 4,
+                start_col: 9,
+                end_line: 4,
+                end_col: 12,
+                byte_start: 40,
+                byte_end: 43,
+                provider: "syntax".to_string(),
+                grammar: "cpp:0.23.4".to_string(),
+                language: "cpp".to_string(),
+            }],
+        };
+        let text = search_response_json(&SearchResponse {
+            repo: "demo",
+            root: "C:\\repo",
+            snapshot: Some(&snap),
+            freshness: "fresh",
+            reasons: &[],
+            symbol: "b",
+            limit: 1,
+            offset: 0,
+            total: 0,
+            hits: &[],
+            occurrences: Some(&list),
+        });
+        assert_eq!(
+            text,
+            r#"{"repo":"demo","root":"C:\\repo","snapshot":{"id":7,"created_unix":100,"head":"abc","branch":null,"dirty":false,"status_at_write":"fresh","nonce":"n"},"freshness":"fresh","reasons":[],"query":{"symbol":"b","limit":1,"offset":0},"total":0,"results":[],"truncated":false,"occurrences":{"scope":"repository-wide-exact-name","binding":"unbound","field_declarations":1,"symbol_declarations":2,"total":3,"truncated":true,"items":[{"path":"use.cc","role":"macro-argument","confidence":"candidate","span":{"start_line":4,"start_col":9,"end_line":4,"end_col":12},"bytes":[40,43],"provenance":{"provider":"syntax","grammar":"cpp:0.23.4","language":"cpp"}}]}}"#
         );
     }
 

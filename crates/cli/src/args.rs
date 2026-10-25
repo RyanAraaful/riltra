@@ -35,6 +35,8 @@ pub enum Command {
         symbol: String,
         limit: Option<String>,
         offset: Option<String>,
+        /// Also list the name occurrences of the exact symbol name.
+        occurrences: bool,
     },
     Semantic {
         op: SemanticOp,
@@ -298,9 +300,13 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             let mut symbol = None;
             let mut limit = None;
             let mut offset = None;
+            let mut occurrences = false;
             let mut i = 1;
             while i < args.len() {
-                if let Some(v) = take_value(args, &mut i, "--repo") {
+                if args[i] == "--occurrences" {
+                    occurrences = true;
+                    i += 1;
+                } else if let Some(v) = take_value(args, &mut i, "--repo") {
                     repo = Some(v);
                 } else if let Some(v) = take_value(args, &mut i, "--symbol") {
                     symbol = Some(v);
@@ -318,6 +324,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                     symbol,
                     limit,
                     offset,
+                    occurrences,
                 }),
                 _ => Err(crate::usage()),
             }

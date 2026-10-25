@@ -45,6 +45,10 @@ struct CodeSearchInput {
     limit: Option<usize>,
     /// Hits to skip before returning results (default 0).
     offset: Option<usize>,
+    /// Also list where the exact name occurs in C++ code (member accesses,
+    /// the address of a member, same-file macro arguments): a name census,
+    /// not a binding. Off by default; the document is unchanged without it.
+    occurrences: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -602,6 +606,7 @@ fn code_search_doc(input: &CodeSearchInput) -> CallToolResult {
             offset,
             0,
             &[],
+            None,
         ),
         store::IndexRead::Outdated(version) => {
             tool_error("schema_outdated", &outdated_message(&input.repo, version))
@@ -645,6 +650,7 @@ fn code_search_doc(input: &CodeSearchInput) -> CallToolResult {
                         offset,
                         0,
                         &[],
+                        None,
                     );
                 }
             };
@@ -655,6 +661,14 @@ fn code_search_doc(input: &CodeSearchInput) -> CallToolResult {
                     Ok(found) => found,
                     Err(e) => return tool_error("store_error", &e),
                 };
+            let census = if input.occurrences == Some(true) {
+                match store::occurrences_for(&tx, snapshot.id, &input.query, limit, offset) {
+                    Ok(list) => Some(list),
+                    Err(e) => return tool_error("store_error", &e),
+                }
+            } else {
+                None
+            };
             let _ = tx.commit();
             search_doc(
                 &input.repo,
@@ -667,6 +681,7 @@ fn code_search_doc(input: &CodeSearchInput) -> CallToolResult {
                 offset,
                 total,
                 &hits,
+                census.as_ref(),
             )
         }
     }
@@ -685,6 +700,7 @@ fn search_doc(
     offset: usize,
     total: usize,
     hits: &[store::Hit],
+    occurrences: Option<&store::OccurrenceList>,
 ) -> CallToolResult {
     doc(&response::search_response_json(&response::SearchResponse {
         repo,
@@ -697,6 +713,7 @@ fn search_doc(
         offset,
         total,
         hits,
+        occurrences,
     }))
 }
 

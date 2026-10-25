@@ -334,7 +334,11 @@ fn mcp_tools_list_advertises_the_twelve_tools() {
         .map(|v| v.as_str().unwrap())
         .collect();
     assert!(required.contains(&"repo") && required.contains(&"query"));
-    for key in ["repo", "query", "limit", "offset"] {
+    assert!(
+        !required.contains(&"occurrences"),
+        "the opt-in property must stay optional: {search_schema}"
+    );
+    for key in ["repo", "query", "limit", "offset", "occurrences"] {
         assert!(
             search_schema["properties"][key].is_object(),
             "code_search missing property {key}: {search_schema}"
@@ -1144,6 +1148,68 @@ fn write_search_fixture(root: &Path) {
     .unwrap();
     std::fs::write(root.join("b.py"), "def beta():\n    pass\n").unwrap();
     std::fs::write(root.join("sp ace/c.py"), "def alpha_three():\n    pass\n").unwrap();
+}
+
+#[test]
+fn code_search_occurrences_is_the_cli_document_and_off_by_default() {
+    let h = home("occ-search");
+    let r = home("occ-search-repo");
+    std::fs::write(
+        r.join("options.h"),
+        "class Options {\n public:\n  double angle = 1.0;\n};\n",
+    )
+    .unwrap();
+    std::fs::write(
+        r.join("use.cc"),
+        "#include \"options.h\"\ndouble read(Options& o) {\n  double* p = &o.angle;\n  return o.angle;\n}\n",
+    )
+    .unwrap();
+    indexed_repo(&h, &r, "r");
+    let mut s = ready(&h);
+    let with = doc(&call_tool(
+        &mut s,
+        2,
+        "riltra_code_search",
+        &json!({"repo": "r", "query": "angle", "occurrences": true}),
+    ));
+    assert_eq!(
+        with,
+        cli_json(
+            &h,
+            &[
+                "search",
+                "--repo",
+                "r",
+                "--symbol",
+                "angle",
+                "--occurrences"
+            ]
+        ),
+        "MCP/CLI parity of the occurrence section"
+    );
+    assert_eq!(with["occurrences"]["total"], 2, "{with}");
+    assert_eq!(with["occurrences"]["binding"], "unbound");
+    // Absent and false are the plain document: no occurrence member at all.
+    let plain = doc(&call_tool(
+        &mut s,
+        3,
+        "riltra_code_search",
+        &json!({"repo": "r", "query": "angle"}),
+    ));
+    assert!(plain.get("occurrences").is_none(), "{plain}");
+    assert_eq!(
+        plain,
+        cli_json(&h, &["search", "--repo", "r", "--symbol", "angle"])
+    );
+    let off = doc(&call_tool(
+        &mut s,
+        4,
+        "riltra_code_search",
+        &json!({"repo": "r", "query": "angle", "occurrences": false}),
+    ));
+    assert_eq!(off, plain);
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
 }
 
 const V1_TABLES: &str = "CREATE TABLE snapshots (id INTEGER PRIMARY KEY AUTOINCREMENT,

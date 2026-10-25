@@ -2120,6 +2120,99 @@ pub fn search_symbols(
     Ok((total, hits))
 }
 
+/// One stored name occurrence joined with its file path.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OccurrenceHit {
+    pub path: String,
+    pub role: String,
+    pub start_line: u32,
+    pub start_col: u32,
+    pub end_line: u32,
+    pub end_col: u32,
+    pub byte_start: usize,
+    pub byte_end: usize,
+    pub provider: String,
+    pub grammar: String,
+    pub language: String,
+}
+
+/// The occurrence census of one exact name in one snapshot, with the number
+/// of declarations of that name so that ambiguity is never hidden.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct OccurrenceList {
+    /// `field` symbols with this exact name.
+    pub field_declarations: usize,
+    /// All symbols with this exact name.
+    pub symbol_declarations: usize,
+    /// Occurrence rows for this exact name (all roles).
+    pub total: usize,
+    pub items: Vec<OccurrenceHit>,
+}
+
+/// The occurrence census of one EXACT name: the declaration counts, the total
+/// and one `limit`/`offset` page ordered by (path, byte offset, role). An empty
+/// name answers an empty list without touching the table. The name is matched
+/// by equality (the symbol search keeps its prefix semantics), and every
+/// query is scoped to the one snapshot the caller already pinned.
+pub fn occurrences_for(
+    conn: &Connection,
+    snapshot_id: i64,
+    name: &str,
+    limit: usize,
+    offset: usize,
+) -> Result<OccurrenceList, String> {
+    if name.is_empty() {
+        return Ok(OccurrenceList::default());
+    }
+    let (symbol_declarations, field_declarations): (i64, i64) = conn
+        .query_row(
+            "SELECT COUNT(*), COALESCE(SUM(CASE WHEN kind = 'field' THEN 1 ELSE 0 END), 0) FROM symbols WHERE snapshot_id = ?1 AND name = ?2",
+            params![snapshot_id, name],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|e| e.to_string())?;
+    let total: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM reference_occurrences WHERE snapshot_id = ?1 AND name = ?2",
+            params![snapshot_id, name],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    let mut statement = conn
+        .prepare(
+            "SELECT f.path, r.role, r.start_line, r.start_col, r.end_line, r.end_col, r.byte_start, r.byte_end, r.provider, r.grammar, r.language FROM reference_occurrences r JOIN files f ON f.id = r.file_id WHERE r.snapshot_id = ?1 AND r.name = ?2 ORDER BY f.path, r.byte_start, r.role, r.id LIMIT ?3 OFFSET ?4",
+        )
+        .map_err(|e| e.to_string())?;
+    let items = statement
+        .query_map(
+            params![snapshot_id, name, limit as i64, offset as i64],
+            |row| {
+                Ok(OccurrenceHit {
+                    path: row.get(0)?,
+                    role: row.get(1)?,
+                    start_line: row.get::<_, i64>(2)? as u32,
+                    start_col: row.get::<_, i64>(3)? as u32,
+                    end_line: row.get::<_, i64>(4)? as u32,
+                    end_col: row.get::<_, i64>(5)? as u32,
+                    byte_start: row.get::<_, i64>(6)? as usize,
+                    byte_end: row.get::<_, i64>(7)? as usize,
+                    provider: row.get(8)?,
+                    grammar: row.get(9)?,
+                    language: row.get(10)?,
+                })
+            },
+        )
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(OccurrenceList {
+        field_declarations: field_declarations as usize,
+        symbol_declarations: symbol_declarations as usize,
+        total: total as usize,
+        items,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -3512,6 +3605,102 @@ mod tests {
         assert_eq!(SCHEMA_VERSION, 5, "the occurrence table is schema v5");
         assert!(table_exists(&conn, "reference_occurrences"));
         assert!(occurrence_names(&conn).is_empty());
+    }
+
+    #[test]
+    fn the_occurrence_census_is_exact_ordered_and_paged() {
+        use super::{insert_file, insert_reference_occurrence, insert_symbol, occurrences_for};
+        let conn = open_memory().unwrap();
+        let snap = insert_snapshot(&conn, &sample_snapshot()).unwrap();
+        let file = |path: &str| {
+            insert_file(
+                &conn,
+                snap,
+                &FileRow {
+                    path: path.to_string(),
+                    language: "cpp".to_string(),
+                    bytes: 10,
+                    digest: "d".to_string(),
+                    errors: 0,
+                },
+            )
+            .unwrap()
+        };
+        let (b, a) = (file("b.cc"), file("a.cc"));
+        let symbol = |file_id: i64, kind: &str, name: &str| {
+            insert_symbol(
+                &conn,
+                snap,
+                &SymbolRow {
+                    file_id,
+                    kind: kind.to_string(),
+                    name: Some(name.to_string()),
+                    start_line: 1,
+                    start_col: 1,
+                    end_line: 1,
+                    end_col: 2,
+                    byte_start: 0,
+                    byte_end: 1,
+                    provider: "syntax".to_string(),
+                    grammar: "cpp:0.23.4".to_string(),
+                    language: "cpp".to_string(),
+                },
+            )
+            .unwrap();
+        };
+        // `value` is declared twice (a field and a function); `value_rad` is
+        // a different name and must never be listed for `value`.
+        symbol(a, "field", "value");
+        symbol(b, "function", "value");
+        symbol(a, "field", "value_rad");
+        let occurrence = |file_id: i64, name: &str, role: &str, byte_start: usize| {
+            let mut row = sample_occurrence(file_id, name);
+            row.role = role.to_string();
+            row.byte_start = byte_start;
+            row.byte_end = byte_start + 5;
+            insert_reference_occurrence(&conn, snap, &row).unwrap();
+        };
+        occurrence(b, "value", "member-access", 40);
+        occurrence(a, "value", "member-access", 90);
+        occurrence(a, "value", "address-of-binding", 10);
+        occurrence(a, "value_rad", "member-access", 20);
+
+        let all = occurrences_for(&conn, snap, "value", 50, 0).unwrap();
+        assert_eq!(
+            (all.field_declarations, all.symbol_declarations, all.total),
+            (1, 2, 3)
+        );
+        let order: Vec<(String, usize)> = all
+            .items
+            .iter()
+            .map(|o| (o.path.clone(), o.byte_start))
+            .collect();
+        assert_eq!(
+            order,
+            vec![
+                ("a.cc".to_string(), 10),
+                ("a.cc".to_string(), 90),
+                ("b.cc".to_string(), 40)
+            ],
+            "ordered by path, then byte offset"
+        );
+        assert_eq!(all.items[0].role, "address-of-binding");
+
+        let page = occurrences_for(&conn, snap, "value", 1, 1).unwrap();
+        assert_eq!((page.total, page.items.len()), (3, 1));
+        assert_eq!(page.items[0].byte_start, 90);
+
+        let absent = occurrences_for(&conn, snap, "absent", 50, 0).unwrap();
+        assert_eq!(
+            (
+                absent.field_declarations,
+                absent.symbol_declarations,
+                absent.total
+            ),
+            (0, 0, 0)
+        );
+        let empty = occurrences_for(&conn, snap, "", 50, 0).unwrap();
+        assert_eq!((empty.total, empty.items.len()), (0, 0));
     }
 
     #[test]
