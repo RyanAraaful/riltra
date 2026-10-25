@@ -7,6 +7,14 @@ as a usable GitNexus alternative; CP1 pilot spec frozen in
 corrections, G-TOK reconciliation policy, and owner decisions D-M9-1..D-M9-6
 recorded in §6.)
 
+> **Revision 4 note (2026-10-25, dated amendment; the text below is
+> unchanged).** CP2 (`m9-cp2-evidence.md`, `m9-cp2-reevaluation.md`), CP3
+> (`m9-cp3-evidence.md`) and CP4 (`m9-cp4-evidence.md`) have since been
+> executed under their own OWNER GO. The status of each release gate for the
+> release candidate is stated in `m9-cp4-evidence.md` §5; the matrix in §4
+> below remains the status at M9 entry. Nothing here authorizes the `v0.1.0`
+> release.
+
 This document is a design proposal. It authorizes no implementation, no
 checkpoint execution beyond CP1, no benchmark run, no MMSP modification, no
 packaging, no merge, no tag, and no release. CP1 was executed on 2026-10-20
