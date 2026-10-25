@@ -1,6 +1,6 @@
 # M9 C++ semantic index spike, Option A (2026-10-25)
 
-**Status: stopped at the go/no-go gate. No semantic evidence reached Riltra. All four capability gates remain UNMET.**
+**Status: stopped at the go/no-go gate. Postponed by owner decision on 2026-10-25; no further installs or downloads. No semantic evidence reached Riltra. All four capability gates remain UNMET.**
 
 Basis: [m9-cpp-semantic-index-decision-2026-10-25.md](m9-cpp-semantic-index-decision-2026-10-25.md) §5–§7. Owner approval: experiment only, one translation unit (`patch_match.cc`) without CUDA/HIP macros, no production code change, no push.
 
