@@ -1962,7 +1962,19 @@ impl EdgeRead<'_> {
             let (a, b, c, d): (Option<i64>, Option<i64>, Option<i64>, Option<i64>) = (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?);
             Ok((a.zip(b).map(|(a,b)| (a as usize,b as usize)), c.zip(d).map(|(a,b)| (a as usize,b as usize))))
         }).optional().map_err(|e| e.to_string())?;
-        let (callee_span, terminal_span) = spans.unwrap_or_default();
+        let evidence_span = |key: &str| -> Option<(usize, usize)> {
+            let pair = stored.get(key)?.as_array()?;
+            Some((
+                pair.first()?.as_u64()? as usize,
+                pair.get(1)?.as_u64()? as usize,
+            ))
+        };
+        // A factory argument has no call row at its own span: its evidence
+        // carries the spans instead.
+        let (callee_span, terminal_span) = match spans {
+            Some(found) => found,
+            None => (evidence_span("callee_span"), evidence_span("terminal_span")),
+        };
         Ok(EdgeHitOut {
             edge,
             verification,

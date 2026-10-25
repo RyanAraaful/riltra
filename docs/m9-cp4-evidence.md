@@ -271,11 +271,11 @@ archived evidence. A gate is never marked passed on milestone history alone.
    This documentation commit is local until pushed.
 2. **Renew the OpenCode API key** so the real agent-side session can run
    against the candidate (G-MCP, D5-E1).
-3. **D2-H2**: decide whether to add a labelled "type constructed through a
-   factory template" candidate (`make_unique<T>`, `make_shared<T>`), which
-   would restore the criterion's intent and attribute `dense_reconstruction_widget`
-   to `PatchMatchController` (two of the three construction sites), or to
-   accept the change and re-scope the criterion in a dated amendment.
+3. **D2-H2 (decided 2026-10-25, see §10):** the owner chose the labelled
+   candidate. `make_unique<T>` and `make_shared<T>` keep their callee names; the
+   constructed type is a `POTENTIAL_CALL` candidate with the reason
+   `factory-template-argument`, never `CALLS`. The grader's D2-H2 check passes on
+   this candidate. The 2026-10-25 record of the regression in §3 is unchanged.
 4. **C++ semantics on MMSP.** The type-identity gates (D1-C6, D2-C6) and a
    real answer for D3/D4 need a semantic provider. The clangd pilot
    (`docs/m9-clangd-pilot.md`) showed `references` on the colmap sources and the
@@ -319,3 +319,57 @@ owner's GO; it is proposed, not run.
 | `crates/cli/examples/release_docs.rs` | SBOM, third-party licenses and the drift check |
 | `.github/workflows/release-candidate.yml` | the release-candidate workflow (not yet run) |
 | `docs/licensing.md` | the complete package inventory appended on 2026-10-25 |
+
+## 10. Amendment 2026-10-25: D2-H2 resolved by a labelled candidate
+
+Dated amendment. §3 keeps the record of the regression (D2-H2 PASS → FAIL).
+This section records the change that followed and does not rewrite that record.
+
+**Decision.** `make_unique` and `make_shared` stay the callee names. The type
+argument of such a call is a labelled candidate: `POTENTIAL_CALL` at the
+argument's own span, `unresolved` = `factory-template-argument`, never `CALLS`.
+Only these two names qualify, and only a plain qualified argument
+(`mvs::PatchMatchController`). A generic `make<T>` and other argument shapes get
+no candidate. The callee name `make_unique<T>` is not restored.
+
+**Change.** `crates/cli/src/edges.rs` derives the candidate from the stored
+callee text. `crates/cli/src/index.rs` reads its spans from the evidence when no
+call row sits at its span. `crates/cli/src/store.rs`: `PARSER_VERSION` 4 → 5, so
+an index written by parser 4 reads as stale. The `cfg=` digest in the 88 golden
+files changes from `fc5c6854d048a25d` to `1a5c2768082c1072`; the substitution was
+checked by reversal against HEAD. One regression test changes:
+`cli_cpp_template_call_names_the_function_not_the_type_argument` now expects
+three edges and one candidate.
+
+**Verification.**
+- `cargo test --locked`: all targets pass. `cargo clippy --all-targets -- -D warnings`: exit 0.
+  `cargo fmt --all -- --check`: clean.
+- New tests: `cli_factory_template_argument_is_a_labelled_candidate`;
+  `cli_factory_template_argument_stays_a_candidate_under_scip` (no `CALLS` under
+  SCIP evidence); unit `edges_factory_argument_names_the_constructed_type_only`.
+- Frozen harness `docs/pilots/cp2/method/run-all.ps1`, unchanged, on the pinned
+  snapshot `d62f06a` (tree `c5482ea`), debug build: completed with no failed
+  check; isolation assertions pass (snapshot and original clone porcelain 0).
+- Grader: honesty 18 PASS (the 2026-10-25 run before this change: 17 PASS, 1 FAIL);
+  capability 4 UNMET (D1-C6, D2-C6, D3-C5, D4-C5); evidence 2 UNAVAILABLE
+  (D3-E1, D5-E1).
+- D2-H2 callees of `PatchMatch::Run`: `make_unique` (`POTENTIAL_CALL`, `dynamic`,
+  callee span `std::make_unique<PatchMatchCuda>`) and `PatchMatchCuda`
+  (`POTENTIAL_CALL`, `factory-template-argument`, span `PatchMatchCuda`). No
+  `CALLS` edge in any query output of the run.
+- D2-C6 stays UNMET. Class callers gain `dense_reconstruction_widget.cc`, so two
+  of the three expected sites are attributed. `exe/mvs.cc` is still not recorded:
+  its direct initialization is not recorded by the syntax layer, as before.
+
+**Side effects (recorded, not extended in this task).** Callers of
+`PatchMatchController` gain `pycolmap/pipeline/mvs.cc`, a factory site outside
+the three expected sites. Callees of `PatchMatchController::Run` gain two
+`ThreadPool` candidates (`std::make_unique<ThreadPool>`, lines 240 and 241).
+`trace --depth 4` from `PatchMatchController::Run` goes from 21 to 23 paths.
+
+**Limits.** The D5-E1 reason changed from `mcp-server-not-reached` to
+`session-not-run`: this pass did not run the OpenCode session (its API key had
+expired). Byte offsets differ from the M9 runs because the new snapshot clone
+uses CRLF line endings. Compare semantic fields (names, kinds, reasons, grades),
+not byte offsets or database sizes, across these runs. The raw run output is not
+tracked in this repository.

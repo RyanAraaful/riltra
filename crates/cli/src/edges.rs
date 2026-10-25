@@ -163,6 +163,121 @@ fn evidence_json(path: &str, span_bs: usize, span_be: usize, extra: &str) -> Str
     format!("{{\"path\":\"{path}\",\"span\":[{span_bs},{span_be}]{extra}}}")
 }
 
+/// Factory templates whose first template argument is the object they build.
+// shortcut: matched by the called name, not by a semantic proof that the
+// callee is `std::make_unique` or `std::make_shared`. Upgrade when a semantic
+// provider names the callee.
+const FACTORY_CALLEES: [&str; 2] = ["make_unique", "make_shared"];
+
+/// The argument of a factory call, as its stored callee text writes it.
+#[derive(Debug, PartialEq)]
+struct FactoryArgument<'a> {
+    /// Argument as written (`mvs::PatchMatchController`), absolute bytes.
+    span: (usize, usize),
+    /// Terminal name of the argument (`PatchMatchController`), absolute bytes.
+    terminal: (usize, usize),
+    name: &'a str,
+}
+
+/// Argument of a factory call (`std::make_unique<PatchMatchCuda>(args)`),
+/// read from the stored callee text. `None` unless the argument is a plain
+/// qualified name: arrays, pointers and other shapes are left out, not
+/// guessed. `callee_bs` is the callee's absolute byte offset and `terminal`
+/// the absolute range of its called name.
+fn factory_argument(
+    callee: &str,
+    callee_bs: usize,
+    terminal: (usize, usize),
+) -> Option<FactoryArgument<'_>> {
+    let t_start = terminal.0.checked_sub(callee_bs)?;
+    let t_end = terminal.1.checked_sub(callee_bs)?;
+    if !FACTORY_CALLEES.contains(&callee.get(t_start..t_end)?) {
+        return None;
+    }
+    // The template argument list follows the called name: `<args>`.
+    let after = callee.get(t_end..)?;
+    let lead = after.len() - after.trim_start().len();
+    let args = after.get(lead..)?.strip_prefix('<')?.strip_suffix('>')?;
+    let arg = args.trim();
+    let arg_at = t_end + lead + 1 + (args.len() - args.trim_start().len());
+    // The type's name ends before any nested `<`; its last `::` segment is
+    // the terminal name.
+    let head = arg[..arg.find('<').unwrap_or(arg.len())].trim_end();
+    if !is_plain_qualified_name(head) {
+        return None;
+    }
+    let name_at = head.rfind("::").map_or(0, |i| i + 2);
+    Some(FactoryArgument {
+        span: (callee_bs + arg_at, callee_bs + arg_at + arg.len()),
+        terminal: (
+            callee_bs + arg_at + name_at,
+            callee_bs + arg_at + head.len(),
+        ),
+        name: &head[name_at..],
+    })
+}
+
+/// `a::b::C`: identifier segments joined by `::`, and nothing else.
+fn is_plain_qualified_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.split("::").all(|segment| {
+            let mut chars = segment.chars();
+            chars
+                .next()
+                .is_some_and(|c| c == '_' || c.is_ascii_alphabetic())
+                && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+        })
+}
+
+/// The factory argument of a call fact, when the call is a factory call.
+fn factory_argument_of(call: &store::CallRow) -> Option<FactoryArgument<'_>> {
+    let callee = call.callee.as_ref()?;
+    let terminal = call.tcallee.as_ref()?;
+    factory_argument(
+        call.name.as_deref()?,
+        callee.byte_start,
+        (terminal.byte_start, terminal.byte_end),
+    )
+}
+
+/// Candidate edge for the type a factory call constructs: a `POTENTIAL_CALL`
+/// at the argument's own span. Nothing here proves that the constructor runs,
+/// so it is never `CALLS`.
+fn factory_candidate(
+    snapshot_id: i64,
+    call: &store::CallRow,
+    path: &str,
+    arg: &FactoryArgument<'_>,
+    caller: Option<EdgeEndpoint>,
+) -> EdgeRow {
+    let (bs, be) = arg.span;
+    let (ts, te) = arg.terminal;
+    let reason = if caller.is_none() {
+        "owner-unproven"
+    } else {
+        "factory-template-argument"
+    };
+    EdgeRow {
+        snapshot_id,
+        file_id: call.file_id,
+        caller,
+        caller_path: path.to_string(),
+        caller_span_bytes: (bs, be),
+        callee: None,
+        callee_name: arg.name.to_string(),
+        edge_kind: EdgeKind::PotentialCall.as_str().to_string(),
+        precision: "Heuristic".to_string(),
+        provider: "syntax".to_string(),
+        evidence: evidence_json(
+            path,
+            bs,
+            be,
+            &format!(",\"callee_span\":[{bs},{be}],\"terminal_span\":[{ts},{te}]"),
+        ),
+        unresolved: Some(reason.to_string()),
+    }
+}
+
 /// Syntax-only derivation: `IMPORTS` verbatim + honest `POTENTIAL_CALL`
 /// candidates. Never proves `CALLS`. Reads only; the caller stores the rows.
 pub fn derive_syntax_edges(
@@ -247,6 +362,15 @@ pub fn derive_syntax_edges(
                 Some("no-overlap".to_string())
             }
         };
+        if let Some(arg) = factory_argument_of(call) {
+            edges.push(factory_candidate(
+                snapshot_id,
+                call,
+                path,
+                &arg,
+                caller.clone(),
+            ));
+        }
         edges.push(EdgeRow {
             snapshot_id,
             file_id: call.file_id,
@@ -1860,6 +1984,55 @@ mod tests {
             "receiver dispatch without proof is dynamic, not resolved"
         );
         assert!(edges.iter().any(|e| e.edge_kind == "IMPORTS"));
+    }
+
+    #[test]
+    fn edges_factory_argument_names_the_constructed_type_only() {
+        // (stored callee text, constructed type as written, its terminal name)
+        let cases: &[(&str, Option<(&str, &str)>)] = &[
+            (
+                "std::make_unique<PatchMatchCuda>",
+                Some(("PatchMatchCuda", "PatchMatchCuda")),
+            ),
+            (
+                "std::make_shared<mvs::PatchMatchController>",
+                Some(("mvs::PatchMatchController", "PatchMatchController")),
+            ),
+            (
+                "std::make_unique< PatchMatchCuda >",
+                Some(("PatchMatchCuda", "PatchMatchCuda")),
+            ),
+            ("std::make_unique <Thing>", Some(("Thing", "Thing"))),
+            (
+                "std::make_unique<std::vector<std::string>>",
+                Some(("std::vector<std::string>", "vector")),
+            ),
+            ("make_shared<Thing>", Some(("Thing", "Thing"))),
+            ("std::make_unique<int[]>", None),
+            ("std::make_unique<Thing*>", None),
+            ("std::make_unique<decltype(x)>", None),
+            ("std::make_unique<>", None),
+            ("std::make_unique", None),
+            ("make_unique_widget<Thing>", None),
+            ("make<Thing>", None),
+            ("std::vector<int>", None),
+        ];
+        for &(callee, expected) in cases {
+            // The called name is the identifier run at `make_`, else the first identifier.
+            let start = callee.find("make_").unwrap_or(0);
+            let end = start
+                + callee[start..]
+                    .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                    .unwrap_or(callee.len() - start);
+            // Offsets are absolute: place the callee at byte 100 of its file.
+            let got = factory_argument(callee, 100, (start + 100, end + 100)).map(|a| {
+                (
+                    &callee[a.span.0 - 100..a.span.1 - 100],
+                    &callee[a.terminal.0 - 100..a.terminal.1 - 100],
+                )
+            });
+            assert_eq!(got, expected, "{callee}");
+        }
     }
 
     #[test]

@@ -398,7 +398,14 @@ fn cli_cpp_template_call_names_the_function_not_the_type_argument() {
         String::from_utf8(src[a..b].to_vec()).unwrap()
     };
     let edges = v["edges"].as_array().expect("edges");
-    assert_eq!(edges.len(), 2, "{v}");
+    // Two calls, plus the labelled candidate for the factory's argument.
+    assert_eq!(edges.len(), 3, "{v}");
+    // Only the factory call yields a candidate; the generic `make<T>` yields none.
+    let candidates = edges
+        .iter()
+        .filter(|e| e["unresolved"] == "factory-template-argument")
+        .count();
+    assert_eq!(candidates, 1, "{v}");
     // (callee as written, called name, reason): a qualified call has a
     // receiver (`dynamic`), an unqualified one has none (`no-overlap`).
     for (callee, terminal, reason) in [
@@ -415,13 +422,108 @@ fn cli_cpp_template_call_names_the_function_not_the_type_argument() {
             .unwrap_or_else(|| panic!("edge for {callee}: {v}"));
         assert_eq!(edge["callee_name"], terminal, "{edge}");
         assert_eq!(text(&edge["evidence"]["terminal_span"]), terminal, "{edge}");
-        // Syntax only: a candidate, never a proven call and never a
-        // constructor call of the template type argument.
+        // Syntax only: a candidate, never a proven call.
         assert_eq!(edge["kind"], "POTENTIAL_CALL", "{edge}");
         assert_eq!(edge["precision"], "Heuristic", "{edge}");
         assert_eq!(edge["unresolved"], reason, "{edge}");
     }
     assert!(!v.to_string().contains("\"CALLS\""), "{v}");
+}
+
+#[test]
+fn cli_factory_template_argument_is_a_labelled_candidate() {
+    let h = home("factory-candidate");
+    let dir = repo_with(
+        &h,
+        "sem",
+        &[(
+            "patch.cpp",
+            "void caller(int options) {\n  auto cuda = std::make_unique<PatchMatchCuda>(options);\n}\nstruct PatchMatchCuda {};\n",
+        )],
+    );
+    do_index(&h);
+    let v = query_json(&h, "callees", "patch.cpp", &[]);
+    let src = std::fs::read(dir.join("patch.cpp")).unwrap();
+    let text = |span: &serde_json::Value| {
+        let a = span[0].as_u64().unwrap() as usize;
+        let b = span[1].as_u64().unwrap() as usize;
+        String::from_utf8(src[a..b].to_vec()).unwrap()
+    };
+    let edges = v["edges"].as_array().expect("edges");
+    assert_eq!(edges.len(), 2, "{v}");
+    assert!(edges.iter().all(|e| e["kind"] != "CALLS"), "{v}");
+    // The called function keeps the name it is called by.
+    let call = edges
+        .iter()
+        .find(|e| e["callee_name"] == "make_unique")
+        .unwrap_or_else(|| panic!("{v}"));
+    assert_eq!(
+        text(&call["evidence"]["callee_span"]),
+        "std::make_unique<PatchMatchCuda>",
+        "{call}"
+    );
+    assert_eq!(
+        text(&call["evidence"]["terminal_span"]),
+        "make_unique",
+        "{call}"
+    );
+    assert_eq!(call["kind"], "POTENTIAL_CALL", "{call}");
+    // The constructed type is a labelled candidate at its own span.
+    let made = edges
+        .iter()
+        .find(|e| e["callee_name"] == "PatchMatchCuda")
+        .unwrap_or_else(|| panic!("{v}"));
+    assert_eq!(made["kind"], "POTENTIAL_CALL", "{made}");
+    assert_eq!(made["precision"], "Heuristic", "{made}");
+    assert_eq!(made["verification"], "Unverified", "{made}");
+    assert_eq!(made["unresolved"], "factory-template-argument", "{made}");
+    assert!(made["callee"].is_null(), "{made}");
+    for field in ["span", "callee_span", "terminal_span"] {
+        assert_eq!(
+            text(&made["evidence"][field]),
+            "PatchMatchCuda",
+            "{field}: {made}"
+        );
+    }
+}
+
+#[test]
+fn cli_factory_template_argument_stays_a_candidate_under_scip() {
+    const CALLER: &str = "scip-test test test-pkg 1.0.0 patch.cpp/caller().";
+    const CUDA: &str = "scip-test test test-pkg 1.0.0 patch.cpp/PatchMatchCuda#";
+    let h = home("factory-scip");
+    let dir = repo_with(
+        &h,
+        "sem",
+        &[(
+            "patch.cpp",
+            "void caller(int options) {\n  auto cuda = std::make_unique<PatchMatchCuda>(options);\n}\nstruct PatchMatchCuda {};\n",
+        )],
+    );
+    do_index(&h);
+    // SCIP names the type where it is used (line 1, columns 31 to 45) and
+    // where it is defined (line 3).
+    let doc = test_document(
+        "patch.cpp",
+        &[
+            occurrence(CALLER, 0x1, 0, 5, 11),
+            occurrence(CUDA, 0x0, 1, 31, 45),
+            occurrence(CUDA, 0x1, 3, 7, 21),
+        ],
+        &[(CALLER, "caller"), (CUDA, "PatchMatchCuda")],
+    );
+    import_documents(&h, &dir, "scip-test", &[doc]);
+    let v = query_json(&h, "callees", "patch.cpp", &[]);
+    let edges = v["edges"].as_array().expect("edges");
+    // A type reference is not a call: no CALLS edge, and the candidate keeps
+    // its label.
+    assert!(edges.iter().all(|e| e["kind"] != "CALLS"), "{v}");
+    let made = edges
+        .iter()
+        .find(|e| e["callee_name"] == "PatchMatchCuda")
+        .unwrap_or_else(|| panic!("{v}"));
+    assert_eq!(made["kind"], "POTENTIAL_CALL", "{made}");
+    assert_eq!(made["unresolved"], "factory-template-argument", "{made}");
 }
 
 #[test]

@@ -11,12 +11,14 @@ use rusqlite::{params, Connection, OptionalExtension};
 /// Current schema version (`PRAGMA user_version`).
 /// 5: the `reference_occurrences` table (E7 Slice 2).
 pub const SCHEMA_VERSION: u32 = 5;
-/// Parser/extraction version. Bump whenever `syntax.rs` extraction changes;
-/// freshness treats a mismatch as stale (never silently current).
+/// Parser/extraction version. Bump whenever `syntax.rs` extraction or the
+/// syntax edges derived from it change; freshness treats a mismatch as stale
+/// (never silently current).
 /// 2: C++ data members are extracted as `field` symbols (E7 Slice 1).
 /// 3: the terminal span of a C++ call excludes template arguments.
 /// 4: C++ name occurrences are extracted (E7 Slice 2).
-pub const PARSER_VERSION: u32 = 4;
+/// 5: the argument of a C++ factory call (`make_unique<T>`) is a candidate edge.
+pub const PARSER_VERSION: u32 = 5;
 
 /// Grammar + runtime versions pinned in `Cargo.lock`. A test pins these
 /// against the lockfile so they cannot drift silently.
