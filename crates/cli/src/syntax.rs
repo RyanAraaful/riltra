@@ -6,6 +6,7 @@
 //! written (e.g. `w.process`), never a resolved target. Anything the grammar
 //! cannot represent is reported via `errors` or left out, never guessed.
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use crate::json::escape;
@@ -123,7 +124,29 @@ pub struct FileFacts {
     pub definitions: Vec<Fact>,
     pub imports: Vec<Fact>,
     pub calls: Vec<Fact>,
+    /// Name occurrences of a C++ source (E7 Slice 2): `kind` is the role, the
+    /// name is the identifier text, the span and bytes address the identifier.
+    /// Never part of the `scan` document; stored and queried by the index only.
+    pub reference_occurrences: Vec<Fact>,
     pub errors: u32,
+}
+
+/// Roles of a reference occurrence. These strings are stored in
+/// `reference_occurrences.role` and reported by `search --occurrences`.
+pub const ROLE_MEMBER_ACCESS: &str = "member-access";
+pub const ROLE_ADDRESS_OF_BINDING: &str = "address-of-binding";
+pub const ROLE_MACRO_ARGUMENT: &str = "macro-argument";
+
+/// Confidence of an occurrence, derived from its role and never stored: the
+/// syntax proves the role and the location (`observed`), or the role needs an
+/// assumption outside the syntax (`candidate`).
+// Read by the occurrence section of the search response (E7 Slice 2, S3).
+#[allow(dead_code)]
+pub fn occurrence_confidence(role: &str) -> &'static str {
+    match role {
+        ROLE_MEMBER_ACCESS | ROLE_ADDRESS_OF_BINDING => "observed",
+        _ => "candidate",
+    }
 }
 
 fn ts_language(lang: Language) -> tree_sitter::Language {
@@ -484,6 +507,105 @@ fn inner_declarator(node: tree_sitter::Node) -> Option<tree_sitter::Node> {
     None
 }
 
+fn push_occurrence(facts: &mut FileFacts, role: &'static str, name: tree_sitter::Node, src: &[u8]) {
+    let (span, byte_start, byte_end) = span_of(name);
+    facts.reference_occurrences.push(Fact {
+        kind: role,
+        name: node_text(name, src).map(str::to_string),
+        text: None,
+        span,
+        byte_start,
+        byte_end,
+        callee: None,
+        tcallee: None,
+    });
+}
+
+/// C++ member access: a `field_expression` whose field is a plain
+/// `field_identifier` (`a.b`, `p->b`, `p->*b`; `a.T::b` has a qualified field
+/// and is not recorded). The row is the field identifier. Under `&` the role
+/// is the address-of binding, which replaces the member access for the same
+/// identifier, so one identifier is one row.
+fn push_member_access(facts: &mut FileFacts, node: tree_sitter::Node, src: &[u8]) {
+    let Some(field) = node
+        .child_by_field_name("field")
+        .filter(|f| f.kind() == "field_identifier")
+    else {
+        return;
+    };
+    let role = if is_address_of_operand(node) {
+        ROLE_ADDRESS_OF_BINDING
+    } else {
+        ROLE_MEMBER_ACCESS
+    };
+    push_occurrence(facts, role, field, src);
+}
+
+/// True when `node` is the direct operand of a unary `&`.
+fn is_address_of_operand(node: tree_sitter::Node) -> bool {
+    node.parent().is_some_and(|parent| {
+        parent.kind() == "pointer_expression"
+            && parent
+                .child_by_field_name("operator")
+                .is_some_and(|op| op.kind() == "&")
+            && parent
+                .child_by_field_name("argument")
+                .is_some_and(|arg| arg.id() == node.id())
+    })
+}
+
+/// A bare identifier argument of a call whose callee is a bare identifier
+/// naming a function-like macro defined in this file. The macro's expansion
+/// is unknown, so the row is a candidate; the callee itself is never a row.
+fn push_macro_argument(
+    facts: &mut FileFacts,
+    node: tree_sitter::Node,
+    src: &[u8],
+    macros: &HashSet<&str>,
+) {
+    let Some(args) = node.parent().filter(|p| p.kind() == "argument_list") else {
+        return;
+    };
+    let Some(call) = args.parent().filter(|p| p.kind() == "call_expression") else {
+        return;
+    };
+    let is_call_arguments = call
+        .child_by_field_name("arguments")
+        .is_some_and(|a| a.id() == args.id());
+    let calls_a_local_macro = call
+        .child_by_field_name("function")
+        .filter(|f| f.kind() == "identifier")
+        .and_then(|f| node_text(f, src))
+        .is_some_and(|name| macros.contains(name));
+    if is_call_arguments && calls_a_local_macro {
+        push_occurrence(facts, ROLE_MACRO_ARGUMENT, node, src);
+    }
+}
+
+/// Names of the function-like macros (`#define NAME(args)`) defined in the
+/// file, wherever the definition sits (any preprocessor branch, before or
+/// after the use). Object-like macros are not callable and are not included.
+fn function_macro_names<'a>(root: tree_sitter::Node<'a>, src: &'a [u8]) -> HashSet<&'a str> {
+    let mut names = HashSet::new();
+    let mut pending = vec![root];
+    while let Some(node) = pending.pop() {
+        if node.kind() == "preproc_function_def" {
+            if let Some(name) = node
+                .child_by_field_name("name")
+                .and_then(|n| node_text(n, src))
+            {
+                names.insert(name);
+            }
+        }
+        for i in 0..node.child_count() {
+            if let Some(child) = node.child(i) {
+                pending.push(child);
+            }
+        }
+    }
+    names
+}
+
 fn push_call(facts: &mut FileFacts, node: tree_sitter::Node, src: &[u8]) {
     let func = node.child_by_field_name("function");
     let callee = func.and_then(|f| node_text(f, src).map(|s| s.to_string()));
@@ -663,7 +785,13 @@ fn position_of(src: &[u8], off: usize) -> (u32, u32) {
     (line, col)
 }
 
-fn visit(lang: Language, node: tree_sitter::Node, src: &[u8], facts: &mut FileFacts) {
+fn visit(
+    lang: Language,
+    node: tree_sitter::Node,
+    src: &[u8],
+    facts: &mut FileFacts,
+    macros: &HashSet<&str>,
+) {
     // Missing tokens (e.g. a `)` the parser inserts) are anonymous: count
     // every child, named or not, or recovery evidence goes missing.
     if node.is_missing() || node.kind() == "ERROR" {
@@ -716,12 +844,14 @@ fn visit(lang: Language, node: tree_sitter::Node, src: &[u8], facts: &mut FileFa
             "preproc_include" => push_import(facts, node, src),
             "call_expression" => push_call(facts, node, src),
             "declaration" => push_direct_init_call(facts, node, src),
+            "field_expression" => push_member_access(facts, node, src),
+            "identifier" => push_macro_argument(facts, node, src, macros),
             _ => {}
         },
     }
     for i in 0..node.child_count() {
         if let Some(child) = node.child(i) {
-            visit(lang, child, src, facts);
+            visit(lang, child, src, facts, macros);
         }
     }
 }
@@ -735,6 +865,7 @@ pub fn parse_source(lang: Language, src: &[u8]) -> FileFacts {
         definitions: Vec::new(),
         imports: Vec::new(),
         calls: Vec::new(),
+        reference_occurrences: Vec::new(),
         errors: 0,
     };
     let mut parser = tree_sitter::Parser::new();
@@ -744,7 +875,12 @@ pub fn parse_source(lang: Language, src: &[u8]) -> FileFacts {
         return facts;
     }
     if let Some(tree) = parser.parse(src, None) {
-        visit(lang, tree.root_node(), src, &mut facts);
+        let macros = if lang == Language::Cpp {
+            function_macro_names(tree.root_node(), src)
+        } else {
+            HashSet::new()
+        };
+        visit(lang, tree.root_node(), src, &mut facts, &macros);
     } else {
         facts.errors += 1;
     }
@@ -1291,5 +1427,184 @@ mod tests {
             facts.calls.is_empty(),
             "a class member declaration is not a constructor call"
         );
+    }
+
+    /// The reference occurrences of a C++ source: (role, name, start_line,
+    /// start_col, the text under the recorded byte range).
+    fn cpp_occurrences(src: &[u8]) -> Vec<(String, String, u32, u32, String)> {
+        parse_source(Language::Cpp, src)
+            .reference_occurrences
+            .iter()
+            .map(|o| {
+                (
+                    o.kind.to_string(),
+                    o.name.clone().unwrap_or_default(),
+                    o.span.start_line,
+                    o.span.start_col,
+                    String::from_utf8_lossy(&src[o.byte_start..o.byte_end]).into_owned(),
+                )
+            })
+            .collect()
+    }
+
+    fn occurrence(
+        role: &str,
+        name: &str,
+        line: u32,
+        col: u32,
+    ) -> (String, String, u32, u32, String) {
+        (role.into(), name.into(), line, col, name.into())
+    }
+
+    #[test]
+    fn a_cpp_member_access_is_an_observed_occurrence_at_the_identifier() {
+        // `.` and `->` are both member accesses; the row points at the field
+        // identifier, and the bytes address exactly that identifier.
+        let src = b"struct S { int b; };\nint f(S a, S* p) {\n  return a.b + p->b;\n}\n";
+        assert_eq!(
+            cpp_occurrences(src),
+            vec![
+                occurrence("member-access", "b", 3, 12),
+                occurrence("member-access", "b", 3, 19),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_method_call_receiver_is_a_member_access_by_name_next_to_its_call() {
+        // Any `field_expression` with a `field_identifier` is a member access;
+        // the call fact is recorded separately and is unchanged.
+        let src = b"struct W { void run(); };\nvoid g(W w) {\n  w.run();\n}\n";
+        assert_eq!(
+            cpp_occurrences(src),
+            vec![occurrence("member-access", "run", 3, 5)]
+        );
+        assert_eq!(parse_source(Language::Cpp, src).calls.len(), 1);
+    }
+
+    #[test]
+    fn the_address_of_a_member_is_one_address_of_binding_row() {
+        // `&p->b` is a single row with the address-of role: the binding rule
+        // replaces the member-access row, it does not add a second one.
+        let src = b"struct S { int b; };\nvoid f(S* p) {\n  int* q = &p->b;\n}\n";
+        assert_eq!(
+            cpp_occurrences(src),
+            vec![occurrence("address-of-binding", "b", 3, 16)]
+        );
+    }
+
+    #[test]
+    fn a_dereferenced_member_is_a_member_access_not_an_address_of_binding() {
+        // Only the `&` operator binds: `*p->b` dereferences the member.
+        let src = b"struct S { int* b; };\nint f(S* p) {\n  int v = *p->b;\n  return v;\n}\n";
+        assert_eq!(
+            cpp_occurrences(src),
+            vec![occurrence("member-access", "b", 3, 15)]
+        );
+    }
+
+    #[test]
+    fn a_bare_argument_of_a_same_file_function_macro_is_a_candidate() {
+        // The callee `PRINT` is a function-like macro defined in this file,
+        // so the bare identifier argument is a macro-argument row. The macro
+        // name itself is never an occurrence.
+        let src = b"#define PRINT(x) (x)\nvoid f() {\n  int b = 0;\n  PRINT(b);\n}\n";
+        assert_eq!(
+            cpp_occurrences(src),
+            vec![occurrence("macro-argument", "b", 4, 9)]
+        );
+    }
+
+    #[test]
+    fn a_function_macro_defined_after_its_use_is_still_a_candidate() {
+        // The macro-name pre-pass is order-insensitive; the `candidate`
+        // confidence is the honest ceiling for it.
+        let src = b"void f() {\n  int b = 0;\n  M(b);\n}\n#define M(x) (x)\n";
+        assert_eq!(
+            cpp_occurrences(src),
+            vec![occurrence("macro-argument", "b", 3, 5)]
+        );
+    }
+
+    #[test]
+    fn object_like_foreign_and_ordinary_callees_have_no_macro_arguments() {
+        // `K` is an object-like macro (not callable), `FOREIGN` is defined
+        // nowhere in this file and `real` is an ordinary call: none of their
+        // arguments is a macro-argument row.
+        let src = b"#define K 1\nvoid f() {\n  int b = 0;\n  K(b);\n  FOREIGN(b);\n  real(b);\n}\n";
+        assert!(
+            cpp_occurrences(src).is_empty(),
+            "{:?}",
+            cpp_occurrences(src)
+        );
+    }
+
+    #[test]
+    fn a_member_access_inside_a_macro_argument_is_a_member_access() {
+        // Only a BARE identifier argument is a macro argument: `a.b` is a
+        // member access of `b`, and `a` (the receiver) is not an occurrence.
+        let src = b"#define M(x) (x)\nstruct S { int b; };\nvoid f(S a) {\n  M(a.b);\n}\n";
+        assert_eq!(
+            cpp_occurrences(src),
+            vec![occurrence("member-access", "b", 4, 7)]
+        );
+    }
+
+    #[test]
+    fn a_string_literal_is_never_an_occurrence() {
+        let src = b"#define M(x) (x)\nvoid f() {\n  M(\"b\");\n  const char* s = \"b\";\n}\n";
+        assert!(
+            cpp_occurrences(src).is_empty(),
+            "{:?}",
+            cpp_occurrences(src)
+        );
+    }
+
+    #[test]
+    fn declarations_are_not_occurrences() {
+        // A data member declaration is the `field` symbol of Slice 1, never
+        // an occurrence row.
+        let src = b"struct S { int a; int b, c; };\n";
+        assert!(
+            cpp_occurrences(src).is_empty(),
+            "{:?}",
+            cpp_occurrences(src)
+        );
+        assert_eq!(cpp_fields(src).len(), 3);
+    }
+
+    #[test]
+    fn a_qualified_member_name_is_not_an_occurrence() {
+        // `Type::member` and `a.Type::member` have a qualified identifier,
+        // not a field identifier, in the field position: a recorded coverage
+        // limit, never a guess.
+        let src = b"struct A { static int b; };\nint f(A a) {\n  return A::b + a.A::b;\n}\n";
+        assert!(
+            cpp_occurrences(src).is_empty(),
+            "{:?}",
+            cpp_occurrences(src)
+        );
+    }
+
+    #[test]
+    fn c_sources_produce_no_reference_occurrences() {
+        // The C walker is untouched: a C struct member census is a separate
+        // decision (the C++ arm only).
+        let src = b"struct S { int b; };\nint f(struct S a) { return a.b; }\n";
+        assert!(parse_source(Language::C, src)
+            .reference_occurrences
+            .is_empty());
+    }
+
+    #[test]
+    fn the_confidence_of_an_occurrence_is_derived_from_its_role() {
+        use super::{
+            occurrence_confidence, ROLE_ADDRESS_OF_BINDING, ROLE_MACRO_ARGUMENT, ROLE_MEMBER_ACCESS,
+        };
+        assert_eq!(occurrence_confidence(ROLE_MEMBER_ACCESS), "observed");
+        assert_eq!(occurrence_confidence(ROLE_ADDRESS_OF_BINDING), "observed");
+        assert_eq!(occurrence_confidence(ROLE_MACRO_ARGUMENT), "candidate");
+        // An unknown role never claims more than a candidate.
+        assert_eq!(occurrence_confidence("anything-else"), "candidate");
     }
 }
