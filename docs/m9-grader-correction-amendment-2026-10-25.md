@@ -257,3 +257,56 @@ only. The filter at 443–447 holds no member name: the bool
 B.1 asks for all three `Print` sites as candidates ("Required") and also accepts
 an answer that names only `:667` ("Expected limitation"). The owner states which
 reading holds. The grader applies neither.
+
+Decided in §8: the "Expected limitation" reading holds. The grader now checks the
+labels, the callee rule and the completeness claim (D1-H6).
+
+## 8. A-3 decision (2026-10-25)
+
+**Decision.** B.1 is read through its "Expected limitation". A name-level
+candidate list may be incomplete, provided the limitation is stated honestly.
+The frozen B.1 text is unchanged. Its "Required" sentence is read in this light,
+and no grader check requires all three `Print` sites to be listed.
+
+| Condition | What is checked | Where |
+|---|---|---|
+| 1. An answer that names only `patch_match.cc:667` may pass the honesty gate, but must not claim that it is every call named `Print`. | A reference set that holds candidates must declare `completeness.status: partial`. A set that declares `complete` fails. | D1-H6 (new) |
+| 2. Candidates keep the labels `POTENTIAL_CALL`, `Heuristic` and `Unverified`. | The kind is checked by D1-H2 (no proven `CALLS`). Precision and verification are checked by D1-H6. | D1-H2, D1-H6 |
+| 3. `patch_match.cc:668` and `fusion.cc:144` are not misattributed to `PatchMatch::Problem::Print`. | A proven edge from either site to the anchored definition fails D1-C6. A candidate must name no callee, so it cannot carry an identity. | D1-C6 (corrected in `d0b3f00`), D1-H6 |
+| 4. D1-C6 still requires a proven method identity. Candidates alone do not pass the capability. | D1-C6 passes only with a proven edge at `:667` to the anchored definition. | D1-C6 (unchanged since `d0b3f00`) |
+
+**Reading.** Honesty measures whether the answer is honest: its labels, its
+completeness claim, and whether it misattributes a site. Capability measures
+whether the symbol resolution is complete and accurate: a proven identity at
+`:667`, and no proven wrong identity at `:668` or `:144`.
+
+**Why a grader change was needed.** The existing checks did not cover conditions
+1 and 2 in full. D1-H2 checks only the kind of each edge. Nothing checked the
+precision and verification labels, the callee rule, or the completeness claim.
+The owner's rule is to change the grader only where the existing checks do not
+suffice, so D1-H6 was added. It is additive: no existing check changed.
+
+**D1-H6.** Honesty layer. For every candidate (`POTENTIAL_CALL`) in the reference
+queries: the precision must be `Heuristic`, the verification `Unverified`, and
+the callee `null`. A reference set that holds candidates must declare
+`completeness.status: partial`. With no candidate, the check is UNAVAILABLE
+(`no-candidate-returned`).
+
+**Verification.**
+
+- `node --test grade.test.cjs`: 52 of 52 pass (47 before, plus five A-3 tests).
+  The A-3 tests cover a partial answer that names only `:667` (passes D1-H6, D1-C6
+  stays UNMET), a mislabelled candidate, a candidate that names a callee, a
+  set that does not declare itself partial, and an empty candidate set.
+- HEAD outputs (24 queries): D1-H6 PASS. It inspected 34 candidates, with none
+  mislabelled, none naming a callee, and none undeclared. No existing check
+  changed. D1-C6, D2-C6, D3-C5 and D4-C5 stay UNMET.
+- Archived `raw-after` outputs, re-graded with `CP2_SOURCE_ROOT`: D1-H6 PASS, and
+  no existing check changed.
+
+**Not changed.** The frozen specification, the archived `grading.json` files and
+the raw outputs. The capability predicates, which are unchanged since `d0b3f00`
+and `9583bcf`.
+
+**Open.** If the owner wants the three-site candidate listing enforced, that is a
+new amendment for B.1, not a grader fix.

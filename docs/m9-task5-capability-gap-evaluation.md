@@ -407,4 +407,10 @@ The section above stays as it was first written.
 - A-1 (the truth list omits the pycolmap construction and the `->Print()` site) and
   A-2 (the frozen construction sites are compiled only with CUDA or HIP) are verified
   against the source (amendment §7). The frozen specification file is unchanged.
-- A-3 is open: the owner must decide how B.1 reads its candidate listing.
+- A-3 is decided (amendment §8): B.1 is read through its "Expected limitation". The
+  grader gains one additive honesty check, D1-H6, for the candidate labels, the callee
+  rule and the completeness claim. D1-C6 is unchanged.
+- The C++ semantic index decision is a memo, not an approval:
+  [m9-cpp-semantic-index-decision-2026-10-25.md](m9-cpp-semantic-index-decision-2026-10-25.md).
+  Option A is a bounded spike that needs a Linux runtime (WSL is not installed here),
+  an indexer download and the approvals listed there. Nothing was installed.
