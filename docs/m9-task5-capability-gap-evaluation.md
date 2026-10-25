@@ -383,3 +383,21 @@ riltra search --repo mmsp-pin --symbol max_triangulation_angle --occurrences
 - The SCIP disambiguator format depends on the indexer. No indexer was verified.
 - The clangd conclusions are taken from the pilot record. No new clangd run was
   made.
+
+## 12. Revision (2026-10-25)
+
+The owner approved an audit and correction of G1 to G5 under limits. The details
+are in [m9-grader-correction-amendment-2026-10-25.md](m9-grader-correction-amendment-2026-10-25.md).
+The section above stays as it was first written.
+
+- G1 to G4 were grader bugs. Their predicates are corrected in
+  `docs/pilots/cp2/method/grade.cjs`, with 12 new tests (45 of 45 pass). No
+  verdict changed: all four gates stay UNMET at HEAD. Only the D1-C6 reason
+  changed, to `identity-not-proven-at-667`.
+- G5 (the frozen source truth omits `exe/mvs.cc:198` and
+  `pycolmap/pipeline/mvs.cc:39`) is a requirement item. It is recorded as a
+  proposal, not applied.
+- G6: D2-H2 is PASS at HEAD. The archived run's FAIL stays as a historical record.
+- G7 (the clangd pilot's attribution of `exe/mvs.cc:271`) is a record note, not
+  changed.
+- Open owner questions Q1 to Q5 are listed in the amendment (§4).
