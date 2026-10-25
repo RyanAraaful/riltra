@@ -118,10 +118,11 @@ No verdict changed. The reasons changed only for D1-C6.
 - These tests check the grader only. They are not evidence that any gate passes
   on MMSP.
 
-## 4. Requirement questions for the owner (not applied)
+## 4. Requirement questions for the owner (decided 2026-10-25, see §6)
 
-Each question changes a capability requirement, so none is applied. A decision
-needs a dated amendment.
+Each question changes a capability requirement or its reading. §6 records the
+decision on each one and what the grader applies. §7 records the verification
+of A-1 and A-2.
 
 - **Q1 (D4-C5 candidate listing).** B.4 accepts "affected files listed" for the
   honesty side. The corrected predicate requires proven rows instead, because the
@@ -142,7 +143,7 @@ needs a dated amendment.
 - **Q5 (D2-C6 class identity).** A constructor endpoint is not the class endpoint.
   Decide whether the class anchor or the constructor counts as the class.
 
-**Proposals to record, not to apply.**
+**Proposals (verified in §7; the frozen specification file is unchanged).**
 
 - **A-1 (source truth, G5).** Record in B.1 and B.2 by a dated amendment that
   `exe/mvs.cc:198` (`->Print()`) and `pycolmap/pipeline/mvs.cc:39` are real sites
@@ -161,3 +162,98 @@ needs a dated amendment.
   CLI.
 - The MMSP repository. Its snapshot `d62f06a` and its local clone are untouched.
 - No clangd, compilation database, indexer or graph feature was added.
+
+## 6. Decisions on Q1 to Q5 (2026-10-25)
+
+Owner constraints for this round: Q2 does not mean building a dataflow engine,
+and Q4 does not mean making the dispatch hop CALLS. The frozen specification is
+not changed before its sources are verified (§7).
+
+| Q | Decision | Where it is applied | Reason |
+|---|---|---|---|
+| Q1 | A candidate row, syntactic or name-level, does not satisfy D4-C5. Only a proven row on the frozen site does. | `grade.cjs`, D4-C5 (in `d0b3f00`) | The owner rule forbids a PASS from syntax candidates alone. Candidate rows stay visible as occurrences, but they are not capability evidence. |
+| Q2 | D4-C5 stays UNMET. The relation from the field read to the filter is not provable with the existing capabilities, and no dataflow was built. | Verified (§7.3) | The member occurrences in `patch_match.cc` are at lines 362 and 365. The filter at 443–447 uses the bool `has_max_triangulation_angle` and the local `max_triangulation_angle_rad`. No existing relation links those to the member. |
+| Q3 | No new honesty check for the B.1 name-level listing. | Not applied | B.1 reads both ways. Its "Required" sentence asks for all three `Print` sites as candidates. Its "Expected limitation" accepts an answer that names only `:667`, provided it does not claim the others are absent. The owner decides by amendment (A-3). The existing checks still cover the candidate labels (D1-H2) and wrong citations (the D1-C6 FAIL). |
+| Q4 | The dispatch hop stays `POTENTIAL_CALL`. Hops 2 and 3 must be proven direct calls whose callee is the cited definition. A `CALLS` edge on the dispatch hop does not satisfy the chain. | `grade.cjs`, D3-C5 (in `d0b3f00`) | B.2 and B.3 say the dispatch is at most a candidate and that a `CALLS` edge there is a FAIL. The existing D2-H3 check catches a proven `ProcessProblem` edge in the callees of `CtrlRun`. |
+| Q5 | The class's own constructor counts as the class. `patch_match.h:131` declares it and `patch_match.cc:219` defines it. A proven edge to it attributes the site to the class. | `grade.cjs` (`classOwns`), `grade.test.cjs` (two new tests) | A construction site calls the constructor, so the constructor is the identity a semantic provider would return. Rejecting it would fail a correct answer. A proven edge to another definition in the same file does not count. |
+
+Reason rename in D2-C6: `candidate-only-attribution` becomes
+`attribution-not-proven-to-class`. It covers name candidates and proven edges to
+other definitions.
+
+Verification: 47 of 47 tests pass. Against the pre-Q5 grader (`d0b3f00`), the
+three D2 tests that are new or renamed fail: the constructor acceptance on its
+verdict, and the other two on the reason name. Re-grading HEAD and the archived
+`raw-after` outputs changes no check. All four gates stay UNMET at HEAD.
+D2-H2 is PASS at HEAD.
+
+## 7. Verification of A-1 and A-2 (2026-10-25)
+
+Method: `git grep` over the whole MMSP tree at `d62f06a`, not only
+`colmap/src/colmap/*`, and a read of each guard at its exact line. The local MMSP
+clone was read only. The frozen specification file was not edited.
+
+### 7.1 A-1, completeness of the source truth
+
+Construction sites of `PatchMatchController` across the whole tree:
+
+- `colmap/src/colmap/controllers/automatic_reconstruction.cc:431` (B.2).
+- `colmap/src/colmap/exe/mvs.cc:271` (B.2).
+- `colmap/src/colmap/ui/dense_reconstruction_widget.cc:398`, with the
+  `make_unique` wrapper on line 397 (B.2 cites 397-398).
+- `colmap/src/pycolmap/pipeline/mvs.cc:39`, a `std::make_shared` construction.
+  **Not in B.2.** B.2 says three translation units. The repository has four.
+
+Calls to `Print` through `.` or `->`, whole tree: four. The three `.` sites of
+B.1 are the complete set of `.` calls: `patch_match.cc:667`, `patch_match.cc:668`
+and `fusion.cc:144`. The fourth is `colmap/src/colmap/exe/mvs.cc:198`,
+`options.mesh_texture_mapping->Print();`. It is a `->` call on another receiver,
+and B.1 does not enumerate `->` calls.
+
+**Result: A-1 is confirmed.** B.2 omits the pycolmap construction. B.1 covers
+`.` calls only. Neither point changes a criterion; both change the truth list.
+Proposed amendment A-1 adds the pycolmap site to B.2 and the `->Print()` site to
+B.1, with the lines above.
+
+### 7.2 A-2, the CUDA condition
+
+| Site | Guard at `d62f06a` | The construction is compiled when |
+|---|---|---|
+| `exe/mvs.cc:271` | `#if !defined(COLMAP_CUDA_ENABLED) && !defined(COLMAP_HIP_ENABLED)` at 260, `#else` at 263, `#endif` at 278 | CUDA or HIP is defined |
+| `automatic_reconstruction.cc:431` | `#if defined(COLMAP_CUDA_ENABLED)` at 429, `#else` at 437, `#endif` at 440 | CUDA is defined; HIP alone is not enough |
+| `dense_reconstruction_widget.cc:397-398` | `#if defined(COLMAP_MVS_ENABLED) && (defined(COLMAP_CUDA_ENABLED) || defined(COLMAP_HIP_ENABLED))` at 394-395 | MVS, and CUDA or HIP |
+| `pycolmap/pipeline/mvs.cc:39` | `#if defined(COLMAP_CUDA_ENABLED) || defined(COLMAP_HIP_ENABLED)` at 33, `#else` at 44 | CUDA or HIP |
+
+Where the macro comes from: `colmap/cmake/FindDependencies.cmake:347` appends
+`COLMAP_CUDA_ENABLED` to the compile definitions inside `if(CUDA_ENABLED AND
+CUDA_FOUND)`, opened at line 314. Its `else()` at line 399 sets `CUDA_ENABLED OFF`
+(line 400). The option defaults to ON (`colmap/CMakeLists.txt:40`). A build
+without a CUDA toolkit defines no CUDA macro.
+
+The pilot's reconstruction, `docs/pilots/clangd/method/colmap-cdb.ps1`, emits no
+`-D` defines, and its header says the defines of a real build are not reproduced.
+All four construction sites were therefore inactive in the pilot. The pilot's
+absence for them is inactive code, not evidence about E12 or about the shape of
+the LSP answer alone. This corrects pilot §6.3 (G7).
+
+Consequence for the semantic route: a compilation database must define
+`COLMAP_CUDA_ENABLED` or `COLMAP_HIP_ENABLED` before a semantic provider can see
+any frozen construction site. Parsing those files may also need the CUDA headers.
+That is an owner decision, taken together with the database (evaluation §9).
+
+**Result: A-2 is confirmed.** Proposed amendment A-2 records each guard in B.2 and
+in the pilot record, and states that the frozen sites are conditional on CUDA or
+HIP. No criterion changes.
+
+### 7.3 Q2 check
+
+`search --occurrences` for the member lists `patch_match.cc` at lines 362 and 365
+only. The filter at 443–447 holds no member name: the bool
+`has_max_triangulation_angle` (444) and the local `max_triangulation_angle_rad`
+(445). No existing capability links that local to the member.
+
+### 7.4 A-3, opened by Q3
+
+B.1 asks for all three `Print` sites as candidates ("Required") and also accepts
+an answer that names only `:667` ("Expected limitation"). The owner states which
+reading holds. The grader applies neither.

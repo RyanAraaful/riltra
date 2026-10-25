@@ -400,4 +400,11 @@ The section above stays as it was first written.
 - G6: D2-H2 is PASS at HEAD. The archived run's FAIL stays as a historical record.
 - G7 (the clangd pilot's attribution of `exe/mvs.cc:271`) is a record note, not
   changed.
-- Open owner questions Q1 to Q5 are listed in the amendment (§4).
+- The owner's questions Q1 to Q5 are decided in the amendment (§6). Q5 is
+  implemented: a proven edge to the class's own constructor attributes the site to
+  the class. Q2 keeps D4-C5 UNMET, because the field-to-filter relation is not
+  provable with the existing capabilities.
+- A-1 (the truth list omits the pycolmap construction and the `->Print()` site) and
+  A-2 (the frozen construction sites are compiled only with CUDA or HIP) are verified
+  against the source (amendment §7). The frozen specification file is unchanged.
+- A-3 is open: the owner must decide how B.1 reads its candidate listing.
