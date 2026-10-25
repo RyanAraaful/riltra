@@ -1223,6 +1223,9 @@ pub struct EdgeAnchor {
     pub span_bytes: Option<(usize, usize)>,
     pub precision: String,
     pub uncertainty: Option<String>,
+    /// The anchor is a C++ data member. A member is not callable, so no call
+    /// is matched to it by name; its references are name occurrences.
+    pub data_member: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1450,6 +1453,7 @@ pub fn resolve_edge_anchor(
             span_bytes: Some((best[0].byte_start, best[0].byte_end)),
             precision: best[0].precision.clone(),
             uncertainty: None,
+            data_member: false,
         });
     }
     if symbol.is_some() {
@@ -1471,13 +1475,9 @@ pub fn resolve_edge_anchor(
     let mut best: Vec<&store::SymbolRow> = Vec::new();
     let defs = store::symbols_at(tx, snapshot_id, validated)?;
     for def in &defs {
-        // A data member is not an anchor: the E7 Slice-1 field symbols must
-        // not change which definition a position resolves to. Anchoring on a
-        // member is later work (Slice 2), and until then the enclosing
-        // definition stays the anchor, exactly as before.
-        if def.kind == "field" {
-            continue;
-        }
+        // A data member's symbol spans its NAME only, so it is the narrowest
+        // definition exactly when the position is on that name; anywhere else
+        // in the class body the enclosing definition stays the anchor.
         if def.byte_start <= off && off < def.byte_end {
             let width = def.byte_end.saturating_sub(def.byte_start);
             if width < best_width {
@@ -1505,6 +1505,13 @@ pub fn resolve_edge_anchor(
         .into_iter()
         .next()
         .ok_or_else(|| "no anchor here".to_string())?;
+    let data_member = def.kind == "field";
+    let uncertainty = match (&def.name, data_member) {
+        (Some(name), true) => format!(
+            "syntax-only anchor: data member '{name}' has no call edges; its name occurrences are listed by search --occurrences"
+        ),
+        _ => "syntax-only anchor: no semantic identity at this position".to_string(),
+    };
     Ok(EdgeAnchor {
         kind: AnchorKind::SyntaxFallback,
         path: validated.to_string(),
@@ -1516,7 +1523,8 @@ pub fn resolve_edge_anchor(
         display: def.name.clone(),
         span_bytes: Some((def.byte_start, def.byte_end)),
         precision: "Heuristic".to_string(),
-        uncertainty: Some("syntax-only anchor: no semantic identity at this position".to_string()),
+        uncertainty: Some(uncertainty),
+        data_member,
     })
 }
 
@@ -2041,7 +2049,10 @@ pub(crate) fn edge_query_conn(
     } else {
         Vec::new()
     };
-    let paths = if request.direction == EdgeDir::Callers {
+    // Callers are matched by name only for a callable anchor: a data member
+    // takes no call by name, so a same-named method call is never its caller.
+    let by_name = request.direction == EdgeDir::Callers && !anchor.data_member;
+    let paths = if by_name {
         caller_candidate_paths(&tx, snapshot.id, &anchor)?
     } else {
         Vec::new()
@@ -2050,7 +2061,7 @@ pub(crate) fn edge_query_conn(
         snapshot_id: snapshot.id,
         endpoint: &endpoint,
         inbound: request.direction == EdgeDir::Callers,
-        candidate_name: if request.direction == EdgeDir::Callers {
+        candidate_name: if by_name {
             anchor.display.as_deref()
         } else {
             None

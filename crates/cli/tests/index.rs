@@ -231,35 +231,110 @@ fn a_cpp_method_or_function_pointer_member_is_not_a_field() {
     }
 }
 
+fn edge_doc(h: &Path, command: &str, path: &str, line: &str, col: &str) -> serde_json::Value {
+    let (code, out, err) = run(
+        h,
+        &[
+            command, "--repo", "r", "--path", path, "--line", line, "--col", col,
+        ],
+    );
+    assert_eq!(code, 0, "{command} failed: {err}");
+    serde_json::from_str(&out).unwrap_or_else(|e| panic!("not JSON ({e}): {out}"))
+}
+
 #[test]
-fn a_data_member_does_not_change_the_anchor_inside_its_class() {
-    // Characterization: a position inside a class body anchors to the CLASS.
-    // The E7 Slice-1 field symbols must not change that (Slice 1 finds the
-    // declaration; anchoring on a member is later work).
+fn a_position_on_a_data_member_name_anchors_the_member_not_its_class() {
+    // The anchor of a position on a data member's NAME is the member itself,
+    // so callers and impact answer about the member and never about the
+    // enclosing class (the class spans 0..68, the member name 34..57).
     let h = home("field-anchor");
     let repo = mkrepo(&h, "work");
     std::fs::write(repo.join("options.h"), CPP_FIELDS).unwrap();
     init_and_index(&h, &repo, "r");
-    let (code, out, err) = run(
-        &h,
-        &[
-            "callers",
-            "--repo",
-            "r",
-            "--path",
-            "options.h",
-            "--line",
-            "3",
-            "--col",
-            "10",
-        ],
-    );
-    assert_eq!(code, 0, "callers failed: {err}");
+    for command in ["callers", "callees"] {
+        let doc = edge_doc(&h, command, "options.h", "3", "10");
+        assert_eq!(
+            doc["anchor"]["span"],
+            serde_json::json!([34, 57]),
+            "{command}: {doc}"
+        );
+        assert_eq!(doc["anchor"]["endpoint"]["byte_start"], 34, "{command}");
+    }
+    // The anchor says what it is and where the references are listed.
+    let doc = edge_doc(&h, "callers", "options.h", "3", "10");
+    let note = doc["anchor"]["anchor_uncertainty"].as_str().unwrap();
     assert!(
-        out.contains("\"span\":[0,68]"),
-        "the anchor must stay the class, not the data member: {out}"
+        note.contains("data member 'max_triangulation_angle'"),
+        "{note}"
     );
-    assert!(!out.contains("\"span\":[34,57]"), "got: {out}");
+    assert!(note.contains("search --occurrences"), "{note}");
+}
+
+#[test]
+fn a_position_in_a_class_body_outside_any_member_name_still_anchors_the_class() {
+    let h = home("field-anchor-class");
+    let repo = mkrepo(&h, "work");
+    std::fs::write(repo.join("options.h"), CPP_FIELDS).unwrap();
+    init_and_index(&h, &repo, "r");
+    // ` public:` (line 2) and the type of the member (line 3, column 3) are
+    // inside the class but on no member name.
+    for (line, col) in [("2", "2"), ("3", "4")] {
+        let doc = edge_doc(&h, "callers", "options.h", line, col);
+        assert_eq!(
+            doc["anchor"]["span"],
+            serde_json::json!([0, 68]),
+            "{line}:{col}"
+        );
+        assert_eq!(
+            doc["anchor"]["anchor_uncertainty"],
+            "syntax-only anchor: no semantic identity at this position"
+        );
+    }
+}
+
+#[test]
+fn impact_at_a_data_member_is_unknown_and_anchored_at_the_member() {
+    let h = home("field-anchor-impact");
+    let repo = mkrepo(&h, "work");
+    std::fs::write(repo.join("options.h"), CPP_FIELDS).unwrap();
+    std::fs::write(repo.join("use.cc"), OCC_USE_CC).unwrap();
+    init_and_index(&h, &repo, "r");
+    let doc = edge_doc(&h, "impact", "options.h", "3", "10");
+    assert_eq!(doc["verdict"], "UNKNOWN");
+    assert_eq!(doc["anchor"]["span"], serde_json::json!([34, 57]));
+    assert_eq!(doc["completeness"]["status"], "partial");
+    assert_eq!(doc["paths"], serde_json::json!([]));
+    assert!(
+        !doc.to_string().contains("\"occurrences\""),
+        "the graph carries no occurrence data, only the pointer in the note: {doc}"
+    );
+    assert!(doc["anchor"]["anchor_uncertainty"]
+        .as_str()
+        .unwrap()
+        .contains("search --occurrences"));
+}
+
+#[test]
+fn callers_of_a_data_member_never_list_a_same_named_call() {
+    // A member is not callable: a call named like the member (here the method
+    // `Box::value`) is no caller of the member `Holder::value`.
+    let h = home("field-anchor-nocall");
+    let repo = mkrepo(&h, "work");
+    std::fs::write(
+        repo.join("types.h"),
+        "struct Holder {\n  int value;\n};\nstruct Box {\n  int value() const;\n};\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("use.cc"),
+        "#include \"types.h\"\nint f(Box& b) {\n  return b.value();\n}\n",
+    )
+    .unwrap();
+    init_and_index(&h, &repo, "r");
+    let doc = edge_doc(&h, "callers", "types.h", "2", "7");
+    assert_eq!(doc["anchor"]["span"], serde_json::json!([22, 27]), "{doc}");
+    assert_eq!(doc["edges"], serde_json::json!([]), "{doc}");
+    assert_eq!(doc["completeness"]["total"], 0);
 }
 
 #[test]

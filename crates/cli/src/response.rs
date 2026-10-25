@@ -730,6 +730,7 @@ mod tests {
             uncertainty: Some(
                 "syntax-only anchor: no semantic identity at this position".to_string(),
             ),
+            data_member: false,
         }
     }
 
