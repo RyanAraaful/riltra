@@ -305,7 +305,8 @@ pub fn derive_syntax_edges(
             callee: None,
             callee_name: import.text.clone().unwrap_or_default(),
             edge_kind: EdgeKind::Imports.as_str().to_string(),
-            precision: "Exact".to_string(),
+            // Syntax-only: the span is exact, the import is not resolved.
+            precision: "Heuristic".to_string(),
             provider: "syntax".to_string(),
             evidence: evidence_json(path, import.byte_start, import.byte_end, ""),
             unresolved: None,
@@ -1984,6 +1985,12 @@ mod tests {
             "receiver dispatch without proof is dynamic, not resolved"
         );
         assert!(edges.iter().any(|e| e.edge_kind == "IMPORTS"));
+        assert!(
+            edges
+                .iter()
+                .all(|e| e.provider != "syntax" || e.precision == "Heuristic"),
+            "syntax-only edges never carry Exact; Exact is reserved for SCIP-backed relations"
+        );
     }
 
     #[test]

@@ -207,3 +207,93 @@ Tests:
 Full suite (`cargo test --locked`): 776 passed, 0 failed, 8 test targets (772
 before this revision, plus four new F2 tests). `cargo fmt --all -- --check` and
 `cargo clippy --all-targets -- -D warnings` are clean.
+
+## Revision 2026-10-25: F5 reviewed; syntax import edges corrected
+
+F5 asked whether `precision: "Exact"` on SCIP-backed edges agrees with the M5
+and M6 contracts and with the invariant in `CLAUDE.md`. This revision records
+the review and one correction. The historical records are unchanged.
+
+### What `Exact` means
+
+- In M6 and in the code, `Exact` labels the evidence strength of one edge: the
+  span and endpoints come from the SCIP producer and are bound to the
+  digest-matched source riltra indexed. It is not verification. `Verification`
+  stays `Unverified`, and `Exact` never implies `Current`
+  ([m6-task4-validation.md](m6-task4-validation.md),
+  [m6-validation.md](m6-validation.md)).
+- Two older statements use the word differently. `crates/cli/src/semantic.rs`
+  (lines 12-17) calls `Precision::Exact` "compiler-backed" and says it is never
+  constructed in M5. Lines 184-185 of the same file and
+  `crates/cli/src/scip.rs:607` say no provider output is `Exact` without
+  producer attestation. Riltra has no producer attestation: the producer name
+  and version are unchecked metadata (F1).
+- `CLAUDE.md` says `Current` and `Exact` need an independent proof mechanism
+  before they are constructed.
+
+### Every product path that constructs `Exact`
+
+| Site | Edge | Meets the definition | Finding |
+|---|---|---|---|
+| `crates/cli/src/edges.rs:309` | IMPORTS, provider `syntax` | no | Syntax only, no producer. Every other syntax edge is `Heuristic` (`edges.rs:269`, `:384`, `:720`). Corrected to `Heuristic`. |
+| `crates/cli/src/edges.rs:579` | CALLS, `scip-import` | yes | The callee must be a callable declaration at the producer's target span in riltra's own parse of the digest-bound source (`callable_target`, `edges.rs:545`), and the caller owner must be proven. This is the "source-proven" CALLS that `CLAUDE.md` names. |
+| `crates/cli/src/edges.rs:678` | REFERENCES, `scip-import` | partly | The producer span is exact and digest-bound, but the callee is not checked. A temporary probe, removed and not committed, stored a plain reference to a symbol with no definition in the import as `REFERENCES / Exact / scip-import`. |
+
+Test-only constructions (`edges.rs:1687`, `:3184`, `index.rs:4437`,
+`store.rs:2444`) are not product paths.
+
+### Consistency
+
+- M5: still holds for semantic facts, which stay `Heuristic` (`scip.rs:608`).
+  Edge-level `Exact` postdates M5 and was introduced by M6.
+- M6: consistent for CALLS and for REFERENCES with a definition. Inconsistent
+  for IMPORTS (corrected here) and for REFERENCES to an undefined target. The
+  M6 wording "Exact REFERENCES with proven endpoints"
+  ([m6-task6-validation.md](m6-task6-validation.md), line 33) is not met for an
+  undefined target.
+- `CLAUDE.md`: its phrase "CALLS (SCIP-backed, source-proven)" matches the CALLS
+  path. The sentence "`Current`/`Exact` exist only for contract stability" is
+  stale, because M6 constructs `Exact`. Nothing constructs `Current`; its only
+  use is the name mapping at `semantic.rs:45`.
+- MEDIUM is unreachable from production derivation. REFERENCES is emitted only
+  at `edges.rs:678`, always without a caller, and `impact_verdict` returns
+  UNKNOWN for any edge without a caller. The M6 corpus has zero MEDIUM answers
+  ([m6-task7-validation.md](m6-task7-validation.md)).
+
+### Correction in this revision
+
+- `edges.rs:309`: IMPORTS precision `Exact` becomes `Heuristic`. No code reads
+  the value. IMPORTS is excluded from edge selection (`store.rs:1955`), and no
+  golden contains IMPORTS. Indexes built earlier keep the old value until they
+  are derived again. No answer changes.
+- Regression: `edges_derive_syntax_only_calls_are_honest_potentials` now asserts
+  that every syntax-provider edge is `Heuristic`. Red before (IMPORTS was
+  `Exact`), green after.
+
+### Owner decision: definition of `Exact` for REFERENCES
+
+Three options follow from the sources:
+
+- **B. Proven endpoint (recommended).** `Exact` on REFERENCES only when the
+  callee has a definition in the same import. Otherwise `Heuristic`. The change
+  is one condition in the plain-reference branch (`edges.rs:668-682`). Labels
+  change only for REFERENCES to undefined targets in `callers` and `callees`;
+  impact is unaffected. This matches the M6 wording. `CLAUDE.md` needs only its
+  stale sentence updated.
+- **A. Producer-stated span.** `Exact` means a producer span that is
+  digest-bound and import-scoped, as the F5 wording states. No code change
+  beyond IMPORTS. `CLAUDE.md` and the M6 wording "proven endpoints" must be
+  amended.
+- **C. Strict `CLAUDE.md`.** No `Exact` on SCIP-derived REFERENCES. CALLS keeps
+  `Exact` only if the owner accepts the callable-declaration proof as
+  independent. This changes every REFERENCES label; 11 golden files contain
+  REFERENCES.
+
+Recommendation: B. B is not an independent proof in the strict sense of
+`CLAUDE.md`, and only C meets that reading. B is the smallest change that makes
+the code match the M6 text without editing `CLAUDE.md`. `CLAUDE.md` is not
+tracked by git in this repository, so its wording is owner work.
+
+Tests: full suite `cargo test --locked`: 776 passed, 0 failed, 8 test targets.
+`cargo fmt --all -- --check` and `cargo clippy --all-targets -- -D warnings`
+are clean.
