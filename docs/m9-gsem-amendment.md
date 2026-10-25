@@ -160,3 +160,50 @@ Tests (red before the fix, green after):
 
 The original findings above are kept as recorded. F2 and F5 are unchanged in
 this revision.
+
+## Revision 2026-10-25: F2 resolved
+
+Owner decision: option (a), revalidation of identical imports. An identical
+re-import on the same snapshot is accepted and revalidates the existing import.
+It is no longer refused with `already imported`.
+
+Behaviour (`import_file` in `crates/cli/src/scip.rs`, helpers in
+`crates/cli/src/store.rs`):
+
+- The oldest identical import keeps its id and takes the facts of the new
+  attempt. Older identical rows, left by the earlier append-only import, are
+  removed. One import row per artifact remains on a snapshot.
+- Edges are re-derived for the snapshot. Import ids, provider metadata, the
+  snapshot identity, and the nonce are unchanged. The semantic generation
+  advances, as for any import.
+- A source-digest claim that the earlier import carried survives a re-import
+  that brings none. A claim supplied with the re-import replaces it.
+- A different artifact that claims the same identity still imports. The anchor
+  stays ambiguous until a rebuild.
+
+Change against the F2 requirement: the database is not byte-identical after an
+identical re-import, because the surviving import's fact rows are rewritten with
+new row ids. Row counts, import ids, and every answer are unchanged. The owner
+accepted this trade-off with option (a).
+
+Contract change: `task7_upgrade::reimport_revalidates_every_import_without_changing_snapshot`
+asserted that an identical re-import makes the anchor ambiguous. It now asserts
+that every case, `alias` included, is restored, since the duplicate no longer
+exists. The ambiguity rule is still tested for distinct artifacts.
+
+Tests:
+
+- `cli_f2_identical_reimport_revalidates_the_existing_import`: red before the
+  change (a second import row appeared), green after.
+- `cli_f2_identical_reimport_collapses_legacy_duplicates_to_the_oldest_id`.
+- `cli_f2_revalidation_keeps_the_earlier_source_claim_unless_replaced`.
+- `cli_f2_distinct_artifact_with_the_same_identity_stays_ambiguous`: passes
+  before and after.
+- `task7_upgrade::reimport_revalidates_every_import_without_changing_snapshot`:
+  red before, green after, with the assertion above.
+- `cli_graph_import_after_rebuild_rebinds` and
+  `edges_lifecycle_rebuild_rederives_after_target_change`: unchanged, passing.
+
+Full suite (`cargo test --locked`): 776 passed, 0 failed, 8 test targets (772
+before this revision, plus four new F2 tests). `cargo fmt --all -- --check` and
+`cargo clippy --all-targets -- -D warnings` are clean.

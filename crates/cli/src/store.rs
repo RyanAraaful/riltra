@@ -888,6 +888,82 @@ pub fn semantic_imports_for(
         .map_err(|e| e.to_string())
 }
 
+/// Earlier imports on `snapshot_id` that carry the same artifact digest as
+/// `import_id`, oldest first. Identical bytes on one snapshot are one import.
+pub fn semantic_import_duplicates(
+    conn: &Connection,
+    snapshot_id: i64,
+    import_id: i64,
+) -> Result<Vec<i64>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT older.id FROM semantic_imports AS newer
+             JOIN semantic_imports AS older
+               ON older.snapshot_id = newer.snapshot_id
+              AND older.artifact_id = newer.artifact_id
+              AND older.id < newer.id
+             WHERE newer.id = ?1 AND newer.snapshot_id = ?2 AND newer.artifact_id <> ''
+             ORDER BY older.id",
+        )
+        .map_err(|e| e.to_string())?;
+    let ids = stmt
+        .query_map(params![import_id, snapshot_id], |row| row.get(0))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<i64>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(ids)
+}
+
+/// Remove one import row and its facts from `snapshot_id`. Edges are not
+/// touched: every caller re-derives them afterwards.
+pub fn delete_semantic_import(
+    conn: &Connection,
+    snapshot_id: i64,
+    import_id: i64,
+) -> Result<(), String> {
+    conn.execute(
+        "DELETE FROM semantic_facts WHERE snapshot_id = ?1 AND import_id = ?2",
+        params![snapshot_id, import_id],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.execute(
+        "DELETE FROM semantic_imports WHERE snapshot_id = ?1 AND id = ?2",
+        params![snapshot_id, import_id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Revalidate `keep` with `fresh`, an identical import just written on the same
+/// snapshot: `keep` keeps its id and takes `fresh`'s facts. A claim that `keep`
+/// carries survives when `fresh` brings none.
+pub fn replace_semantic_import(
+    conn: &Connection,
+    snapshot_id: i64,
+    keep: i64,
+    fresh: i64,
+) -> Result<(), String> {
+    conn.execute(
+        "UPDATE semantic_imports SET claimed_source_digest =
+           (SELECT claimed_source_digest FROM semantic_imports WHERE id = ?1)
+         WHERE id = ?2 AND claimed_source_digest = ''",
+        params![keep, fresh],
+    )
+    .map_err(|e| e.to_string())?;
+    delete_semantic_import(conn, snapshot_id, keep)?;
+    conn.execute(
+        "UPDATE semantic_facts SET import_id = ?1 WHERE snapshot_id = ?2 AND import_id = ?3",
+        params![keep, snapshot_id, fresh],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.execute(
+        "UPDATE semantic_imports SET id = ?1 WHERE snapshot_id = ?2 AND id = ?3",
+        params![keep, snapshot_id, fresh],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// One import row by id, any snapshot.
 pub fn semantic_import_by_id(
     conn: &Connection,

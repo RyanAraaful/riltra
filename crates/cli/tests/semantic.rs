@@ -403,6 +403,237 @@ fn cli_import_is_atomic_and_binds_live_snapshot() {
     assert!(out.contains("\"verification\":\"Unverified\""));
 }
 
+/// One scalar read from the live index database.
+fn db_count(home: &Path, repo: &str, sql: &str) -> i64 {
+    let conn = rusqlite::Connection::open(home.join("index").join(format!("{repo}.db"))).unwrap();
+    conn.query_row(sql, [], |row| row.get(0)).unwrap()
+}
+
+#[test]
+fn cli_f2_identical_reimport_revalidates_the_existing_import() {
+    // Identical bytes on one snapshot are one import. The second attempt
+    // revalidates it in place: same import id, one row, unchanged answers.
+    let h = home("f2-dup");
+    let (_dir, scip) = ab_repo(&h);
+    do_index(&h);
+    let (code, first, err) = run(
+        &h,
+        &["semantic", "import", "--repo", "sem", "--scip", &scip],
+    );
+    assert_eq!(code, 0, "{err}");
+    let answers = || {
+        let status = run(&h, &["semantic", "status", "--repo", "sem"]).1;
+        let refs = run(
+            &h,
+            &[
+                "semantic", "query", "--repo", "sem", "--path", "src/a.ts", "--line", "1", "--col",
+                "17", "--refs",
+            ],
+        )
+        .1;
+        let callers = run(
+            &h,
+            &[
+                "callers", "--repo", "sem", "--path", "src/a.ts", "--line", "1", "--col", "17",
+            ],
+        )
+        .1;
+        (status, refs, callers)
+    };
+    let answers_before = answers();
+    let facts_before = db_count(&h, "sem", "SELECT COUNT(*) FROM semantic_facts");
+    // The same bytes under another name are still the same artifact.
+    let copy = h.join("copy.scip");
+    std::fs::copy(&scip, &copy).unwrap();
+    let (code, again, err) = run(
+        &h,
+        &[
+            "semantic",
+            "import",
+            "--repo",
+            "sem",
+            "--scip",
+            &copy.to_string_lossy(),
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(again, first, "revalidation reports the same import");
+    assert_eq!(
+        db_count(&h, "sem", "SELECT COUNT(*) FROM semantic_imports"),
+        1,
+        "one import per artifact on a snapshot"
+    );
+    assert_eq!(
+        db_count(&h, "sem", "SELECT COUNT(*) FROM semantic_facts"),
+        facts_before,
+        "the surviving import holds the same facts"
+    );
+    assert_eq!(
+        answers(),
+        answers_before,
+        "answers match the pre-reimport state"
+    );
+}
+
+#[test]
+fn cli_f2_revalidation_keeps_the_earlier_source_claim_unless_replaced() {
+    // A revalidating import without `--source-digest` keeps the claim the
+    // earlier import carried; one that brings a claim replaces it.
+    let h = home("f2-claim");
+    let (_dir, scip) = ab_repo(&h);
+    do_index(&h);
+    let claim = "1".repeat(64);
+    let (code, _, err) = run(
+        &h,
+        &[
+            "semantic",
+            "import",
+            "--repo",
+            "sem",
+            "--scip",
+            &scip,
+            "--source-digest",
+            &claim,
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    let (code, _, err) = run(
+        &h,
+        &["semantic", "import", "--repo", "sem", "--scip", &scip],
+    );
+    assert_eq!(code, 0, "{err}");
+    let (_, status, _) = run(&h, &["semantic", "status", "--repo", "sem"]);
+    assert!(
+        status.contains(&format!("\"claimed_source_digest\":\"{claim}\"")),
+        "{status}"
+    );
+    let replaced = "2".repeat(64);
+    let (code, _, err) = run(
+        &h,
+        &[
+            "semantic",
+            "import",
+            "--repo",
+            "sem",
+            "--scip",
+            &scip,
+            "--source-digest",
+            &replaced,
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    let (_, status, _) = run(&h, &["semantic", "status", "--repo", "sem"]);
+    assert!(
+        status.contains(&format!("\"claimed_source_digest\":\"{replaced}\"")),
+        "{status}"
+    );
+    assert_eq!(
+        db_count(&h, "sem", "SELECT COUNT(*) FROM semantic_imports"),
+        1
+    );
+}
+
+#[test]
+fn cli_f2_identical_reimport_collapses_legacy_duplicates_to_the_oldest_id() {
+    // Rows written by the earlier append-only import: one artifact twice on
+    // one snapshot. The next identical import leaves one row, the oldest id.
+    let h = home("f2-legacy");
+    let (_dir, scip) = ab_repo(&h);
+    do_index(&h);
+    let (code, first, err) = run(
+        &h,
+        &["semantic", "import", "--repo", "sem", "--scip", &scip],
+    );
+    assert_eq!(code, 0, "{err}");
+    let facts_before = db_count(&h, "sem", "SELECT COUNT(*) FROM semantic_facts");
+    let conn = rusqlite::Connection::open(h.join("index").join("sem.db")).unwrap();
+    conn.execute_batch(
+        "INSERT INTO semantic_imports (snapshot_id, provider_name, provider_version, capability,
+           project_root, text_encoding, artifact_id, source_revision, claimed_source_digest,
+           content_identity, external_symbols, verification)
+         SELECT snapshot_id, provider_name, provider_version, capability, project_root,
+           text_encoding, artifact_id, source_revision, claimed_source_digest, content_identity,
+           external_symbols, verification FROM semantic_imports;
+         INSERT INTO semantic_facts (snapshot_id, import_id, file_id, rel_path, file_digest,
+           symbol_uri, display_name, roles, start_line, start_col, end_line, end_col, byte_start,
+           byte_end, precision, relationships, external)
+         SELECT snapshot_id, (SELECT MAX(id) FROM semantic_imports), file_id, rel_path,
+           file_digest, symbol_uri, display_name, roles, start_line, start_col, end_line, end_col,
+           byte_start, byte_end, precision, relationships, external
+         FROM semantic_facts WHERE import_id = 1;",
+    )
+    .unwrap();
+    drop(conn);
+    assert_eq!(
+        db_count(&h, "sem", "SELECT COUNT(*) FROM semantic_imports"),
+        2
+    );
+    let (code, again, err) = run(
+        &h,
+        &["semantic", "import", "--repo", "sem", "--scip", &scip],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(again, first, "the oldest import survives");
+    assert_eq!(
+        db_count(&h, "sem", "SELECT COUNT(*) FROM semantic_imports"),
+        1
+    );
+    assert_eq!(
+        db_count(&h, "sem", "SELECT COUNT(*) FROM semantic_facts"),
+        facts_before
+    );
+}
+
+#[test]
+fn cli_f2_distinct_artifact_with_the_same_identity_stays_ambiguous() {
+    // Different bytes that claim the same identity are two imports, not one:
+    // the anchor stays explicitly ambiguous.
+    let h = home("f2-distinct");
+    let (dir, scip) = ab_repo(&h);
+    do_index(&h);
+    let (code, _, err) = run(
+        &h,
+        &["semantic", "import", "--repo", "sem", "--scip", &scip],
+    );
+    assert_eq!(code, 0, "{err}");
+    let doc = document(
+        "src/a.ts",
+        &[occurrence(FOO, 0x1, 0, 16, 19)],
+        &[symbol_info(FOO, "foo")],
+        false,
+    );
+    let other = h.join("other.scip");
+    std::fs::write(
+        &other,
+        index_bytes_with_tool(&dir, "scip-test-other", &[doc], &[]),
+    )
+    .unwrap();
+    let (code, _, err) = run(
+        &h,
+        &[
+            "semantic",
+            "import",
+            "--repo",
+            "sem",
+            "--scip",
+            &other.to_string_lossy(),
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(
+        db_count(&h, "sem", "SELECT COUNT(*) FROM semantic_imports"),
+        2
+    );
+    let (code, out, err) = run(
+        &h,
+        &[
+            "callers", "--repo", "sem", "--path", "src/a.ts", "--line", "1", "--col", "17",
+        ],
+    );
+    assert_eq!(code, 3, "{out}");
+    assert!(err.contains("ambiguous"), "{err}");
+}
+
 #[test]
 fn cli_query_resolves_cross_file_def_ref() {
     let h = home("query");
