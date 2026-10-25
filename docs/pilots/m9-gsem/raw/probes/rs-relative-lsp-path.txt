@@ -1,0 +1,1 @@
+error: language server path must be absolute
