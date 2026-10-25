@@ -1027,7 +1027,7 @@ pub fn semantic_generation(conn: &Connection) -> Result<i64, String> {
 
 // Bump when persisted relationship proof rules change. This is derivation
 // compatibility metadata, independent of the SQLite schema version.
-const GRAPH_PROOF_REVISION: &str = "m6-task7-source-proof-1";
+const GRAPH_PROOF_REVISION: &str = "m6-task7-source-proof-2";
 
 fn graph_proof_token(conn: &Connection, snapshot_id: i64) -> Result<String, String> {
     let nonce: String = conn

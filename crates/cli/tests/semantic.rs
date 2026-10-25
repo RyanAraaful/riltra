@@ -635,6 +635,62 @@ fn cli_f2_distinct_artifact_with_the_same_identity_stays_ambiguous() {
 }
 
 #[test]
+fn cli_f5_reference_is_exact_only_with_a_definition_in_the_import() {
+    // Exact needs a proven callee endpoint: a definition of the same symbol in
+    // this import. A plain reference to a symbol defined nowhere stays Heuristic.
+    let h = home("f5-endpoint");
+    let (dir, _) = ab_repo(&h);
+    const GHOST: &str = "scip-test test test-pkg 1.0.0 src/a.ts/ghost().";
+    let a = document(
+        "src/a.ts",
+        &[
+            occurrence(FOO, 0x1, 0, 16, 19),
+            occurrence(FOO, 0x0, 0, 7, 15),
+            occurrence(GHOST, 0x0, 0, 0, 6),
+            occurrence(FOO, 0x0, 1, 0, 3),
+        ],
+        &[symbol_info(FOO, "foo")],
+        false,
+    );
+    let b = document("src/b.ts", &[occurrence(FOO, 0x0, 1, 0, 3)], &[], false);
+    let scip = dir.join("f5.scip");
+    std::fs::write(
+        &scip,
+        index_bytes_with_tool(&dir, "scip-test-cli", &[a, b], &[]),
+    )
+    .unwrap();
+    do_index(&h);
+    let (code, _, err) = run(
+        &h,
+        &[
+            "semantic",
+            "import",
+            "--repo",
+            "sem",
+            "--scip",
+            &scip.to_string_lossy(),
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    let conn = rusqlite::Connection::open(h.join("index").join("sem.db")).unwrap();
+    let mut stmt = conn
+        .prepare("SELECT callee_uri, precision FROM code_edges WHERE edge_kind = 'REFERENCES'")
+        .unwrap();
+    let rows: Vec<(String, String)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .map(|row| row.unwrap())
+        .collect();
+    let precision_of = |symbol: &str| {
+        rows.iter()
+            .find(|(uri, _)| uri == symbol)
+            .map(|(_, precision)| precision.as_str())
+    };
+    assert_eq!(precision_of(FOO), Some("Exact"), "{rows:?}");
+    assert_eq!(precision_of(GHOST), Some("Heuristic"), "{rows:?}");
+}
+
+#[test]
 fn cli_query_resolves_cross_file_def_ref() {
     let h = home("query");
     let (_dir, scip) = ab_repo(&h);

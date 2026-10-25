@@ -297,3 +297,29 @@ tracked by git in this repository, so its wording is owner work.
 Tests: full suite `cargo test --locked`: 776 passed, 0 failed, 8 test targets.
 `cargo fmt --all -- --check` and `cargo clippy --all-targets -- -D warnings`
 are clean.
+
+## Revision 2026-10-25: F5 decision B implemented
+
+The owner chose option B. `Exact` on a plain REFERENCES edge now needs a
+definition of the same symbol in the same SCIP import (`def_for` in
+`upsert_semantic_edges`, `crates/cli/src/edges.rs`). Otherwise the edge is
+`Heuristic`: the span is known, the endpoint is not proven. `Verification` is
+unchanged (`Unverified`). No schema or graph architecture changed.
+
+- Derivation changed, so `GRAPH_PROOF_REVISION` moves from
+  `m6-task7-source-proof-1` to `m6-task7-source-proof-2`, as its comment in
+  `crates/cli/src/store.rs` requires. Stores built before this revision refuse
+  graph queries with `graph-proof-incompatible` until a semantic import or
+  `index --full` derives them again. This is the existing fail-closed path.
+- Test: `cli_f5_reference_is_exact_only_with_a_definition_in_the_import`
+  (`crates/cli/tests/semantic.rs`). Red before: a plain reference to a symbol
+  defined nowhere was stored as `Exact`. Green after. A reference to a defined
+  symbol stays `Exact`.
+- Effects on answers: `callers` and `callees` report `Heuristic` for such
+  references. `trace` adds `unproven-relation` to their reasons. `impact` is
+  unchanged: references without a caller already yield UNKNOWN.
+- Goldens: none changed. No M6 corpus golden contains a REFERENCES edge to an
+  undefined target.
+
+Tests: full suite `cargo test --locked`: 777 passed, 0 failed, 8 test targets. `cargo fmt --all -- --check`
+and `cargo clippy --all-targets -- -D warnings` are clean.

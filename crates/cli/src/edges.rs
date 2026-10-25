@@ -666,6 +666,14 @@ pub fn upsert_semantic_edges(
         } else {
             // Plain reference: no call site involved. Caller stays unknown
             // with the occurrence location as evidence; never expanded.
+            // Exact needs a proven callee endpoint: a definition of the same
+            // symbol in this import. Otherwise only the span is known.
+            let endpoint_proven = def_for(uri, &fact.rel_path).is_some();
+            let precision = if endpoint_proven {
+                "Exact"
+            } else {
+                "Heuristic"
+            };
             out.push(EdgeRow {
                 snapshot_id,
                 file_id: fid,
@@ -675,7 +683,7 @@ pub fn upsert_semantic_edges(
                 callee: Some(target),
                 callee_name: fact.display_name.clone().unwrap_or_default(),
                 edge_kind: EdgeKind::References.as_str().to_string(),
-                precision: "Exact".to_string(),
+                precision: precision.to_string(),
                 provider: "scip-import".to_string(),
                 evidence: evidence_json(&fact.rel_path, fact.byte_start, fact.byte_end, ""),
                 unresolved: None,
