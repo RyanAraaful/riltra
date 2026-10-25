@@ -27,7 +27,7 @@ tag, no publication and no signing: the `v0.1.0` release is a separate OWNER GO
 
 ## 1. What is in the candidate
 
-Nine commits on top of the M9 tip `f65c183` (eight, plus the one that adds these documents), all DCO-signed, none pushed
+The commits of this work on top of the M9 tip `f65c183`, from `f099fde` to the one that adds these documents, all DCO-signed, none pushed
 (`origin/m9-multirepo-release-candidate` is still `f65c183`):
 
 | Commit | Content |
@@ -39,7 +39,7 @@ Nine commits on top of the M9 tip `f65c183` (eight, plus the one that adds these
 | `80f82c2` | a C++ data member is an anchor (`callers`, `callees`, `trace`, `impact`) |
 | `4bc8ed5` | callers of out-of-line C++ definitions (called name and declaring-header scope) |
 | `13ea855` | release-candidate workflow, packaging and smoke scripts, SBOM, notices, README, licensing inventory |
-| this commit | CP4 evidence pack, E7 implementation record, the redacted archive `docs/pilots/m9-rc/` |
+| the documents commit | CP4 evidence pack, E7 implementation record, the redacted archive `docs/pilots/m9-rc/` |
 
 The full local suite on the final tree: **764 tests, 0 failed** (unit 424, cli
 16, edges 147, index 40, knowledge 52, mcp 58, semantic 15, syntax 12), `cargo
@@ -205,7 +205,7 @@ runs.
 | G-INC | **PASS** (candidate, pilot) | parity identical including the occurrence table; one file reparsed; timings and host recorded; no speedup claimed beyond the measured 2.6× (debug) of a refresh over a rebuild |
 | G-KNW | **NOT YET VERIFIED (release)** | the knowledge suite (52 tests: backup, verify, restore, export, non-mutating reads) is green on the candidate; the release-level round trip on an isolated home was not separately run |
 | G-TOK | **NOT YET VERIFIED** | §8 |
-| G-SEC | **NOT YET VERIFIED (release)** | isolation and non-mutation hold (porcelain 0 and `HEAD` unchanged for the snapshot and the original clone; the only home change on a read is the accepted WAL sidecars, identical to the CP2 record); the push-time secret scan and the CI `security` job have not run on the candidate |
+| G-SEC | **NOT YET VERIFIED (release)** | isolation and non-mutation hold (porcelain 0 and `HEAD` unchanged for the snapshot and the original clone; the only home change on a read is the accepted WAL sidecars, identical to the CP2 record); the repository's own scan (`security/scan.sh`, gitleaks 8.30.1) over the commits since `f65c183` and over the tree reports no leaks, and the pre-commit hook scanned every commit; the CI `security` job and the push-time scan have not run on the candidate |
 
 "PASS" above means the acceptance test of the gate ran on the candidate with
 archived evidence. A gate is never marked passed on milestone history alone.
@@ -226,9 +226,9 @@ archived evidence. A gate is never marked passed on milestone history alone.
 
 ## 7. What needs the owner
 
-1. **Push `m9-multirepo-release-candidate`** (9 commits) and run the CI and the
+1. **Push `m9-multirepo-release-candidate`** and run the CI and the
    release-candidate workflow. Without it G-NAT stays NOT YET VERIFIED and the
-   `security` job has not scanned the commits.
+   CI `security` job has not scanned the commits.
 2. **Renew the OpenCode API key** so the real agent-side session can run
    against the candidate (G-MCP, D5-E1).
 3. **D2-H2**: decide whether to add a labelled "type constructed through a
