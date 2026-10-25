@@ -9,3 +9,7 @@ OPEN_SOURCE_CODE_INTELLIGENCE_KNOWLEDGE_BLUEPRINT.md
 # Internal planning/specification documents: kept out of the public repo.
 # Private backup lives outside this directory. Never commit these.
 docs/superpowers/
+
+# Release packaging output and the generated license bundle (regenerated into every archive).
+/dist/
+/release/THIRD_PARTY_LICENSES.txt

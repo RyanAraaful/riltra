@@ -1,11 +1,32 @@
 Riltra
 Copyright Riltra Contributors (see git history for individual authorship).
 
-This product includes no bundled third-party source at this stage.
-The Rust toolchain (rustc/cargo/rustfmt/clippy) is used at build time only
-and is not redistributed with this repository.
+Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-Future releases MUST append third-party notices here for every bundled
-grammar, binary indexer, or vendored source, with exact package + version +
-license + origin URL, before any release.
-See docs/licensing.md for the audit table.
+This product includes software developed by third parties. A release archive
+carries two documents generated from the locked dependency graph (Cargo.lock):
+
+  THIRD_PARTY_LICENSES.txt   the license and notice files that each bundled
+                             package carries, package by package
+  sbom.cdx.json              a CycloneDX bill of materials: every package with
+                             its version, license expression, crate checksum
+                             and dependency edges
+
+Notable bundled components, all under permissive licenses:
+
+  SQLite                     public domain; compiled in through the bundled
+                             feature of rusqlite
+  tree-sitter and the        MIT; the Python, JavaScript, TypeScript, Rust, C
+  tree-sitter grammars       and C++ grammars are compiled into the binary
+  rust-protobuf              MIT; reads SCIP indexes
+  rmcp and Tokio             Apache-2.0 and MIT; the local stdio MCP server
+  serde, serde_json          MIT OR Apache-2.0
+
+The Rust toolchain (rustc/cargo/rustfmt/clippy) is used at build time only and
+is not redistributed. Language servers and SCIP indexers that an operator
+chooses to run (clangd, rust-analyzer, scip-typescript) are separate programs
+under their own licenses; Riltra does not bundle or install them.
+
+The package set is pinned in Cargo.lock; the audit table with versions,
+licenses and origins is docs/licensing.md. The release workflow fails when the
+committed SBOM no longer matches Cargo.lock (release/README.md).
