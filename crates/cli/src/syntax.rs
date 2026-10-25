@@ -372,11 +372,13 @@ fn push_import(facts: &mut FileFacts, node: tree_sitter::Node, src: &[u8]) {
         end -= 1;
     }
     let pos = node.start_position();
+    // Both end coordinates come from the same trimmed offset.
+    let (end_line, end_col) = position_of(src, end);
     let span = Span {
         start_line: (pos.row + 1) as u32,
         start_col: (pos.column + 1) as u32,
-        end_line: (pos.row + 1) as u32,
-        end_col: (end - line_start(src, end) + 1) as u32,
+        end_line,
+        end_col,
     };
     facts.imports.push(Fact {
         kind: "import",
@@ -390,14 +392,6 @@ fn push_import(facts: &mut FileFacts, node: tree_sitter::Node, src: &[u8]) {
         callee: None,
         tcallee: None,
     });
-}
-
-fn line_start(src: &[u8], end: usize) -> usize {
-    let mut start = end.min(src.len());
-    while start > 0 && src[start - 1] != b'\n' {
-        start -= 1;
-    }
-    start
 }
 
 /// Named `struct X {...}` or anonymous `typedef struct {...} X` (name from the
@@ -1034,6 +1028,62 @@ mod tests {
         assert_eq!(facts.imports.len(), 1);
         assert_eq!(facts.calls.len(), 1);
         assert_eq!(facts.calls[0].name.as_deref(), Some("calc"));
+    }
+
+    #[test]
+    fn python_multiline_import_end_is_on_its_last_line() {
+        let src = b"from pkg import (\n    alpha,\n    beta,\n)\n";
+        let facts = parse_source(Language::Python, src);
+        assert_eq!(facts.errors, 0);
+        assert_eq!(facts.imports.len(), 1);
+        let import = &facts.imports[0];
+        assert_eq!(
+            &src[import.byte_start..import.byte_end],
+            b"from pkg import (\n    alpha,\n    beta,\n)"
+        );
+        assert_eq!((import.span.start_line, import.span.start_col), (1, 1));
+        assert_eq!((import.span.end_line, import.span.end_col), (4, 2));
+    }
+
+    #[test]
+    fn typescript_multiline_import_end_is_on_its_last_line() {
+        let src = b"import {\n  alpha,\n  beta,\n} from \"./pkg\";\n";
+        let facts = parse_source(Language::TypeScript, src);
+        assert_eq!(facts.errors, 0);
+        assert_eq!(facts.imports.len(), 1);
+        let import = &facts.imports[0];
+        assert_eq!(
+            &src[import.byte_start..import.byte_end],
+            b"import {\n  alpha,\n  beta,\n} from \"./pkg\";"
+        );
+        assert_eq!((import.span.start_line, import.span.start_col), (1, 1));
+        assert_eq!((import.span.end_line, import.span.end_col), (4, 16));
+    }
+
+    #[test]
+    fn single_line_python_import_span_is_unchanged() {
+        let src = b"import os\n";
+        let facts = parse_source(Language::Python, src);
+        assert_eq!(facts.imports.len(), 1);
+        let import = &facts.imports[0];
+        assert_eq!(&src[import.byte_start..import.byte_end], b"import os");
+        assert_eq!((import.span.start_line, import.span.start_col), (1, 1));
+        assert_eq!((import.span.end_line, import.span.end_col), (1, 10));
+    }
+
+    #[test]
+    fn include_trailing_newline_is_trimmed_before_end_coordinates() {
+        let src = b"#include <stdio.h>\nint main(void) {\n  return 0;\n}\n";
+        let facts = parse_source(Language::C, src);
+        assert_eq!(facts.imports.len(), 1);
+        let import = &facts.imports[0];
+        assert_eq!(import.byte_end, 18);
+        assert_eq!(
+            &src[import.byte_start..import.byte_end],
+            b"#include <stdio.h>"
+        );
+        assert_eq!((import.span.start_line, import.span.start_col), (1, 1));
+        assert_eq!((import.span.end_line, import.span.end_col), (1, 19));
     }
 
     #[test]
