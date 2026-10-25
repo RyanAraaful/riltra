@@ -316,6 +316,50 @@ fn an_index_from_the_previous_parser_version_is_rebuilt() {
 }
 
 #[test]
+fn an_index_from_the_previous_parser_version_has_no_occurrences_until_it_is_rebuilt() {
+    let h = home("occ-parser");
+    let repo = mkrepo(&h, "work");
+    std::fs::write(repo.join("options.h"), CPP_FIELDS).unwrap();
+    std::fs::write(
+        repo.join("use.cc"),
+        "#include \"options.h\"\ndouble read(Options& o) {\n  return o.max_triangulation_angle;\n}\n",
+    )
+    .unwrap();
+    init_and_index(&h, &repo, "r");
+    let db = h.join("index").join("r.db");
+    let occurrences = || -> i64 {
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM reference_occurrences", [], |r| {
+                r.get(0)
+            })
+            .unwrap()
+    };
+    assert_eq!(occurrences(), 1, "the member access is stored by the index");
+    // An index written by the previous parser version has no occurrence rows.
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute(
+            "UPDATE snapshots SET parser_version = parser_version - 1",
+            [],
+        )
+        .unwrap();
+        conn.execute("DELETE FROM reference_occurrences", [])
+            .unwrap();
+    }
+    assert_eq!(occurrences(), 0);
+    let (code, out, err) = run(&h, &["index", "status", "--repo", "r"]);
+    assert_eq!(code, 0, "index status failed: {err}");
+    assert!(out.contains("\"freshness\":\"stale\""), "got: {out}");
+    assert!(out.contains("parser-changed"), "got: {out}");
+    let (code, out, err) = run(&h, &["index", "--repo", "r"]);
+    assert_eq!(code, 0, "index failed: {err}");
+    assert!(out.contains("\"mode\":\"fallback-full\""), "got: {out}");
+    assert!(out.contains("parser-changed"), "got: {out}");
+    assert_eq!(occurrences(), 1, "the rebuild stores the occurrence again");
+}
+
+#[test]
 fn dirty_without_head_change_is_stale_but_served() {
     let h = home("dirty");
     let Some(repo) = git_repo(&h, "code", "main") else {

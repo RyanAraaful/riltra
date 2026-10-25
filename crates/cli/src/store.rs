@@ -9,12 +9,14 @@ use std::path::{Path, PathBuf};
 use rusqlite::{params, Connection, OptionalExtension};
 
 /// Current schema version (`PRAGMA user_version`).
-pub const SCHEMA_VERSION: u32 = 4;
+/// 5: the `reference_occurrences` table (E7 Slice 2).
+pub const SCHEMA_VERSION: u32 = 5;
 /// Parser/extraction version. Bump whenever `syntax.rs` extraction changes;
 /// freshness treats a mismatch as stale (never silently current).
 /// 2: C++ data members are extracted as `field` symbols (E7 Slice 1).
 /// 3: the terminal span of a C++ call excludes template arguments.
-pub const PARSER_VERSION: u32 = 3;
+/// 4: C++ name occurrences are extracted (E7 Slice 2).
+pub const PARSER_VERSION: u32 = 4;
 
 /// Grammar + runtime versions pinned in `Cargo.lock`. A test pins these
 /// against the lockfile so they cannot drift silently.
@@ -203,6 +205,15 @@ CREATE TABLE IF NOT EXISTS calls (
   unresolved INTEGER NOT NULL, provider TEXT NOT NULL, grammar TEXT NOT NULL,
   language TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS reference_occurrences (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, snapshot_id INTEGER NOT NULL,
+  file_id INTEGER NOT NULL, name TEXT NOT NULL, role TEXT NOT NULL,
+  start_line INTEGER NOT NULL, start_col INTEGER NOT NULL,
+  end_line INTEGER NOT NULL, end_col INTEGER NOT NULL,
+  byte_start INTEGER NOT NULL, byte_end INTEGER NOT NULL,
+  provider TEXT NOT NULL, grammar TEXT NOT NULL, language TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ref_occ_name ON reference_occurrences(snapshot_id, name);
 CREATE TABLE IF NOT EXISTS code_edges (
   id INTEGER PRIMARY KEY AUTOINCREMENT, snapshot_id INTEGER NOT NULL,
   file_id INTEGER NOT NULL,
@@ -251,9 +262,9 @@ CREATE INDEX IF NOT EXISTS idx_semfacts_span ON semantic_facts(snapshot_id, rel_
 
 /// Bring any database to the current schema in ONE explicit transaction:
 /// empty files are built at current, v1 gains nonce backfill, v2 gains the
-/// semantic tables, v3 gains the callee columns + the edges table. Any
-/// failure rolls back: version marker and readable data stay exactly as
-/// before. Newer versions are rejected, never guessed.
+/// semantic tables, v3 gains the callee columns + the edges table, v4 gains
+/// the occurrence table. Any failure rolls back: version marker and readable
+/// data stay exactly as before. Newer versions are rejected, never guessed.
 pub fn migrate(conn: &Connection) -> Result<(), String> {
     let version: u32 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
@@ -300,7 +311,7 @@ pub fn migrate(conn: &Connection) -> Result<(), String> {
                     .map_err(|e| format!("schema migration v3->v4 failed: {e}"))?;
             }
         }
-        conn.execute("PRAGMA user_version = 4", [])
+        conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))
             .map_err(|e| e.to_string())?;
         Ok(())
     })();
@@ -373,6 +384,24 @@ pub struct SymbolRow {
     pub file_id: i64,
     pub kind: String,
     pub name: Option<String>,
+    pub start_line: u32,
+    pub start_col: u32,
+    pub end_line: u32,
+    pub end_col: u32,
+    pub byte_start: usize,
+    pub byte_end: usize,
+    pub provider: String,
+    pub grammar: String,
+    pub language: String,
+}
+
+/// One C++ name occurrence (E7 Slice 2): the identifier, its role and its
+/// span. The confidence is derived from the role, never stored.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReferenceOccurrenceRow {
+    pub file_id: i64,
+    pub name: String,
+    pub role: String,
     pub start_line: u32,
     pub start_col: u32,
     pub end_line: u32,
@@ -1105,6 +1134,7 @@ pub fn promote_staging(
             &format!("DELETE FROM symbols;
              DELETE FROM imports;
              DELETE FROM calls;
+             DELETE FROM reference_occurrences;
              DELETE FROM files;
              DELETE FROM snapshots;
              DELETE FROM semantic_facts;
@@ -1115,6 +1145,7 @@ pub fn promote_staging(
              INSERT INTO symbols SELECT * FROM src.symbols;
              INSERT INTO imports SELECT * FROM src.imports;
              INSERT INTO calls SELECT * FROM src.calls;
+             INSERT INTO reference_occurrences SELECT * FROM src.reference_occurrences;
              INSERT INTO semantic_imports SELECT * FROM src.semantic_imports;
              INSERT INTO semantic_facts SELECT * FROM src.semantic_facts;
              INSERT INTO code_edges SELECT * FROM src.code_edges;
@@ -1222,8 +1253,8 @@ pub fn record_file_map(staging: &Connection, old_id: i64, new_id: i64) -> Result
     Ok(())
 }
 
-/// Bulk-copy every mapped file's symbols/imports/calls in three joined
-/// statements. Column lists mirror the matching `insert_*` functions.
+/// Bulk-copy every mapped file's symbols/imports/calls/occurrences in four
+/// joined statements. Column lists mirror the matching `insert_*` functions.
 /// Rejected alternative: per-file filtered child copies — one full snapshot
 /// scan per file without a `file_id` index (quadratic at MMSP scale).
 pub fn copy_mapped_facts(
@@ -1231,11 +1262,13 @@ pub fn copy_mapped_facts(
     new_snapshot_id: i64,
     old_snapshot_id: i64,
 ) -> Result<CopiedTotals, String> {
-    let mut counts = [0u64; 3];
+    // The occurrence copy has no counter of its own: no document reports it.
+    let mut counts = [0u64; 4];
     for (i, (table, extra)) in [
         ("symbols", "kind, name, start_line, start_col, end_line, end_col, byte_start, byte_end, provider, grammar, language"),
         ("imports", "text, start_line, start_col, end_line, end_col, byte_start, byte_end, provider, grammar, language"),
         ("calls", "name, start_line, start_col, end_line, end_col, byte_start, byte_end, callee_start_line, callee_start_col, callee_end_line, callee_end_col, callee_byte_start, callee_byte_end, tcallee_start_line, tcallee_start_col, tcallee_end_line, tcallee_end_col, tcallee_byte_start, tcallee_byte_end, unresolved, provider, grammar, language"),
+        ("reference_occurrences", "name, role, start_line, start_col, end_line, end_col, byte_start, byte_end, provider, grammar, language"),
     ]
     .iter()
     .enumerate()
@@ -1464,6 +1497,33 @@ pub fn insert_symbol(
             symbol.provider,
             symbol.grammar,
             symbol.language,
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn insert_reference_occurrence(
+    conn: &Connection,
+    snapshot_id: i64,
+    occurrence: &ReferenceOccurrenceRow,
+) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO reference_occurrences (snapshot_id, file_id, name, role, start_line, start_col, end_line, end_col, byte_start, byte_end, provider, grammar, language) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+        params![
+            snapshot_id,
+            occurrence.file_id,
+            occurrence.name,
+            occurrence.role,
+            occurrence.start_line as i64,
+            occurrence.start_col as i64,
+            occurrence.end_line as i64,
+            occurrence.end_col as i64,
+            occurrence.byte_start as i64,
+            occurrence.byte_end as i64,
+            occurrence.provider,
+            occurrence.grammar,
+            occurrence.language,
         ],
     )
     .map_err(|e| e.to_string())?;
@@ -2969,7 +3029,10 @@ mod tests {
         let version: u32 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 4, "v1 must migrate to v4");
+        assert_eq!(
+            version, SCHEMA_VERSION,
+            "v1 must migrate to the current schema"
+        );
         assert!(table_exists(&conn, "code_edges"), "edges table created");
         // v3-shaped database: old calls shape without callee columns.
         let dir = tmpdir("store-m6v3");
@@ -3003,7 +3066,10 @@ mod tests {
         let version: u32 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 4, "v3 must migrate to v4");
+        assert_eq!(
+            version, SCHEMA_VERSION,
+            "v3 must migrate to the current schema"
+        );
         let name: Option<String> = conn
             .query_row("SELECT name FROM calls WHERE snapshot_id = 1", [], |r| {
                 r.get(0)
@@ -3018,8 +3084,8 @@ mod tests {
             )
             .unwrap();
         assert_eq!(callee_null, None, "legacy rows keep NULL callee cols");
-        // Fresh database builds at v4; a second migrate is a no-op (no
-        // double-ALTER failure).
+        // Fresh database builds at the current schema; a second migrate is a
+        // no-op (no double-ALTER failure).
         let dir = tmpdir("store-m6fresh");
         let fresh = open_live(&dir.join("f.db")).unwrap();
         migrate(&fresh).unwrap();
@@ -3027,7 +3093,7 @@ mod tests {
         let version: u32 = fresh
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 4);
+        assert_eq!(version, SCHEMA_VERSION);
         // Edges round-trip through promote: hand-inserted row survives.
         let staging = dir.join("s.db");
         let live_path = dir.join("live.db");
@@ -3348,7 +3414,7 @@ mod tests {
     #[test]
     fn read_open_refuses_old_and_new_versions_without_migrating() {
         let dir = tmpdir("store-read-open-ver");
-        for version in [1u32, 2, 3, 99] {
+        for version in [1u32, 2, 3, 4, 99] {
             let path = dir.join(format!("v{version}.db"));
             {
                 let conn = open_live(&path).unwrap();
@@ -3395,5 +3461,78 @@ mod tests {
             other => panic!("expected Error, got {other:?}"),
         }
         assert!(as_dir.is_dir(), "fail-closed must not replace the path");
+    }
+
+    fn sample_occurrence(file_id: i64, name: &str) -> super::ReferenceOccurrenceRow {
+        super::ReferenceOccurrenceRow {
+            file_id,
+            name: name.to_string(),
+            role: "member-access".to_string(),
+            start_line: 1,
+            start_col: 1,
+            end_line: 1,
+            end_col: 2,
+            byte_start: 0,
+            byte_end: 1,
+            provider: "syntax".to_string(),
+            grammar: "cpp:0.23.4".to_string(),
+            language: "cpp".to_string(),
+        }
+    }
+
+    fn occurrence_names(conn: &rusqlite::Connection) -> Vec<String> {
+        let mut statement = conn
+            .prepare("SELECT name FROM reference_occurrences ORDER BY name")
+            .unwrap();
+        let names = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        names
+    }
+
+    #[test]
+    fn a_v4_database_gains_the_empty_occurrence_table_when_it_migrates() {
+        let dir = tmpdir("store-occ-migrate");
+        let path = dir.join("v4.db");
+        {
+            // A v4 database is the current schema without the occurrence table.
+            let conn = open_live(&path).unwrap();
+            conn.execute_batch("DROP TABLE reference_occurrences; PRAGMA user_version = 4;")
+                .unwrap();
+        }
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        assert!(!table_exists(&conn, "reference_occurrences"));
+        migrate(&conn).unwrap();
+        let version: u32 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        assert_eq!(SCHEMA_VERSION, 5, "the occurrence table is schema v5");
+        assert!(table_exists(&conn, "reference_occurrences"));
+        assert!(occurrence_names(&conn).is_empty());
+    }
+
+    #[test]
+    fn promotion_carries_the_new_occurrences_and_drops_the_previous_ones() {
+        use super::insert_reference_occurrence;
+        let dir = tmpdir("store-occ-promote");
+        let live_path = dir.join("live.db");
+        let live = open_live(&live_path).unwrap();
+        let old = insert_snapshot(&live, &sample_snapshot()).unwrap();
+        insert_reference_occurrence(&live, old, &sample_occurrence(1, "leftover")).unwrap();
+        let staging_path = dir.join("staging.db");
+        let staging = open_live(&staging_path).unwrap();
+        let new = insert_snapshot(&staging, &sample_snapshot()).unwrap();
+        insert_reference_occurrence(&staging, new, &sample_occurrence(1, "kept_a")).unwrap();
+        insert_reference_occurrence(&staging, new, &sample_occurrence(1, "kept_b")).unwrap();
+        let base = live_base(&live).unwrap();
+        promote_staging(&live, &staging_path, &base).unwrap();
+        assert_eq!(
+            occurrence_names(&live),
+            vec!["kept_a".to_string(), "kept_b".to_string()],
+            "exactly the staging rows, none of the previous snapshot's"
+        );
     }
 }

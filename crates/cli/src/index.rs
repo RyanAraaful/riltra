@@ -500,6 +500,29 @@ fn ingest_file(
                     },
                 )?;
             }
+            for occurrence in &facts.reference_occurrences {
+                let Some(name) = occurrence.name.clone() else {
+                    continue;
+                };
+                store::insert_reference_occurrence(
+                    conn,
+                    snapshot_id,
+                    &store::ReferenceOccurrenceRow {
+                        file_id,
+                        name,
+                        role: occurrence.kind.to_string(),
+                        start_line: occurrence.span.start_line,
+                        start_col: occurrence.span.start_col,
+                        end_line: occurrence.span.end_line,
+                        end_col: occurrence.span.end_col,
+                        byte_start: occurrence.byte_start,
+                        byte_end: occurrence.byte_end,
+                        provider: "syntax".to_string(),
+                        grammar: grammar.clone(),
+                        language: language.clone(),
+                    },
+                )?;
+            }
             summary.processed += 1;
             summary.definitions += facts.definitions.len();
             summary.imports += facts.imports.len();
@@ -3076,6 +3099,7 @@ mod tests {
         struct Facts {
             files: Vec<(String, String, u64, String, u32)>,
             symbols: Vec<SymRow>,
+            occurrences: Vec<SymRow>,
             imports: Vec<ImpRow>,
             calls: Vec<CallRow>,
         }
@@ -3087,10 +3111,11 @@ mod tests {
                 id_map.insert(*id, path.clone());
             }
             let path_of = |id: i64| id_map.get(&id).cloned().unwrap_or_default();
-            let mut symbols = Vec::new();
-            {
+            // Symbols and reference occurrences share one row shape: the kind
+            // (or role), the name, the span and the provenance.
+            let named_spans = |table: &str, kind_column: &str| -> Vec<SymRow> {
                 let mut st = conn
-                    .prepare("SELECT file_id, kind, name, start_line, start_col, end_line, end_col, byte_start, byte_end, provider, grammar, language FROM symbols WHERE snapshot_id = ?1")
+                    .prepare(&format!("SELECT file_id, {kind_column}, name, start_line, start_col, end_line, end_col, byte_start, byte_end, provider, grammar, language FROM {table} WHERE snapshot_id = ?1"))
                     .unwrap();
                 let rows = st
                     .query_map([snap_id], |row| {
@@ -3110,9 +3135,10 @@ mod tests {
                         ))
                     })
                     .unwrap();
+                let mut named = Vec::new();
                 for r in rows {
                     let r = r.unwrap();
-                    symbols.push((
+                    named.push((
                         path_of(r.0),
                         r.1,
                         r.2,
@@ -3122,7 +3148,10 @@ mod tests {
                         r.11,
                     ));
                 }
-            }
+                named
+            };
+            let mut symbols = named_spans("symbols", "kind");
+            let mut occurrences = named_spans("reference_occurrences", "role");
             let mut imports = Vec::new();
             {
                 let mut st = conn
@@ -3199,11 +3228,13 @@ mod tests {
                 .collect();
             file_vec.sort();
             symbols.sort();
+            occurrences.sort();
             imports.sort();
             calls.sort();
             Facts {
                 files: file_vec,
                 symbols,
+                occurrences,
                 imports,
                 calls,
             }
@@ -3222,7 +3253,14 @@ mod tests {
         // unchanged file carries through the incremental copy path.
         std::fs::write(
             repo.join("fields.cpp"),
-            b"struct S {\n  int value = 1;\n};\n",
+            b"struct S {\n  int value = 1;\n};\nint read(S s) {\n  return s.value;\n}\n",
+        )
+        .unwrap();
+        // A C++ file that changes in stage 1: its occurrences are extracted
+        // again, while the unchanged file's are copied.
+        std::fs::write(
+            repo.join("moving.cpp"),
+            b"struct M {\n  int v = 0;\n};\nint get(M* m) {\n  return m->v;\n}\n",
         )
         .unwrap();
         std::fs::write(repo.join("bin.py"), b"\x00\x01").unwrap();
@@ -3232,6 +3270,11 @@ mod tests {
         std::fs::write(
             repo.join("b.py"),
             b"import sys\ndef beta():\n    return sys.argv\n",
+        )
+        .unwrap();
+        std::fs::write(
+            repo.join("moving.cpp"),
+            b"struct M {\n  int v = 0;\n};\nint get(M* m) {\n  int* p = &m->v;\n  return m->v + *p;\n}\n",
         )
         .unwrap();
         build(&home_b, "r", &repo, false).unwrap();
@@ -3249,6 +3292,21 @@ mod tests {
             dump(&conn, snap.id)
         };
         assert_eq!(read(&home_b), read(&home_c), "incremental must equal full");
+        // The comparison above is not vacuous: the unchanged file's rows were
+        // copied and the changed file's rows were extracted again.
+        let occurrences = read(&home_b).occurrences;
+        let roles_in = |path: &str| -> Vec<String> {
+            occurrences
+                .iter()
+                .filter(|o| o.0 == path)
+                .map(|o| o.1.clone())
+                .collect()
+        };
+        assert_eq!(roles_in("fields.cpp"), vec!["member-access"]);
+        assert_eq!(
+            roles_in("moving.cpp"),
+            vec!["address-of-binding", "member-access"]
+        );
     }
 
     #[test]

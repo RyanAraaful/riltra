@@ -499,7 +499,7 @@ fn t1_health_composition_matches_cli_and_creates_nothing() {
     assert_eq!(d["doctor"]["scope"], json!("environment"));
     assert_eq!(d["doctor"]["pass"], json!(true));
     assert_eq!(d["versions"]["riltra"], json!(env!("CARGO_PKG_VERSION")));
-    assert_eq!(d["versions"]["code_index_schema"], json!(4));
+    assert_eq!(d["versions"]["code_index_schema"], json!(CODE_INDEX_SCHEMA));
     assert_eq!(d["versions"]["knowledge_schema"], json!(2));
     assert_eq!(d["limits"]["code_search"]["default_limit"], json!(50));
     assert_eq!(d["limits"]["code_search"]["max_limit"], json!(1000));
@@ -1080,6 +1080,9 @@ fn db_path(cfg: &Path, name: &str) -> PathBuf {
     cfg.join("index").join(format!("{name}.db"))
 }
 
+/// The code-index schema version this binary supports (`PRAGMA user_version`).
+const CODE_INDEX_SCHEMA: u32 = 5;
+
 fn user_version(path: &Path) -> u32 {
     let conn = rusqlite::Connection::open(path).unwrap();
     conn.query_row("PRAGMA user_version", [], |r| r.get(0))
@@ -1552,7 +1555,11 @@ fn f1_legacy_v1_refused_without_migration_and_still_cli_migratable() {
     let args: Vec<&str> = command.split_whitespace().skip(1).collect();
     let (code, out, err) = run_cli(&h, &args);
     assert_eq!(code, 0, "{out} {err}");
-    assert_eq!(user_version(&db), 4, "CLI migration path intact");
+    assert_eq!(
+        user_version(&db),
+        CODE_INDEX_SCHEMA,
+        "CLI migration path intact"
+    );
     // And the MCP read path works again on the migrated database.
     let d = doc(&call_tool(
         &mut s,
@@ -1583,7 +1590,7 @@ fn f1_flipped_v2_v3_refused_unchanged() {
     let db = db_path(&h, "r");
     let schema_before = schema_dump(&db);
     let mut s = ready(&h);
-    for (id, version) in (2..).zip([2u32, 3]) {
+    for (id, version) in (2..).zip([2u32, 3, 4]) {
         set_user_version(&db, version);
         let res = call_tool(
             &mut s,
@@ -1629,7 +1636,7 @@ fn f1_future_schema_is_refused_as_schema_ahead() {
             d["message"]
                 .as_str()
                 .unwrap()
-                .contains("newer than supported v4"),
+                .contains(&format!("newer than supported v{CODE_INDEX_SCHEMA}")),
             "{tool}: {d}"
         );
     }
@@ -1755,10 +1762,11 @@ fn f1_concurrent_version_flip_is_classified_and_never_migrates() {
             while !stop.load(Ordering::SeqCst) {
                 conn.execute(&format!("PRAGMA user_version = {version}"), [])
                     .unwrap();
-                version = if version == 1 { 4 } else { 1 };
+                version = if version == 1 { CODE_INDEX_SCHEMA } else { 1 };
                 std::thread::sleep(Duration::from_millis(5));
             }
-            conn.execute("PRAGMA user_version = 4", []).unwrap();
+            conn.execute(&format!("PRAGMA user_version = {CODE_INDEX_SCHEMA}"), [])
+                .unwrap();
         })
     };
     let mut s = ready(&h);
@@ -1786,7 +1794,7 @@ fn f1_concurrent_version_flip_is_classified_and_never_migrates() {
     assert_eq!(code, 0);
     assert_eq!(
         user_version(&db),
-        4,
+        CODE_INDEX_SCHEMA,
         "the flipper's last write stands; MCP never migrated"
     );
 }
@@ -1829,7 +1837,7 @@ fn f1_concurrent_cli_rebuild_does_not_disturb_mcp_reads() {
     rebuild.join().unwrap();
     let (code, _) = s.finish();
     assert_eq!(code, 0);
-    assert_eq!(user_version(&db_path(&h, "r")), 4);
+    assert_eq!(user_version(&db_path(&h, "r")), CODE_INDEX_SCHEMA);
 }
 
 // --- CP4 helpers: SCIP-backed graph fixture ---------------------------------
@@ -2589,7 +2597,7 @@ fn t4_graph_unknown_repo_and_missing_index_are_classified() {
     );
     // The CLI-created empty v4 database has no snapshot: still no_index.
     let db = db_path(&h, "s");
-    assert_eq!(user_version(&db), 4);
+    assert_eq!(user_version(&db), CODE_INDEX_SCHEMA);
     let res = call_tool(
         &mut s,
         7,
@@ -2598,7 +2606,11 @@ fn t4_graph_unknown_repo_and_missing_index_are_classified() {
     );
     let d = doc(&res);
     assert_eq!(d["kind"], "no_index", "{d}");
-    assert_eq!(user_version(&db), 4, "classification must not migrate");
+    assert_eq!(
+        user_version(&db),
+        CODE_INDEX_SCHEMA,
+        "classification must not migrate"
+    );
 
     let (code, _) = s.finish();
     assert_eq!(code, 0);
@@ -2641,12 +2653,12 @@ fn t4_graph_schema_guard_outdated_ahead_and_corrupt() {
     let (code, _) = s.finish();
     assert_eq!(code, 0);
 
-    // v5: schema_ahead, untouched.
+    // One past the supported schema: schema_ahead, untouched.
     let h2 = home("cp4-t4a");
     let r2 = home("cp4-t4a-repo");
     syntax_graph_repo(&h2, &r2, "s");
     let db2 = db_path(&h2, "s");
-    set_user_version(&db2, 5);
+    set_user_version(&db2, CODE_INDEX_SCHEMA + 1);
     let mut s2 = ready(&h2);
     let res = call_tool(
         &mut s2,
@@ -2663,7 +2675,11 @@ fn t4_graph_schema_guard_outdated_ahead_and_corrupt() {
             .contains("newer than supported"),
         "{d}"
     );
-    assert_eq!(user_version(&db2), 5, "ahead stores are never touched");
+    assert_eq!(
+        user_version(&db2),
+        CODE_INDEX_SCHEMA + 1,
+        "ahead stores are never touched"
+    );
     let (code, _) = s2.finish();
     assert_eq!(code, 0);
 
@@ -2895,7 +2911,11 @@ fn t5_graph_legacy_v1_refused_without_migration_and_still_cli_migratable() {
     let args: Vec<&str> = command.split_whitespace().skip(1).collect();
     let (code, out, err) = run_cli(&h, &args);
     assert_eq!(code, 0, "{out} {err}");
-    assert_eq!(user_version(&db), 4, "CLI migration path intact");
+    assert_eq!(
+        user_version(&db),
+        CODE_INDEX_SCHEMA,
+        "CLI migration path intact"
+    );
     // The v1 fixture has no graph proof: the migrated store is still refused
     // by the graph guard (classified, never fabricated).
     let res = call_tool(
@@ -2991,7 +3011,7 @@ fn t5_graph_reads_leave_v4_untouched_and_survive_concurrent_rebuild() {
     rebuild.join().unwrap();
     let (code, _) = s.finish();
     assert_eq!(code, 0);
-    assert_eq!(user_version(&db), 4);
+    assert_eq!(user_version(&db), CODE_INDEX_SCHEMA);
 }
 
 // --- CP5: knowledge tools ---------------------------------------------------
