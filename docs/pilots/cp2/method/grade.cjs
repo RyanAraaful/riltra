@@ -118,6 +118,7 @@ function sameDefinition(a, b) {
 // The frozen MMSP files that the line-based checks name.
 const FILES = {
   patchMatchCc: "colmap/src/colmap/mvs/patch_match.cc",
+  patchMatchH: "colmap/src/colmap/mvs/patch_match.h",
   patchMatchCuda: "colmap/src/colmap/mvs/patch_match_cuda.cu",
   patchMatchCudaH: "colmap/src/colmap/mvs/patch_match_cuda.h",
   fusionCc: "colmap/src/colmap/mvs/fusion.cc",
@@ -214,6 +215,12 @@ function gradeChecks(ctx) {
     const where = endpoint && endpoint.path === rel ? at(rel, endpoint.byte_start) : null;
     return !!where && where.line === line;
   };
+  // The class, or its own constructor: patch_match.h:131 declares it and
+  // patch_match.cc:219 defines it (checked at the frozen commit). A construction
+  // site calls the constructor, so a proven edge to it attributes the site to
+  // the class.
+  const classOwns = (callee, classDef) => sameDefinition(callee, classDef) ||
+    definedAt(callee, FILES.patchMatchCc, 219) || definedAt(callee, FILES.patchMatchH, 131);
 
   // Every reference edge returned by ANY workflow query must be a candidate.
   const referenceQueries = [
@@ -433,7 +440,7 @@ function gradeChecks(ctx) {
       return {
         site: s.site,
         present: hits.length > 0,
-        proven: hits.some((r) => isProven(r.edge) && sameDefinition(r.edge.callee, classDef)),
+        proven: hits.some((r) => isProven(r.edge) && classOwns(r.edge.callee, classDef)),
       };
     });
     const evidence = { sites, sites_expected: 3, class_callers_returned: rows.length };
@@ -442,7 +449,7 @@ function gradeChecks(ctx) {
     } else if (sites.some((s) => !s.present)) {
       add("D2-C6", "capability", d2Criterion, V.UNMET, "construction-sites-not-attributed", evidence);
     } else if (sites.some((s) => !s.proven)) {
-      add("D2-C6", "capability", d2Criterion, V.UNMET, "candidate-only-attribution", evidence);
+      add("D2-C6", "capability", d2Criterion, V.UNMET, "attribution-not-proven-to-class", evidence);
     } else {
       add("D2-C6", "capability", d2Criterion, V.PASS, null, evidence);
     }

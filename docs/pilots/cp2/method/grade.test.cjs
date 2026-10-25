@@ -575,6 +575,7 @@ test("D1-C6 is UNAVAILABLE without the snapshot source, never decided by a byte 
 function d2Root() {
   return makeSnapshot({
     [FX.pmH]: { 129: "class PatchMatchController : public BaseController {" },
+    [FX.pmCc]: { 191: "void PatchMatch::Run() {", 219: "PatchMatchController::PatchMatchController(" },
     [FX.mvsCc]: { 271: "  mvs::PatchMatchController controller(options," },
     [FX.autoCc]: { 431: "    mvs::PatchMatchController patch_match_controller(" },
     [FX.denseCc]: {
@@ -614,7 +615,7 @@ test("D2-C6 does not pass on candidates at the three construction sites", () => 
   ]);
   const check = find(grade(dir).checks, "D2-C6");
   assert.strictEqual(check.verdict, V.UNMET);
-  assert.strictEqual(check.reason, "candidate-only-attribution");
+  assert.strictEqual(check.reason, "attribution-not-proven-to-class");
 });
 
 test("D2-C6 names a missing construction site instead of passing on file presence", () => {
@@ -626,6 +627,34 @@ test("D2-C6 names a missing construction site instead of passing on file presenc
   const check = find(grade(dir).checks, "D2-C6");
   assert.strictEqual(check.verdict, V.UNMET);
   assert.strictEqual(check.reason, "construction-sites-not-attributed");
+});
+
+test("D2-C6 accepts a proven edge to the class's own constructor (patch_match.cc:219)", () => {
+  const root = d2Root();
+  const dir = d2Dir(root, (r) => {
+    const ctor = defAt(r, FX.pmCc, 219);
+    return [
+      proven(r, FX.mvsCc, 271, ctor, { callee_name: "PatchMatchController" }),
+      proven(r, FX.autoCc, 431, ctor, { callee_name: "PatchMatchController" }),
+      proven(r, FX.denseCc, 398, ctor, { callee_name: "PatchMatchController" }),
+    ];
+  });
+  assert.strictEqual(find(grade(dir).checks, "D2-C6").verdict, V.PASS);
+});
+
+test("D2-C6 does not accept a proven edge to another definition in the same file", () => {
+  const root = d2Root();
+  const dir = d2Dir(root, (r) => {
+    const other = defAt(r, FX.pmCc, 191);
+    return [
+      proven(r, FX.mvsCc, 271, other, { callee_name: "PatchMatchController" }),
+      proven(r, FX.autoCc, 431, other, { callee_name: "PatchMatchController" }),
+      proven(r, FX.denseCc, 398, other, { callee_name: "PatchMatchController" }),
+    ];
+  });
+  const check = find(grade(dir).checks, "D2-C6");
+  assert.strictEqual(check.verdict, V.UNMET);
+  assert.strictEqual(check.reason, "attribution-not-proven-to-class");
 });
 
 // --- D3-C5: the frozen chain, hop by hop
