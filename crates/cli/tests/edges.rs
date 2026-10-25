@@ -425,6 +425,93 @@ fn cli_cpp_template_call_names_the_function_not_the_type_argument() {
 }
 
 #[test]
+fn cli_scip_template_call_proves_the_function_not_the_type_argument() {
+    const CALLER: &str = "scip-test test test-pkg 1.0.0 patch.cpp/caller().";
+    const MAKE: &str = "scip-test test test-pkg 1.0.0 patch.cpp/make_it().";
+    const THING: &str = "scip-test test test-pkg 1.0.0 patch.cpp/Thing#";
+    let h = home("scip-template");
+    let dir = repo_with(
+        &h,
+        "sem",
+        &[(
+            "patch.cpp",
+            "void caller(int options) {\n  ns::make_it<Thing>(options);\n}\nvoid make_it(int options) {}\nstruct Thing {};\n",
+        )],
+    );
+    do_index(&h);
+    // SCIP references two names inside the one call: the function and the
+    // template type argument.
+    let doc = test_document(
+        "patch.cpp",
+        &[
+            occurrence(CALLER, 0x1, 0, 5, 11),
+            occurrence(MAKE, 0x0, 1, 6, 13),
+            occurrence(THING, 0x0, 1, 14, 19),
+            occurrence(MAKE, 0x1, 3, 5, 12),
+            occurrence(THING, 0x1, 4, 7, 12),
+        ],
+        &[(CALLER, "caller"), (MAKE, "make_it"), (THING, "Thing")],
+    );
+    import_documents(&h, &dir, "scip-test", &[doc]);
+    let v = query_json(&h, "callees", "patch.cpp", &[]);
+    let edges = v["edges"].as_array().expect("edges");
+    assert_eq!(edges.len(), 2, "{v}");
+    // The one proven call goes to the function, on SCIP evidence at the
+    // terminal.
+    let calls: Vec<_> = edges.iter().filter(|e| e["kind"] == "CALLS").collect();
+    assert_eq!(calls.len(), 1, "{v}");
+    let call = calls[0];
+    assert_eq!(call["precision"], "Exact");
+    assert_eq!(call["provider"], "scip-import");
+    assert_eq!(call["callee"]["symbol_uri"], MAKE);
+    assert_eq!(call["callee_name"], "make_it");
+    let src = std::fs::read(dir.join("patch.cpp")).unwrap();
+    for (field, expected) in [
+        ("span", "ns::make_it<Thing>(options)"),
+        ("callee_span", "ns::make_it<Thing>"),
+        ("terminal_span", "make_it"),
+        ("reference_span", "make_it"),
+    ] {
+        let span = call["evidence"][field].as_array().expect(field);
+        let a = span[0].as_u64().unwrap() as usize;
+        let b = span[1].as_u64().unwrap() as usize;
+        assert_eq!(&src[a..b], expected.as_bytes(), "{field}");
+    }
+    // The type argument stays an unresolved candidate: no target, no proof.
+    let other: Vec<_> = edges.iter().filter(|e| e["kind"] != "CALLS").collect();
+    assert_eq!(other.len(), 1, "{v}");
+    assert_eq!(other[0]["kind"], "POTENTIAL_CALL");
+    assert_eq!(other[0]["precision"], "Heuristic");
+    assert_eq!(other[0]["unresolved"], "target-mismatch");
+    assert!(other[0]["callee"].is_null(), "{v}");
+    // Callers of the type (its definition is on line 5): no proven call.
+    let (code, out, err) = run(
+        &h,
+        &[
+            "callers",
+            "--repo",
+            "sem",
+            "--path",
+            "patch.cpp",
+            "--line",
+            "5",
+            "--col",
+            "8",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    let t: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+    assert!(
+        t["edges"]
+            .as_array()
+            .expect("edges")
+            .iter()
+            .all(|e| e["kind"] != "CALLS"),
+        "{t}"
+    );
+}
+
+#[test]
 fn cli_stale_edit_reports_stale_not_current() {
     let h = home("stale");
     scip_imported(&h);
