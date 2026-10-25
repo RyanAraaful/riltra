@@ -18,7 +18,8 @@ pub const SCHEMA_VERSION: u32 = 5;
 /// 3: the terminal span of a C++ call excludes template arguments.
 /// 4: C++ name occurrences are extracted (E7 Slice 2).
 /// 5: the argument of a C++ factory call (`make_unique<T>`) is a candidate edge.
-pub const PARSER_VERSION: u32 = 5;
+/// 6: `.inl` files are extracted as C++ (G-SYN coverage gap, M9).
+pub const PARSER_VERSION: u32 = 6;
 
 /// Grammar + runtime versions pinned in `Cargo.lock`. A test pins these
 /// against the lockfile so they cannot drift silently.

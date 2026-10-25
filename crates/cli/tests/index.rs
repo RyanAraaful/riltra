@@ -455,6 +455,101 @@ fn an_index_from_the_previous_parser_version_is_rebuilt() {
     assert!(out.contains("\"kind\":\"field\""), "got: {out}");
 }
 
+/// `.inl` is C++ source (a template body that headers include): it is indexed
+/// like a `.h`, and a fragment that is not a complete unit keeps its errors.
+#[test]
+fn inl_files_are_indexed_as_cpp_and_fragments_keep_their_errors() {
+    let h = home("inl-index");
+    let repo = mkrepo(&h, "work");
+    std::fs::write(
+        repo.join("widget.inl"),
+        "inline int Widget::size() const { return count_; }\nvoid Widget::run() {\n  helper();\n}\n",
+    )
+    .unwrap();
+    std::fs::write(repo.join("tail.inl"), "  count_ = 0;\n}\n").unwrap();
+    init_and_index(&h, &repo, "r");
+    let (code, out, err) = run(&h, &["scan", "--repo", "r"]);
+    assert_eq!(code, 0, "scan failed: {err}");
+    let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let entry = |path: &str| {
+        doc["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["path"] == path)
+            .unwrap_or_else(|| panic!("{path} missing from scan: {out}"))
+            .clone()
+    };
+    let widget = entry("widget.inl");
+    assert_eq!(widget["language"], "cpp", "got: {widget}");
+    assert_eq!(widget["errors"], 0, "got: {widget}");
+    let tail = entry("tail.inl");
+    assert_eq!(tail["language"], "cpp", "got: {tail}");
+    assert!(tail["errors"].as_u64().unwrap() > 0, "got: {tail}");
+    let (code, out, err) = run(&h, &["search", "--repo", "r", "--symbol", "run"]);
+    assert_eq!(code, 0, "search failed: {err}");
+    assert!(out.contains("\"name\":\"Widget::run\""), "got: {out}");
+    assert!(out.contains("\"path\":\"widget.inl\""), "got: {out}");
+}
+
+#[test]
+fn inl_edits_make_the_index_stale_until_it_is_rebuilt() {
+    let h = home("inl-stale");
+    let repo = mkrepo(&h, "work");
+    std::fs::write(
+        repo.join("widget.inl"),
+        "int Widget::size() { return 1; }\n",
+    )
+    .unwrap();
+    init_and_index(&h, &repo, "r");
+    std::fs::write(
+        repo.join("widget.inl"),
+        "int Widget::count() { return 2; }\n",
+    )
+    .unwrap();
+    let (code, out, err) = run(&h, &["index", "status", "--repo", "r"]);
+    assert_eq!(code, 0, "index status failed: {err}");
+    assert!(out.contains("\"freshness\":\"stale\""), "got: {out}");
+    assert!(out.contains("content-changed"), "got: {out}");
+    init_and_index(&h, &repo, "r");
+    let (_, out, _) = run(&h, &["index", "status", "--repo", "r"]);
+    assert!(out.contains("\"freshness\":\"fresh\""), "got: {out}");
+    let (_, out, _) = run(&h, &["search", "--repo", "r", "--symbol", "count"]);
+    assert!(out.contains("\"name\":\"Widget::count\""), "got: {out}");
+    let (_, out, _) = run(&h, &["search", "--repo", "r", "--symbol", "size"]);
+    assert!(out.contains("\"total\":0"), "got: {out}");
+}
+
+#[test]
+fn inl_support_rebuilds_an_index_from_parser_version_five() {
+    let h = home("inl-parser");
+    let repo = mkrepo(&h, "work");
+    std::fs::write(
+        repo.join("widget.inl"),
+        "int Widget::size() { return 1; }\n",
+    )
+    .unwrap();
+    init_and_index(&h, &repo, "r");
+    // Parser version 5 did not index `.inl` files, so its index has no facts
+    // for them.
+    let db = h.join("index").join("r.db");
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute("UPDATE snapshots SET parser_version = 5", [])
+            .unwrap();
+        conn.execute("DELETE FROM symbols", []).unwrap();
+    }
+    let (code, out, err) = run(&h, &["index", "status", "--repo", "r"]);
+    assert_eq!(code, 0, "index status failed: {err}");
+    assert!(out.contains("\"freshness\":\"stale\""), "got: {out}");
+    assert!(out.contains("parser-changed"), "got: {out}");
+    let (code, out, err) = run(&h, &["index", "--repo", "r"]);
+    assert_eq!(code, 0, "index failed: {err}");
+    assert!(out.contains("\"mode\":\"fallback-full\""), "got: {out}");
+    let (_, out, _) = run(&h, &["search", "--repo", "r", "--symbol", "size"]);
+    assert!(out.contains("\"name\":\"Widget::size\""), "got: {out}");
+}
+
 #[test]
 fn an_index_from_the_previous_parser_version_has_no_occurrences_until_it_is_rebuilt() {
     let h = home("occ-parser");

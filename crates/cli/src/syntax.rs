@@ -56,10 +56,11 @@ pub enum FileKind {
     UnsupportedExtension,
 }
 
-/// Extension map. Headers (`.h`) parse as C++: real-world headers mix both
-/// languages and the C++ grammar covers C declarations, while the C grammar
-/// misreads C++ constructs (namespaces/classes) as functions with errors.
-/// Use `.c` for strict C parsing.
+/// Extension map. Headers (`.h`) and `.inl` template bodies parse as C++:
+/// real-world headers mix both languages, and the C++ grammar covers C
+/// declarations, while the C grammar misreads C++ constructs (namespaces and
+/// classes) as functions with errors. A `.inl` fragment that needs its header
+/// context keeps its errors in `errors`. Use `.c` for strict C parsing.
 pub fn classify(path: &Path) -> FileKind {
     match path
         .extension()
@@ -73,7 +74,7 @@ pub fn classify(path: &Path) -> FileKind {
         Some("tsx") => FileKind::Supported(Language::Tsx),
         Some("rs") => FileKind::Supported(Language::Rust),
         Some("c") => FileKind::Supported(Language::C),
-        Some("h" | "hh" | "hpp" | "hxx") => FileKind::Supported(Language::Cpp),
+        Some("h" | "hh" | "hpp" | "hxx" | "inl") => FileKind::Supported(Language::Cpp),
         Some("cc" | "cpp" | "cxx") => FileKind::Supported(Language::Cpp),
         Some("cu" | "cuh") => FileKind::CudaExperimental,
         _ => FileKind::UnsupportedExtension,
@@ -966,6 +967,10 @@ mod tests {
             FileKind::Supported(Language::Cpp)
         );
         assert_eq!(
+            classify(Path::new("widget.inl")),
+            FileKind::Supported(Language::Cpp)
+        );
+        assert_eq!(
             classify(Path::new("A.PY")),
             FileKind::Supported(Language::Python)
         );
@@ -977,6 +982,15 @@ mod tests {
         assert_eq!(classify(Path::new("k.cuh")), FileKind::CudaExperimental);
         assert_eq!(
             classify(Path::new("note.xyz")),
+            FileKind::UnsupportedExtension
+        );
+        // Other C++ template-body extensions stay out of scope (see README).
+        assert_eq!(
+            classify(Path::new("widget.ipp")),
+            FileKind::UnsupportedExtension
+        );
+        assert_eq!(
+            classify(Path::new("widget.tpp")),
             FileKind::UnsupportedExtension
         );
         assert_eq!(

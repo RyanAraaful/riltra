@@ -179,8 +179,10 @@ C++.
   anchor (no edge has a resolved target), and `impact` is `UNKNOWN`.
 - There is no C++ semantic resolution out of the box and no CUDA support. A C++
   project needs a compilation database and a language server you configure.
-- Macro interiors and C++ templates are opaque to the syntax layer; `.inl`,
-  `.ipp` and `.tpp` files are not indexed.
+- Macro interiors and C++ templates are opaque to the syntax layer. `.inl`
+  files are parsed as C++ headers; a fragment that needs its header context
+  keeps its syntax errors in the `errors` count. `.ipp` and `.tpp` files are
+  not indexed.
 - `search --occurrences` is a repository-wide census of an exact name. An empty
   list is not proof that a name is unused.
 - macOS continuous integration covers the x64 pool only; macOS ARM64 is not
