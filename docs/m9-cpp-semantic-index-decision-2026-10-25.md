@@ -163,3 +163,11 @@ pipeline, which the constraints forbid.
 
 - scip-clang README, `https://github.com/sourcegraph/scip-clang` (fetched 2026-10-25).
 - SCIP descriptor grammar, Context7 `/scip-code/scip`, `docs/scip.md`.
+
+## 11. Revision 2026-10-25 (spike)
+
+Recorded after the dry run. Details and status: [m9-cpp-semantic-index-spike-2026-10-25.md](m9-cpp-semantic-index-spike-2026-10-25.md).
+
+- §3 (indexer): the claim that clang is needed only for CUDA is wrong for this indexer. Its driver needs `clang++` to find the resource directory on ordinary C++ too. The dry run failed on the missing compiler and on the first missing standard header.
+- §3 (import): the SCIP project root from a WSL run is a POSIX URI that Riltra cannot resolve on Windows. The import stops with exit 3 before any candidate is checked. A path bridge is needed (owner decision).
+- Status: the spike stopped at the go/no-go gate and waits for approval of the packages and the bridge. All four gates remain UNMET.
