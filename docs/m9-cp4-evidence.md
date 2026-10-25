@@ -6,7 +6,7 @@ what was built, measured and verified for the M9 release candidate on
 tag, no publication and no signing: the `v0.1.0` release is a separate OWNER GO
 (design gate §5, D-M9-6).
 
-- Branch: `m9-multirepo-release-candidate` (local; nothing was pushed, §1)
+- Branch: `m9-multirepo-release-candidate`, pushed at `f45ddb8` on 2026-10-25 under the OWNER's instruction (no force; `master` unchanged); the commit that records the CI results (§1, §4) is local until pushed
 - Authorization: the OWNER instruction of 2026-10-25 (integrate the
   template-callee commits, fix the field anchor and implement E7 Slice 2, close
   the proven callers/trace/impact gaps, re-test the five MMSP workflows and
@@ -27,8 +27,8 @@ tag, no publication and no signing: the `v0.1.0` release is a separate OWNER GO
 
 ## 1. What is in the candidate
 
-The commits of this work on top of the M9 tip `f65c183`, from `f099fde` to the one that adds these documents, all DCO-signed, none pushed
-(`origin/m9-multirepo-release-candidate` is still `f65c183`):
+The commits of this work on top of the M9 tip `f65c183`, from `f099fde` to the one that adds these documents, all DCO-signed;
+`origin/m9-multirepo-release-candidate` moved `f65c183` → `f45ddb8` (fast-forward, hook scan of the ten commits clean):
 
 | Commit | Content |
 |---|---|
@@ -43,9 +43,19 @@ The commits of this work on top of the M9 tip `f65c183`, from `f099fde` to the o
 
 The full local suite on the final tree: **764 tests, 0 failed** (unit 424, cli
 16, edges 147, index 40, knowledge 52, mcp 58, semantic 15, syntax 12), `cargo
-fmt --check` and `cargo clippy --all-targets -- -D warnings` clean. The last
-CI evidence on a pushed commit is run 40169969953 at `54dbc71` (731 tests on
-Windows, 728 on Ubuntu and macOS x64, `security` green).
+fmt --check` and `cargo clippy --all-targets -- -D warnings` clean.
+
+**CI on the pushed tip `f45ddb8`** ([run 40185232654](https://github.com/RyanAraaful/riltra/actions/runs/40185232654), event `push`): all four jobs green.
+
+| Job | Runner | Result |
+|---|---|---|
+| `check (windows-latest)` | `windows-latest` | fmt, clippy, `cargo check --locked`, `cargo test --locked` **764 passed, 0 failed**, CLI smoke |
+| `check (ubuntu-latest)` | `ubuntu-latest` | same steps, **761 passed, 0 failed** |
+| `check (macos-15)` | `macos-15-intel` (x64) | same steps, **761 passed, 0 failed** |
+| `security` | `ubuntu-latest` | pinned gitleaks 8.30.1: pushed commits, committed tree and scanner regression tests all pass |
+
+Windows runs 3 more tests than Ubuntu and macOS: 8 tests are `cfg(windows)` and 5 are `cfg(unix)` or `cfg(not(windows))`. 764 equals the
+local Windows total. The previous reference was run 40169969953 at `54dbc71` (731 tests on Windows, 728 elsewhere, the same gap).
 
 Dependencies: `Cargo.toml`, `crates/cli/Cargo.toml` and `Cargo.lock` are
 byte-identical to `origin/master`, so no dependency entered the build or the
@@ -172,7 +182,7 @@ correction of the frozen spec (the `value` count is 9, not 27) are in
 
 ## 4. The release candidate artifacts
 
-Built and checked on this Windows host; Linux and macOS need the CI run (§7).
+Built and checked on this Windows host, then built and checked again on the three CI runners (§4.1).
 
 | Item | Result |
 |---|---|
@@ -184,18 +194,46 @@ Built and checked on this Windows host; Linux and macOS need the CI run (§7).
 | drift check | `release_docs --check` passes: the packages of `cargo metadata` equal those of `Cargo.lock` in both directions, every package has a license and a checksum, every package has a row in `docs/licensing.md`, and the committed SBOM equals a fresh one. It fails (exit 1) when a licensing row is removed (checked) |
 | licenses | 68 `MIT OR Apache-2.0`, 29 `MIT`, 5 `Apache-2.0 OR MIT`, 2 `Unlicense OR MIT`, 2 `Apache-2.0`, 1 `Zlib`, 1 `MIT OR Apache-2.0 OR LGPL-2.1-or-later` (`r-efi`, the MIT alternative is used), 1 `(MIT OR Apache-2.0) AND Unicode-3.0`: permissive only; the existing `new_dependencies_are_audited` test enforces the allowlist |
 | license texts | `THIRD_PARTY_LICENSES.txt` carries each crate's own license and notice files; seven crates publish none (`r-efi`, `rmcp`, `rmcp-macros`, `rsqlite-vfs`, `tree-sitter`, `tree-sitter-cpp`, `tree-sitter-typescript`), so the canonical text of the declared license is supplied with the crate's declared authors as holders |
-| workflow | `.github/workflows/release-candidate.yml`: manual or `v*-rc*` tag, Windows, Linux and macOS x64; build, drift check, package, smoke of the archive, upload as an artifact. It creates no release, tag, signature or installer. **It has not run**: it needs a push |
+| workflow | `.github/workflows/release-candidate.yml`: manual or `v*-rc*` tag, Windows, Linux and macOS x64; build, drift check, package, smoke of the archive, upload as an artifact. It creates no release, tag, signature or installer. It ran once, from a throwaway branch (§4.1) |
 
 The cargo metadata step downloads the manifests of the packages that this host
 does not build (other platforms), checksummed by `Cargo.lock`; no build script
 runs.
+
+### 4.1 The workflow on the three runners
+
+`workflow_dispatch` returned HTTP 404 (`workflow release-candidate.yml not found
+on the default branch`): GitHub dispatches only workflow files that exist on
+`master`, and this one exists only on the M9 branch. With the OWNER's choice
+of a throwaway branch, `rc-run/m9` (M9 plus one commit, `e8ec1d3`, that adds a
+`push` trigger for `rc-run/**`) was pushed, the workflow ran once, and the
+branch was deleted from the remote and locally. That commit is not part of M9
+and must not be merged; the built sources are those of `f45ddb8`.
+
+[Run 40185383581](https://github.com/RyanAraaful/riltra/actions/runs/40185383581): **three jobs, all steps green**
+(release build, `release_docs --check` printing `no drift`, package, clean-install
+smoke of the unpacked archive with every check `ok` including twelve tools, a
+JSON-RPC-only stdout and a classified error, artifact upload).
+
+| Platform | Runner | Archive | SHA-256 | Artifact size |
+|---|---|---|---|---|
+| windows-x64 | `windows-latest` | `riltra-0.1.0-windows-x64.zip` | `9d5df8db061d0076be52d4b5959bd60350b989433f55f58ed025d74b51cacb0e` | 3,136,075 B |
+| linux-x64 | `ubuntu-latest` | `riltra-0.1.0-linux-x64.tar.gz` | `03972f111e98f1bc9107e451e9af554f83701f66cc0a5468c092a9f604ce5e67` | 3,677,420 B |
+| macos-x64 | `macos-15-intel` | `riltra-0.1.0-macos-x64.tar.gz` | `51d8b2928004a5bc0e802b8c85435fe0d13c1cf9dd6f5c2e8020bdd46871c5f7` | 3,495,634 B |
+
+The step output of the three jobs (drift check, package, smoke) is archived, with
+runner paths replaced, in `docs/pilots/m9-rc/raw-ci/release-candidate-run-40185383581.txt`.
+The artifacts stay in the workflow run for the retention period; they were not
+downloaded. The same drift check that passed on this host (Windows) passed on
+Linux and macOS, so the committed SBOM is identical across platforms. macOS
+ARM64 is not built.
 
 ## 5. Release gates (design gate §4), stated separately
 
 | Gate | Status | Basis |
 |---|---|---|
 | G-LIC | **PASS** (on the candidate, this host) | SBOM generated from the locked graph, zero drift against `Cargo.lock`, every package in `docs/licensing.md`, `NOTICE` updated, permissive-only audit passes, commands and outputs archived. The SBOM is a superset of what one platform compiles |
-| G-NAT | **NOT YET VERIFIED** | Windows x64: release build and clean-install smoke pass. Linux x64 and macOS x64: not built; the workflow exists but has not run (needs a push). macOS ARM64 is not covered, as recorded in CP3 |
+| G-NAT | **PASS** (acceptance test; macOS is x64 only) | three native archives were produced by the CI runners, each passed the clean-install smoke with archived command output (`docs/pilots/m9-rc/raw-ci/`), checksums are listed (§4.1), and the three-OS CI is green with 764/761/761 tests. **macOS ARM64 is not covered** (CP3; `README.md` known limitations). The requirement also asks that platform behavior be documented: macOS ARM64 is in the README, while Windows junctions and WAL sidecars are recorded in `docs/audits/2026-10-19-windows-wal-concurrency.md` and the M8 gate, not in the README or `INSTALL.md` |
 | G-CLI | **PASS** (candidate, this host) | the suite and goldens are green (764/764); eight pilot commands run twice return identical bytes; the pre-1.0 stability policy is written in `README.md` |
 | G-MCP | **NOT YET VERIFIED** | transport, 12 tools, pure stdout, classified error, non-mutating store content: pass on the candidate (smoke and scripted D5). The real OpenCode run is **blocked** by an expired OpenCode API key (§3.2) |
 | G-SYN | **NOT YET VERIFIED** | extraction, determinism and the new occurrence rows verified; the `.inl` coverage gap found in CP3 is still undecided |
@@ -205,7 +243,7 @@ runs.
 | G-INC | **PASS** (candidate, pilot) | parity identical including the occurrence table; one file reparsed; timings and host recorded; no speedup claimed beyond the measured 2.6× (debug) of a refresh over a rebuild |
 | G-KNW | **NOT YET VERIFIED (release)** | the knowledge suite (52 tests: backup, verify, restore, export, non-mutating reads) is green on the candidate; the release-level round trip on an isolated home was not separately run |
 | G-TOK | **NOT YET VERIFIED** | §8 |
-| G-SEC | **NOT YET VERIFIED (release)** | isolation and non-mutation hold (porcelain 0 and `HEAD` unchanged for the snapshot and the original clone; the only home change on a read is the accepted WAL sidecars, identical to the CP2 record); the repository's own scan (`security/scan.sh`, gitleaks 8.30.1) over the commits since `f65c183` and over the tree reports no leaks, and the pre-commit hook scanned every commit; the CI `security` job and the push-time scan have not run on the candidate |
+| G-SEC | **PASS** (candidate; accepted limit below) | isolation and non-mutation hold (porcelain 0 and `HEAD` unchanged for the snapshot and the original clone; the only home change on a read is the accepted WAL sidecars, identical to the CP2 record); the repository's own scan (`security/scan.sh`, gitleaks 8.30.1) over the commits since `f65c183` and over the tree reports no leaks, and the pre-commit hook scanned every commit; the CI `security` job (pinned gitleaks: pushed commits, tree, scanner regression tests) is green on the pushed tip. The accepted limit stays: a read opens the store's `-wal`/`-shm` sidecars (M7 limitation L2, recorded in `docs/m8-design-gate.md` and the WAL audit, not in the README) |
 
 "PASS" above means the acceptance test of the gate ran on the candidate with
 archived evidence. A gate is never marked passed on milestone history alone.
@@ -226,9 +264,11 @@ archived evidence. A gate is never marked passed on milestone history alone.
 
 ## 7. What needs the owner
 
-1. **Push `m9-multirepo-release-candidate`** and run the CI and the
-   release-candidate workflow. Without it G-NAT stays NOT YET VERIFIED and the
-   CI `security` job has not scanned the commits.
+1. **Done on 2026-10-25:** the branch was pushed and the CI and the
+   release-candidate workflow ran green (§1, §4.1). To make the workflow
+   dispatchable it has to be merged to `master` (a pull request: not done, not
+   authorized here); until then it runs from a throwaway branch or an `-rc` tag.
+   This documentation commit is local until pushed.
 2. **Renew the OpenCode API key** so the real agent-side session can run
    against the candidate (G-MCP, D5-E1).
 3. **D2-H2**: decide whether to add a labelled "type constructed through a

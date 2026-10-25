@@ -22,6 +22,13 @@ for a `v*-rc*` tag, on Windows, Linux and macOS x64, and for each of them:
 The macOS runner is the x64 pool (see the comment in `ci.yml`); macOS ARM64 is
 not covered.
 
+`workflow_dispatch` works only for a workflow file that exists on `master`; until
+this file is merged there, dispatching it returns HTTP 404. Run it before then
+from a throwaway branch whose single extra commit adds
+`push: branches: ['rc-run/**']`, and delete the branch afterwards (run
+40185383581 on 2026-10-25 did exactly that and is recorded in
+`docs/m9-cp4-evidence.md` §4.1). Never merge that extra commit.
+
 ## Reproduce locally
 
 ```bash

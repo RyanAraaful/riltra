@@ -8,6 +8,7 @@ same pinned snapshot, on the same host, in the same debug profile.
 |---|---|
 | `raw-before/` | the M9 tip `f65c183` (before the template-callee commits and this work) |
 | `raw-after/` | the release-candidate code (`4bc8ed5`) |
+| `raw-ci/` | step output of the release-candidate workflow on the three CI runners (sources of `f45ddb8`), runner paths replaced |
 | `comparison.md` | the generated before/after tables (`method/compare.cjs`) |
 | `method/` | what this run adds to the frozen harness (below) |
 
