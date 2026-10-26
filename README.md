@@ -43,8 +43,24 @@ dependencies beyond itself:
   source digests, provenance, full-text search, and explicit
   fresh/stale/unknown freshness (`index`, `search`); one database file per
   repository under the local Riltra home.
-- **MCP server (read-only)** - `riltra mcp` serves eleven read-only tools over
-  local stdio for MCP clients. Reads never create or migrate a store: a missing
+- **Relationship graph** - `callers`, `callees`, `trace` and `impact` answer
+  with evidence and explicit labels. Syntax-only relations are
+  `POTENTIAL_CALL` candidates matched by name, never proven calls; only a
+  semantic provider's source-checked evidence makes a `CALLS` edge, and an
+  impact answer is `UNKNOWN` and `partial` unless it is proven. A C++ data
+  member is a valid anchor, and `search --occurrences` lists where an exact
+  name occurs (member accesses, the address of a member, same-file macro
+  arguments) as a labelled name census, not a binding.
+- **Opt-in semantic providers** - import a SCIP index (`semantic import`) or
+  query a language server you name by absolute path (`semantic query
+  --lsp-server`); the answers carry provider evidence and are never silently
+  trusted.
+- **Knowledge store** - revisioned decision/constraint/benchmark records per
+  repository with deterministic export, backup, verification and fail-closed
+  restore (`knowledge ...`).
+- **MCP server** - `riltra mcp` serves twelve tools over local stdio: eleven
+  read-only ones and one provider-backed tool that starts the operator's
+  language server. Reads never create or migrate a store: a missing
   index returns `no-index` without creating files, and an unsupported schema is
   refused as `schema_outdated` with a CLI migration instruction.
 
@@ -100,15 +116,21 @@ Notes:
   missing executable — nothing is silently faked.
 - Run `cargo run -q -p riltra -- --help` for the full command list.
 
-## MCP server (read-only)
+## MCP server (eleven read-only tools, one provider-backed tool)
 
 `riltra mcp` starts a local stdio MCP server for coding agents. It exposes
-eleven read-only tools:
+twelve tools:
 
 - `riltra_repo_list`, `riltra_repo_status`, `riltra_health`
 - `riltra_code_search`, `riltra_code_callers`, `riltra_code_callees`,
   `riltra_code_trace`, `riltra_code_impact`
 - `riltra_knowledge_search`, `riltra_knowledge_show`, `riltra_knowledge_related`
+- `riltra_code_semantic` — definition or references at a position, answered by
+  the language server the operator configured in `RILTRA_LSP_SERVER` (an
+  absolute path). It is the one tool that starts a subprocess: the server may
+  write its own index cache and may reach the network, so the server is no
+  longer read-only as a whole. Riltra itself still creates, migrates and
+  replaces no database through it.
 
 The server never creates, migrates, or replaces a database. A missing index or
 knowledge store returns its documented empty/`no-index` result without creating
@@ -135,24 +157,61 @@ Minimal OpenCode configuration for the local stdio server:
 See [docs/pilots/cp7a/README.md](docs/pilots/cp7a/README.md) for the CP7-A
 benchmark report, raw evidence, and limitations.
 
-## Roadmap (not yet implemented)
+## Language support
 
-The following are planned directions, not working features and not dated
-promises. Syntax analysis and `--symbol` filtering already work without a
-stored index; the roadmap is about going further:
+| Language | Extensions | Syntax facts | Name occurrences | Semantic evidence |
+|---|---|---|---|---|
+| Python | `.py` | definitions, imports, call candidates | no | SCIP import (contract only) |
+| JavaScript | `.js` `.mjs` `.cjs` | same | no | SCIP import (contract only) |
+| TypeScript / TSX | `.ts` `.mts` `.cts` `.tsx` | same | no | SCIP import, verified on a fixture (scip-typescript) |
+| Rust | `.rs` | same | no | SCIP import, verified on a fixture (rust-analyzer) |
+| C | `.c` | same | no | SCIP import (contract only) |
+| C++ | `.cc` `.cpp` `.cxx` `.h` `.hh` `.hpp` `.hxx` | same, plus classes, structs and data members | yes | language server query (clangd, operator-configured); not verified on a real project |
+| CUDA | `.cu` `.cuh` | reported as unsupported, never parsed | no | none |
 
-- Persistent indexed search and cross-file navigation.
-- Relationship graph: callers, callees, and dependencies with source evidence.
-- Freshness tracking: always-clear staleness status and incremental refresh.
-- Opt-in semantic providers (language servers / index formats) for deeper accuracy.
-- Persistent, revisioned knowledge graph for decisions, constraints, and benchmarks.
+Other extensions are reported as unsupported, never guessed. Headers parse as
+C++.
+
+## Known limitations
+
+- Syntax-only answers are candidates. Without a semantic provider, `callers`
+  match call sites by name inside a scope of related files, `trace` ends at the
+  anchor (no edge has a resolved target), and `impact` is `UNKNOWN`.
+- There is no C++ semantic resolution out of the box and no CUDA support. A C++
+  project needs a compilation database and a language server you configure.
+- Macro interiors and C++ templates are opaque to the syntax layer. `.inl`
+  files are parsed as C++ headers; a fragment that needs its header context
+  keeps its syntax errors in the `errors` count. `.ipp` and `.tpp` files are
+  not indexed.
+- `search --occurrences` is a repository-wide census of an exact name. An empty
+  list is not proof that a name is unused.
+- macOS continuous integration covers the x64 pool only; macOS ARM64 is not
+  covered.
+- Four C++ capability criteria are not met (status UNMET): C++ method identity for references (`D1-C6`), attribution
+  of the external construction sites to the class (`D2-C6`), the full call chain including the indirect dispatch
+  (`D3-C5`), and the affected set of an impact query (`D4-C5`). They are accepted pre-release limitations, and C++
+  answers stay candidates.
+- The repository history still carries machine-local paths from early commits
+  (a history rewrite is a separate, owner-gated decision).
+
+## Stability (pre-1.0)
+
+Within `0.1.x` the exit codes (`0` ok, `2` usage, `3` repository/data), the
+fixed key order of every JSON document and the MCP tool names are stable; byte
+goldens enforce them. New keys appear only behind an opt-in flag or are
+appended to the end of a document, and a change to an existing key is made in a
+minor version and written in the release notes. The on-disk index schema is
+versioned: an older index reads as stale or `schema_outdated` and is rebuilt
+with `index`, never silently reused.
 
 ## Project status
 
-Riltra is in early, pre-release development. Continuous integration runs format,
-compile, lint, and test checks on Windows, Linux, and macOS for every change.
-See [docs/m7-validation.md](docs/m7-validation.md) for the latest verified
-capabilities, limits, and their evidence.
+Riltra is in pre-release development; `0.1.0` has release candidates but no
+published release. Continuous integration runs format, compile, lint, and test
+checks on Windows, Linux, and macOS (x64) for every change. A manually started
+workflow builds the native archives of a release candidate, checks each with a
+clean-install smoke and writes their checksums; see
+[release/README.md](release/README.md). The M9 evidence is under `docs/m9-*.md`.
 
 ## Contributing
 

@@ -10,7 +10,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use crate::git;
 use crate::scan::{self, PlanAction};
 use crate::store;
-use crate::syntax::{grammar_version, language_name, parse_source};
+use crate::syntax::{classify, grammar_version, language_name, parse_source, FileKind};
 use rusqlite::{params, OptionalExtension};
 
 pub const DEFAULT_SEARCH_LIMIT: usize = 50;
@@ -500,6 +500,29 @@ fn ingest_file(
                     },
                 )?;
             }
+            for occurrence in &facts.reference_occurrences {
+                let Some(name) = occurrence.name.clone() else {
+                    continue;
+                };
+                store::insert_reference_occurrence(
+                    conn,
+                    snapshot_id,
+                    &store::ReferenceOccurrenceRow {
+                        file_id,
+                        name,
+                        role: occurrence.kind.to_string(),
+                        start_line: occurrence.span.start_line,
+                        start_col: occurrence.span.start_col,
+                        end_line: occurrence.span.end_line,
+                        end_col: occurrence.span.end_col,
+                        byte_start: occurrence.byte_start,
+                        byte_end: occurrence.byte_end,
+                        provider: "syntax".to_string(),
+                        grammar: grammar.clone(),
+                        language: language.clone(),
+                    },
+                )?;
+            }
             summary.processed += 1;
             summary.definitions += facts.definitions.len();
             summary.imports += facts.imports.len();
@@ -929,10 +952,11 @@ pub fn semantic_status(
         } else {
             crate::semantic::Verification::Stale
         };
-        // Provider names in the database must resolve against the static
-        // capability registry: an unknown name is reported, never trusted.
-        let limitation = match crate::semantic::resolve(&import.provider_name) {
-            Ok(_) => "single-hop def/ref only (M6 owns traversal); Current unreachable without independent producer attestation".to_string(),
+        // Every stored row came through the SCIP importer, so its capability is
+        // the scip-import transport's. The producer name and version are
+        // artifact metadata; riltra checks them against no registry.
+        let limitation = match crate::semantic::resolve(crate::semantic::SCIP_IMPORT) {
+            Ok(_) => "single-hop def/ref only (M6 owns traversal); Current unreachable without independent producer attestation; producer name and version are artifact metadata, not checked by riltra".to_string(),
             Err(e) => e,
         };
         rows.push(SemanticStatusRow {
@@ -1001,6 +1025,52 @@ fn hit_from_fact(fact: &store::SemanticFact, verification: &str) -> SemanticHit 
         precision: fact.precision.clone(),
         verification: verification.to_string(),
     }
+}
+
+/// One semantic hit from one provider fact. The fact's own precision and
+/// verification travel with it: a fact the adapter marked stale or
+/// heuristic never reaches the caller as a current, exact fact.
+fn lsp_hit_from_fact(fact: &crate::semantic::Evidence) -> SemanticHit {
+    let span = &fact.location.span;
+    SemanticHit {
+        symbol_uri: None,
+        display_name: None,
+        path: fact.location.path.clone(),
+        start_line: span.start_line,
+        start_col: span.start_col,
+        end_line: span.end_line,
+        end_col: span.end_col,
+        byte_start: span.byte_start,
+        byte_end: span.byte_end,
+        roles: fact.roles.raw,
+        precision: fact.precision.as_str().to_string(),
+        verification: fact.verification.as_str().to_string(),
+    }
+}
+
+/// The verdict of an LSP answer: the weakest fact in it. A fact the adapter
+/// marked stale makes the whole answer stale, never the other way round.
+fn lsp_answer_verification(definitions: &[SemanticHit], references: &[SemanticHit]) -> String {
+    if definitions
+        .iter()
+        .chain(references.iter())
+        .any(|hit| hit.verification == crate::semantic::Verification::Stale.as_str())
+    {
+        crate::semantic::Verification::Stale.as_str().to_string()
+    } else {
+        crate::semantic::Verification::Unverified
+            .as_str()
+            .to_string()
+    }
+}
+
+/// The reason of a failed LSP query. The server may have said why in its
+/// diagnostics, and those must not be lost: they travel with the reason.
+fn lsp_fallback_reason(error: &str, diagnostics: &[String]) -> String {
+    if diagnostics.is_empty() {
+        return error.to_string();
+    }
+    format!("{error}; server diagnostics: {}", diagnostics.join(" | "))
 }
 
 /// Per-import verdict memo: (verification, provider_name, provider_version).
@@ -1154,6 +1224,9 @@ pub struct EdgeAnchor {
     pub span_bytes: Option<(usize, usize)>,
     pub precision: String,
     pub uncertainty: Option<String>,
+    /// The anchor is a C++ data member. A member is not callable, so no call
+    /// is matched to it by name; its references are name occurrences.
+    pub data_member: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1224,7 +1297,10 @@ fn snapshot_byte_offset(
         return Ok(Some(col0 as usize));
     }
     let mut bases = BTreeSet::new();
-    let mut stmt = tx.prepare("SELECT start_line, start_col, byte_start, end_line, end_col, byte_end FROM symbols WHERE snapshot_id = ?1 AND file_id = ?2 AND (start_line = ?3 OR end_line = ?3) UNION ALL SELECT start_line, start_col, byte_start, end_line, end_col, byte_end FROM calls WHERE snapshot_id = ?1 AND file_id = ?2 AND (start_line = ?3 OR end_line = ?3) UNION ALL SELECT start_line, start_col, byte_start, end_line, end_col, byte_end FROM imports WHERE snapshot_id = ?1 AND file_id = ?2 AND (start_line = ?3 OR end_line = ?3)").map_err(|e| e.to_string())?;
+    // A data member is not a base for the byte-offset recovery either: the
+    // E7 Slice-1 field symbols must not change how a stale position is
+    // resolved. The symbol set is the one of the previous parser version.
+    let mut stmt = tx.prepare("SELECT start_line, start_col, byte_start, end_line, end_col, byte_end FROM symbols WHERE snapshot_id = ?1 AND file_id = ?2 AND kind <> 'field' AND (start_line = ?3 OR end_line = ?3) UNION ALL SELECT start_line, start_col, byte_start, end_line, end_col, byte_end FROM calls WHERE snapshot_id = ?1 AND file_id = ?2 AND (start_line = ?3 OR end_line = ?3) UNION ALL SELECT start_line, start_col, byte_start, end_line, end_col, byte_end FROM imports WHERE snapshot_id = ?1 AND file_id = ?2 AND (start_line = ?3 OR end_line = ?3)").map_err(|e| e.to_string())?;
     let mut rows = stmt
         .query(params![snapshot_id, file_id, line0 as i64 + 1])
         .map_err(|e| e.to_string())?;
@@ -1378,6 +1454,7 @@ pub fn resolve_edge_anchor(
             span_bytes: Some((best[0].byte_start, best[0].byte_end)),
             precision: best[0].precision.clone(),
             uncertainty: None,
+            data_member: false,
         });
     }
     if symbol.is_some() {
@@ -1385,6 +1462,20 @@ pub fn resolve_edge_anchor(
     }
     // Syntax fallback: nearest enclosing definition by byte containment.
     let source = source.ok_or("anchor unresolved: source unavailable")?;
+    // Unsupported files are refused before parsing, so they never have an index
+    // row. The reason names that refusal instead of a changed source.
+    let kind = classify(Path::new(validated));
+    let refusal = match &kind {
+        FileKind::Supported(_) => None,
+        FileKind::CudaExperimental => Some("CUDA sources are never parsed or indexed"),
+        FileKind::UnsupportedExtension => Some("files of this type are never parsed or indexed"),
+    };
+    if let Some(detail) = refusal {
+        return Err(format!(
+            "anchor unresolved: {}; {detail}",
+            scan::unsupported_reason(&kind)
+        ));
+    }
     if !files
         .get(validated)
         .is_some_and(|(_, digest)| *digest == store::content_digest(&source))
@@ -1399,6 +1490,9 @@ pub fn resolve_edge_anchor(
     let mut best: Vec<&store::SymbolRow> = Vec::new();
     let defs = store::symbols_at(tx, snapshot_id, validated)?;
     for def in &defs {
+        // A data member's symbol spans its NAME only, so it is the narrowest
+        // definition exactly when the position is on that name; anywhere else
+        // in the class body the enclosing definition stays the anchor.
         if def.byte_start <= off && off < def.byte_end {
             let width = def.byte_end.saturating_sub(def.byte_start);
             if width < best_width {
@@ -1426,6 +1520,13 @@ pub fn resolve_edge_anchor(
         .into_iter()
         .next()
         .ok_or_else(|| "no anchor here".to_string())?;
+    let data_member = def.kind == "field";
+    let uncertainty = match (&def.name, data_member) {
+        (Some(name), true) => format!(
+            "syntax-only anchor: data member '{name}' has no call edges; its name occurrences are listed by search --occurrences"
+        ),
+        _ => "syntax-only anchor: no semantic identity at this position".to_string(),
+    };
     Ok(EdgeAnchor {
         kind: AnchorKind::SyntaxFallback,
         path: validated.to_string(),
@@ -1437,7 +1538,8 @@ pub fn resolve_edge_anchor(
         display: def.name.clone(),
         span_bytes: Some((def.byte_start, def.byte_end)),
         precision: "Heuristic".to_string(),
-        uncertainty: Some("syntax-only anchor: no semantic identity at this position".to_string()),
+        uncertainty: Some(uncertainty),
+        data_member,
     })
 }
 
@@ -1513,6 +1615,67 @@ fn import_mentions_path(importer: &str, language: &str, text: &str, target: &str
     false
 }
 
+/// The quoted literal of a C/C++ `#include "..."` directive, with its
+/// separators normalised to `/`. An angle-bracket include names a root or
+/// system header, and a repository path suffix can never establish which
+/// one the compiler opens.
+fn cpp_include_literal(text: &str) -> Option<String> {
+    let rest = text.split_once('"')?.1;
+    let literal = rest.split_once('"')?.0;
+    if literal.is_empty() {
+        return None;
+    }
+    // Every repository path uses '/', so a Windows-authored include must
+    // resolve the same way on every host.
+    Some(literal.replace('\\', "/"))
+}
+
+/// Every component-boundary suffix of `path` that still carries a
+/// directory component: the forms an `#include` literal may take for a
+/// header that lives under an include root the repository does not
+/// record. A bare filename is excluded — it is the one form a system
+/// header can shadow.
+fn suffix_anchors(path: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    if path.contains('/') {
+        out.push(path);
+    }
+    for (at, _) in path.match_indices('/') {
+        let suffix = &path[at + 1..];
+        if suffix.contains('/') {
+            out.push(suffix);
+        }
+    }
+    out
+}
+
+/// The one indexed path the literal names, or `None` when it names none
+/// or several. Ambiguity is never resolved arbitrarily.
+fn unique_suffix_match<'a>(
+    literal: &str,
+    paths: impl Iterator<Item = &'a String>,
+) -> Option<&'a str> {
+    let needle = format!("/{literal}");
+    let mut found: Option<&'a str> = None;
+    for path in paths {
+        if path == literal || path.ends_with(&needle) {
+            if found.is_some() {
+                return None;
+            }
+            found = Some(path.as_str());
+        }
+    }
+    found
+}
+
+/// The name a call site records for a definition. A call keeps only its
+/// terminal name (`run` in `w.run()`), while an out-of-line C++ definition
+/// keeps its qualified text (`Widget::run`), so the part after the last `::`
+/// is what the call sites are matched against.
+fn called_name(definition: &str) -> &str {
+    definition.rsplit("::").next().unwrap_or(definition)
+}
+
 fn caller_candidate_paths(
     tx: &rusqlite::Connection,
     snapshot_id: i64,
@@ -1526,15 +1689,137 @@ fn caller_candidate_paths(
     let mut linked = BTreeSet::from([anchor.path.clone()]);
     // Local SCIP identities never gain cross-document name candidates.
     if anchor.doc.is_none() {
-        for import in store::imports_for(tx, snapshot_id)? {
-            if let (Some(path), Some(text)) = (paths.get(&import.file_id), import.text.as_deref()) {
-                if import_mentions_path(path, &import.language, text, &anchor.path) {
-                    linked.insert((*path).to_string());
+        let imports = store::imports_for(tx, snapshot_id)?;
+        let mut targets = vec![anchor.path.clone()];
+        targets.extend(declaring_headers(
+            tx,
+            snapshot_id,
+            anchor,
+            &imports,
+            &id_map,
+            &paths,
+        )?);
+        for target in &targets {
+            linked.insert(target.clone());
+            link_includers(&mut linked, &imports, &id_map, &paths, target);
+        }
+    }
+    Ok(linked.into_iter().collect())
+}
+
+/// Add every file whose imports name `target`.
+fn link_includers(
+    linked: &mut BTreeSet<String>,
+    imports: &[store::ImportRow],
+    id_map: &BTreeMap<String, (i64, String)>,
+    paths: &BTreeMap<i64, &str>,
+    target: &str,
+) {
+    for import in imports {
+        if let (Some(path), Some(text)) = (paths.get(&import.file_id), import.text.as_deref()) {
+            if import_mentions_path(path, &import.language, text, target) {
+                linked.insert((*path).to_string());
+            }
+        }
+    }
+    // A C/C++ include is written against an include root the repository
+    // does not record, so its literal rarely equals the target's
+    // repository-relative path. A unique path suffix may widen this
+    // candidate scope; it stays a candidate and never an identity.
+    // shortcut: a unique suffix is not proof of the compiler's choice —
+    // a literal the compiler resolves through another include root stays
+    // a candidate only; upgrade by reading the build system's roots.
+    let anchors = suffix_anchors(target);
+    if anchors.is_empty() {
+        return;
+    }
+    let mut resolved: BTreeMap<String, Option<&str>> = BTreeMap::new();
+    for import in imports {
+        let path = match paths.get(&import.file_id) {
+            Some(path) => *path,
+            None => continue,
+        };
+        if !matches!(import.language.as_str(), "c" | "cpp") {
+            continue;
+        }
+        let literal = match import.text.as_deref().and_then(cpp_include_literal) {
+            Some(literal) => literal,
+            None => continue,
+        };
+        if !anchors.contains(&literal.as_str()) {
+            continue;
+        }
+        let hit = match resolved.get(literal.as_str()) {
+            Some(hit) => *hit,
+            None => {
+                let hit = unique_suffix_match(&literal, id_map.keys());
+                resolved.insert(literal.clone(), hit);
+                hit
+            }
+        };
+        if hit == Some(target) {
+            linked.insert(path.to_string());
+        }
+    }
+}
+
+/// The closest qualifier of an out-of-line C++ definition name:
+/// `Widget` for `Widget::run`, `Problem` for `PatchMatch::Problem::Print`,
+/// `Foo` for `Foo<T>::bar`. `None` for an unqualified name.
+fn qualifier_of(definition: Option<&str>) -> Option<&str> {
+    let mut parts = definition?.rsplit("::");
+    parts.next()?;
+    let owner = parts.next()?;
+    let owner = owner.split('<').next().unwrap_or(owner).trim();
+    (!owner.is_empty()).then_some(owner)
+}
+
+/// Headers that declare the class of an out-of-line C++ definition. A call to
+/// `Widget::run` is written in files that include the header declaring
+/// `Widget`, not in files that include `widget.cc`, so the headers that the
+/// definition's file includes and that hold a class or struct of the
+/// qualifier's name widen the candidate scope. A candidate, never an identity.
+fn declaring_headers(
+    tx: &rusqlite::Connection,
+    snapshot_id: i64,
+    anchor: &EdgeAnchor,
+    imports: &[store::ImportRow],
+    id_map: &BTreeMap<String, (i64, String)>,
+    paths: &BTreeMap<i64, &str>,
+) -> Result<Vec<String>, String> {
+    let (Some(owner), Some((anchor_id, _))) = (
+        qualifier_of(anchor.display.as_deref()),
+        id_map.get(&anchor.path),
+    ) else {
+        return Ok(Vec::new());
+    };
+    let mut included = BTreeSet::new();
+    for import in imports
+        .iter()
+        .filter(|i| i.file_id == *anchor_id && matches!(i.language.as_str(), "c" | "cpp"))
+    {
+        if let Some(literal) = import.text.as_deref().and_then(cpp_include_literal) {
+            if let Some(hit) = unique_suffix_match(&literal, id_map.keys()) {
+                included.insert(hit.to_string());
+            }
+        }
+    }
+    if included.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut headers = BTreeSet::new();
+    for symbol in store::symbols_for(tx, snapshot_id)? {
+        if matches!(symbol.kind.as_str(), "class" | "struct")
+            && symbol.name.as_deref() == Some(owner)
+        {
+            if let Some(path) = paths.get(&symbol.file_id) {
+                if included.contains(*path) && *path != anchor.path {
+                    headers.insert((*path).to_string());
                 }
             }
         }
     }
-    Ok(linked.into_iter().collect())
+    Ok(headers.into_iter().collect())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1692,7 +1977,19 @@ impl EdgeRead<'_> {
             let (a, b, c, d): (Option<i64>, Option<i64>, Option<i64>, Option<i64>) = (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?);
             Ok((a.zip(b).map(|(a,b)| (a as usize,b as usize)), c.zip(d).map(|(a,b)| (a as usize,b as usize))))
         }).optional().map_err(|e| e.to_string())?;
-        let (callee_span, terminal_span) = spans.unwrap_or_default();
+        let evidence_span = |key: &str| -> Option<(usize, usize)> {
+            let pair = stored.get(key)?.as_array()?;
+            Some((
+                pair.first()?.as_u64()? as usize,
+                pair.get(1)?.as_u64()? as usize,
+            ))
+        };
+        // A factory argument has no call row at its own span: its evidence
+        // carries the spans instead.
+        let (callee_span, terminal_span) = match spans {
+            Some(found) => found,
+            None => (evidence_span("callee_span"), evidence_span("terminal_span")),
+        };
         Ok(EdgeHitOut {
             edge,
             verification,
@@ -1870,7 +2167,10 @@ pub(crate) fn edge_query_conn(
     } else {
         Vec::new()
     };
-    let paths = if request.direction == EdgeDir::Callers {
+    // Callers are matched by name only for a callable anchor: a data member
+    // takes no call by name, so a same-named method call is never its caller.
+    let by_name = request.direction == EdgeDir::Callers && !anchor.data_member;
+    let paths = if by_name {
         caller_candidate_paths(&tx, snapshot.id, &anchor)?
     } else {
         Vec::new()
@@ -1879,8 +2179,8 @@ pub(crate) fn edge_query_conn(
         snapshot_id: snapshot.id,
         endpoint: &endpoint,
         inbound: request.direction == EdgeDir::Callers,
-        candidate_name: if request.direction == EdgeDir::Callers {
-            anchor.display.as_deref()
+        candidate_name: if by_name {
+            anchor.display.as_deref().map(called_name)
         } else {
             None
         },
@@ -2294,9 +2594,10 @@ pub(crate) fn graph_query_conn(
 }
 
 /// Single-hop live LSP query with an explicit server path. Ephemeral
-/// evidence only: nothing is persisted, every answer is `Unverified`.
-/// Any spawn/query failure becomes an explicit fallback payload (exit 0),
-/// never a fabricated relationship.
+/// evidence only: nothing is persisted, every answer is `Unverified` unless
+/// the adapter could PROVE that the source it was answered about is no
+/// longer the source on disk (`Stale`). Any spawn/query failure becomes an
+/// explicit fallback payload (exit 0), never a fabricated relationship.
 pub fn semantic_query_lsp(
     root: &Path,
     query: &SpanQuery<'_>,
@@ -2327,7 +2628,10 @@ pub fn semantic_query_lsp(
     let answer = match answer {
         Ok(answer) => answer,
         Err(e) => {
-            session.shutdown();
+            // The server failed, but it may have said why: its diagnostics
+            // travel with the fallback reason instead of being dropped.
+            let diagnostics = session.shutdown();
+            let reason = lsp_fallback_reason(&e, &diagnostics);
             return Ok(SemanticQueryOut {
                 definitions: Vec::new(),
                 references: Vec::new(),
@@ -2335,7 +2639,7 @@ pub fn semantic_query_lsp(
                 provider_version: String::new(),
                 verification: "Unverified".to_string(),
                 server_diagnostics: Vec::new(),
-                fallback: Some(e),
+                fallback: Some(reason),
             });
         }
     };
@@ -2350,27 +2654,16 @@ pub fn semantic_query_lsp(
         fallback: None,
     };
     for fact in &answer.facts {
-        let span = &fact.location.span;
-        let hit = SemanticHit {
-            symbol_uri: None,
-            display_name: None,
-            path: fact.location.path.clone(),
-            start_line: span.start_line,
-            start_col: span.start_col,
-            end_line: span.end_line,
-            end_col: span.end_col,
-            byte_start: span.byte_start,
-            byte_end: span.byte_end,
-            roles: fact.roles.raw,
-            precision: crate::semantic::Precision::Heuristic.as_str().to_string(),
-            verification: "Unverified".to_string(),
-        };
+        let hit = lsp_hit_from_fact(fact);
         if query.refs {
             out.references.push(hit);
         } else {
             out.definitions.push(hit);
         }
     }
+    // The answer's own verdict: the weakest fact in it. A fact the adapter
+    // marked stale makes the whole answer stale, never the other way round.
+    out.verification = lsp_answer_verification(&out.definitions, &out.references);
     session.shutdown();
     Ok(out)
 }
@@ -2661,7 +2954,9 @@ pub fn evaluate_snapshot(
 #[cfg(test)]
 mod tests {
     use super::{
-        build, build_full, config_fingerprint, diff_files, evaluate, evaluate_tx, input_fingerprint,
+        build, build_full, config_fingerprint, cpp_include_literal, diff_files, evaluate,
+        evaluate_tx, input_fingerprint, lsp_answer_verification, lsp_fallback_reason,
+        lsp_hit_from_fact, suffix_anchors, unique_suffix_match,
     };
     use crate::store;
     use crate::testutil::{git_repo, tmpdir};
@@ -2670,6 +2965,110 @@ mod tests {
         let dir = tmpdir(tag);
         std::fs::write(dir.join("a.py"), b"def f():\n    return g()\n").unwrap();
         dir
+    }
+
+    #[test]
+    fn a_failed_query_reports_the_diagnostics_of_the_server() {
+        // The server may have said why it failed; the reason must not lose it.
+        assert_eq!(
+            lsp_fallback_reason("server error: refused", &[]),
+            "server error: refused"
+        );
+        let with = lsp_fallback_reason(
+            "server error: refused",
+            &["diagnostic: error[pp_file_not_found] main.rs:4".to_string()],
+        );
+        assert!(with.contains("pp_file_not_found"), "{with}");
+        assert!(with.starts_with("server error: refused"), "{with}");
+    }
+
+    #[test]
+    fn the_answer_verdict_is_the_weakest_fact() {
+        // The answer's verdict is the weakest fact in it: one stale fact
+        // makes the whole answer stale, never the other way round. (A mixed
+        // answer cannot be produced through the adapter — a changed queried
+        // file marks every fact stale — so the rule is proven here.)
+        let hit = |verification: &str| crate::index::SemanticHit {
+            symbol_uri: None,
+            display_name: None,
+            path: "a.rs".to_string(),
+            start_line: 1,
+            start_col: 2,
+            end_line: 1,
+            end_col: 5,
+            byte_start: 10,
+            byte_end: 13,
+            roles: 0,
+            precision: "Heuristic".to_string(),
+            verification: verification.to_string(),
+        };
+        assert_eq!(lsp_answer_verification(&[], &[]), "Unverified");
+        assert_eq!(
+            lsp_answer_verification(&[hit("Unverified")], &[]),
+            "Unverified"
+        );
+        assert_eq!(lsp_answer_verification(&[hit("Stale")], &[]), "Stale");
+        assert_eq!(
+            lsp_answer_verification(&[hit("Unverified")], &[hit("Stale")]),
+            "Stale",
+            "the weakest fact decides the answer's verdict"
+        );
+    }
+
+    #[test]
+    fn lsp_hits_carry_the_facts_own_precision_and_verification() {
+        // A provider fact is never presented as more certain than it is: the
+        // hit travels with the fact's own precision and verification, so a
+        // fact the adapter marked stale cannot reach the caller as current.
+        let mut fact = crate::semantic::Evidence::lsp_location(
+            "a.rs",
+            "digest",
+            crate::semantic::SpanBytes {
+                start_line: 1,
+                start_col: 2,
+                end_line: 1,
+                end_col: 5,
+                byte_start: 10,
+                byte_end: 13,
+            },
+        );
+        let hit = lsp_hit_from_fact(&fact);
+        assert_eq!(hit.precision, "Heuristic");
+        assert_eq!(hit.verification, "Unverified");
+        fact.verification = crate::semantic::Verification::Stale;
+        assert_eq!(lsp_hit_from_fact(&fact).verification, "Stale");
+        fact.verification = crate::semantic::Verification::Unverified;
+        fact.precision = crate::semantic::Precision::Exact;
+        assert_eq!(lsp_hit_from_fact(&fact).precision, "Exact");
+    }
+
+    #[test]
+    fn an_lsp_answer_is_as_certain_as_its_weakest_fact() {
+        // The answer's own verdict never overstates the facts it carries.
+        let fact = crate::semantic::Evidence::lsp_location(
+            "a.rs",
+            "digest",
+            crate::semantic::SpanBytes {
+                start_line: 1,
+                start_col: 2,
+                end_line: 1,
+                end_col: 5,
+                byte_start: 10,
+                byte_end: 13,
+            },
+        );
+        let plain = lsp_hit_from_fact(&fact);
+        assert_eq!(lsp_answer_verification(&[plain], &[]), "Unverified");
+        let mut stale = lsp_hit_from_fact(&fact);
+        stale.verification = "Stale".to_string();
+        assert_eq!(lsp_answer_verification(&[stale], &[]), "Stale");
+        // One stale fact is enough: the answer cannot be more certain than
+        // its weakest part.
+        let other = lsp_hit_from_fact(&fact);
+        let mut stale_again = lsp_hit_from_fact(&fact);
+        stale_again.verification = "Stale".to_string();
+        assert_eq!(lsp_answer_verification(&[other], &[stale_again]), "Stale");
+        assert_eq!(lsp_answer_verification(&[], &[]), "Unverified");
     }
 
     #[test]
@@ -2829,6 +3228,7 @@ mod tests {
         struct Facts {
             files: Vec<(String, String, u64, String, u32)>,
             symbols: Vec<SymRow>,
+            occurrences: Vec<SymRow>,
             imports: Vec<ImpRow>,
             calls: Vec<CallRow>,
         }
@@ -2840,10 +3240,11 @@ mod tests {
                 id_map.insert(*id, path.clone());
             }
             let path_of = |id: i64| id_map.get(&id).cloned().unwrap_or_default();
-            let mut symbols = Vec::new();
-            {
+            // Symbols and reference occurrences share one row shape: the kind
+            // (or role), the name, the span and the provenance.
+            let named_spans = |table: &str, kind_column: &str| -> Vec<SymRow> {
                 let mut st = conn
-                    .prepare("SELECT file_id, kind, name, start_line, start_col, end_line, end_col, byte_start, byte_end, provider, grammar, language FROM symbols WHERE snapshot_id = ?1")
+                    .prepare(&format!("SELECT file_id, {kind_column}, name, start_line, start_col, end_line, end_col, byte_start, byte_end, provider, grammar, language FROM {table} WHERE snapshot_id = ?1"))
                     .unwrap();
                 let rows = st
                     .query_map([snap_id], |row| {
@@ -2863,9 +3264,10 @@ mod tests {
                         ))
                     })
                     .unwrap();
+                let mut named = Vec::new();
                 for r in rows {
                     let r = r.unwrap();
-                    symbols.push((
+                    named.push((
                         path_of(r.0),
                         r.1,
                         r.2,
@@ -2875,7 +3277,10 @@ mod tests {
                         r.11,
                     ));
                 }
-            }
+                named
+            };
+            let mut symbols = named_spans("symbols", "kind");
+            let mut occurrences = named_spans("reference_occurrences", "role");
             let mut imports = Vec::new();
             {
                 let mut st = conn
@@ -2952,11 +3357,13 @@ mod tests {
                 .collect();
             file_vec.sort();
             symbols.sort();
+            occurrences.sort();
             imports.sort();
             calls.sort();
             Facts {
                 files: file_vec,
                 symbols,
+                occurrences,
                 imports,
                 calls,
             }
@@ -2971,6 +3378,20 @@ mod tests {
         )
         .unwrap();
         std::fs::write(repo.join("c.js"), b"function gamma() { return 1; }\n").unwrap();
+        // A C++ data member: the parity check must cover the field facts the
+        // unchanged file carries through the incremental copy path.
+        std::fs::write(
+            repo.join("fields.cpp"),
+            b"struct S {\n  int value = 1;\n};\nint read(S s) {\n  return s.value;\n}\n",
+        )
+        .unwrap();
+        // A C++ file that changes in stage 1: its occurrences are extracted
+        // again, while the unchanged file's are copied.
+        std::fs::write(
+            repo.join("moving.cpp"),
+            b"struct M {\n  int v = 0;\n};\nint get(M* m) {\n  return m->v;\n}\n",
+        )
+        .unwrap();
         std::fs::write(repo.join("bin.py"), b"\x00\x01").unwrap();
         std::fs::write(repo.join("note.xyz"), b"plain\n").unwrap();
         build_full(&home_b, "r", &repo).unwrap();
@@ -2978,6 +3399,11 @@ mod tests {
         std::fs::write(
             repo.join("b.py"),
             b"import sys\ndef beta():\n    return sys.argv\n",
+        )
+        .unwrap();
+        std::fs::write(
+            repo.join("moving.cpp"),
+            b"struct M {\n  int v = 0;\n};\nint get(M* m) {\n  int* p = &m->v;\n  return m->v + *p;\n}\n",
         )
         .unwrap();
         build(&home_b, "r", &repo, false).unwrap();
@@ -2995,6 +3421,21 @@ mod tests {
             dump(&conn, snap.id)
         };
         assert_eq!(read(&home_b), read(&home_c), "incremental must equal full");
+        // The comparison above is not vacuous: the unchanged file's rows were
+        // copied and the changed file's rows were extracted again.
+        let occurrences = read(&home_b).occurrences;
+        let roles_in = |path: &str| -> Vec<String> {
+            occurrences
+                .iter()
+                .filter(|o| o.0 == path)
+                .map(|o| o.1.clone())
+                .collect()
+        };
+        assert_eq!(roles_in("fields.cpp"), vec!["member-access"]);
+        assert_eq!(
+            roles_in("moving.cpp"),
+            vec!["address-of-binding", "member-access"]
+        );
     }
 
     #[test]
@@ -3484,21 +3925,35 @@ mod tests {
         assert!(fresh.reasons.iter().any(|r| r == "config-changed"));
     }
 
-    #[test]
-    fn parser_version_mismatch_is_stale() {
-        let home = tmpdir("idx-parser-home");
-        let repo = plain_repo("idx-parser");
+    /// A snapshot recorded by parser `version` must read as stale.
+    fn assert_parser_version_is_stale(tag: &str, version: u32) {
+        let home = tmpdir(&format!("{tag}-home"));
+        let repo = plain_repo(tag);
         // Fabricate a snapshot recorded by a different parser build.
         let db = store::db_path(&home, "r");
         std::fs::create_dir_all(db.parent().unwrap()).unwrap();
         let conn = store::open_live(&db).unwrap();
         let mut snap = fabricated_snapshot("r", &repo);
-        snap.parser_version = super::super::store::PARSER_VERSION + 1;
+        snap.parser_version = version;
         store::insert_snapshot(&conn, &snap).unwrap();
         drop(conn);
         let fresh = evaluate(&home, "r", &repo);
         assert_eq!(fresh.status, "stale");
         assert!(fresh.reasons.iter().any(|r| r == "parser-changed"));
+    }
+
+    #[test]
+    fn parser_version_mismatch_is_stale() {
+        assert_parser_version_is_stale("idx-parser", super::super::store::PARSER_VERSION + 1);
+    }
+
+    #[test]
+    fn parser_two_snapshot_is_stale_because_template_terminals_changed() {
+        // Parser 2 recorded the template arguments of a C++ call in its
+        // terminal span (`PatchMatchController>` for
+        // `std::make_shared<mvs::PatchMatchController>`), so an index it
+        // wrote must be rebuilt, never read as fresh.
+        assert_parser_version_is_stale("idx-parser-two", 2);
     }
 
     #[test]
@@ -3687,6 +4142,47 @@ mod tests {
         )
         .unwrap();
         (conn, snap, dir)
+    }
+
+    #[test]
+    fn cpp_include_literal_reads_only_the_quoted_form() {
+        assert_eq!(
+            cpp_include_literal("#include \"colmap/mvs/patch_match.h\"").as_deref(),
+            Some("colmap/mvs/patch_match.h")
+        );
+        // A Windows-authored include separates the path with backslashes.
+        assert_eq!(
+            cpp_include_literal("#include \"colmap\\mvs\\patch_match.h\"").as_deref(),
+            Some("colmap/mvs/patch_match.h")
+        );
+        // An angle-bracket include names a root or system header; a repository
+        // path suffix can never establish which one.
+        assert_eq!(cpp_include_literal("#include <numeric>"), None);
+        assert_eq!(cpp_include_literal("#include \"\""), None);
+    }
+
+    #[test]
+    fn suffix_anchors_excludes_the_bare_filename() {
+        assert_eq!(
+            suffix_anchors("colmap/src/colmap/mvs/patch_match.h"),
+            vec![
+                "colmap/src/colmap/mvs/patch_match.h",
+                "src/colmap/mvs/patch_match.h",
+                "colmap/mvs/patch_match.h",
+                "mvs/patch_match.h",
+            ]
+        );
+        // A bare filename is the one form a system header can shadow.
+        assert!(suffix_anchors("patch_match.h").is_empty());
+    }
+
+    #[test]
+    fn unique_suffix_match_is_unique_or_nothing() {
+        let paths = ["a/b/x.h".to_string(), "c/x.h".to_string()];
+        assert_eq!(unique_suffix_match("b/x.h", paths.iter()), Some("a/b/x.h"));
+        // Two files share the suffix: ambiguity is never resolved arbitrarily.
+        assert_eq!(unique_suffix_match("x.h", paths.iter()), None);
+        assert_eq!(unique_suffix_match("z.h", paths.iter()), None);
     }
 
     /// Semantic anchor: narrowest enclosing occurrence wins, import-scoped.

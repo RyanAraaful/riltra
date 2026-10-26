@@ -203,12 +203,16 @@ pub struct Capability {
     pub references: bool,
 }
 
+/// Transport identity of every SCIP import. The producer named inside an
+/// artifact is metadata, never a registry key.
+pub const SCIP_IMPORT: &str = "scip-import";
+
 /// The whole M5 provider universe. Unknown names are unsupported, never
 /// guessed.
 pub fn capabilities() -> &'static [Capability] {
     &[
         Capability {
-            name: "scip-import",
+            name: SCIP_IMPORT,
             definitions: true,
             references: true,
         },

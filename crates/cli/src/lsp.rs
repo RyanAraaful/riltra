@@ -85,7 +85,12 @@ pub fn read_message<R: Read>(mut reader: R, max_bytes: usize) -> Result<Value, S
         if byte[0] == b'\n' && !header.ends_with(b"\r\n\r\n") {
             let text = String::from_utf8_lossy(&header);
             if !text.lines().next().is_some_and(|l| l.contains(':')) {
-                return Err(format!("non-framing stdout: '{text}'"));
+                // The server's own stdout reaches the caller's output: it is
+                // sanitized and bounded like every other piece of server text.
+                return Err(format!(
+                    "non-framing stdout: '{}'",
+                    bounded_server_text(&text, MAX_NOTICE_CHARS)
+                ));
             }
         }
     }
@@ -97,7 +102,14 @@ pub fn read_message<R: Read>(mut reader: R, max_bytes: usize) -> Result<Value, S
         }
         let (name, value) = line
             .split_once(':')
-            .ok_or_else(|| format!("bad header line: '{line}'"))?;
+            // The server's own bytes reach the caller's output: they are
+            // sanitized and bounded like every other piece of server text.
+            .ok_or_else(|| {
+                format!(
+                    "bad header line: '{}'",
+                    bounded_server_text(line, MAX_NOTICE_CHARS)
+                )
+            })?;
         if name.trim().eq_ignore_ascii_case("content-length") {
             length = Some(
                 value
@@ -203,17 +215,19 @@ fn id_key(id: &Value) -> String {
 }
 
 /// Parse a `file://` URI into a repo-contained path. Anything else —
-/// `untitled:`, traversal, missing file — is rejected with a reason.
+/// `untitled:`, traversal, missing file — is rejected with a reason. The
+/// reason never quotes the URI: a server-supplied URI can carry a path
+/// outside the repository, and these reasons reach the caller's output.
 pub fn uri_to_path(root: &Path, uri: &str) -> Result<PathBuf, String> {
     if !uri.starts_with("file://") {
-        return Err(format!("non-file URI: '{uri}'"));
+        return Err("non-file URI".to_string());
     }
     let candidate = semantic::uri_path(uri)?;
     let canonical_root = root
         .canonicalize()
         .map_err(|e| format!("repository root unavailable: {e}"))?;
     if !crate::paths::contains(&canonical_root, &candidate) {
-        return Err(format!("URI escapes repository: '{uri}'"));
+        return Err("URI escapes repository".to_string());
     }
     Ok(candidate)
 }
@@ -253,12 +267,17 @@ pub struct Session {
     timeout: Duration,
     root: PathBuf,
     canonical_root: PathBuf,
-    opened: std::collections::HashSet<String>,
+    /// The documents this session opened, with the digest of the text the
+    /// server was given for each.
+    opened: std::collections::HashMap<String, String>,
     refs_supported: bool,
     diagnostic_provider: bool,
     server_version: String,
     pub position_encoding: String,
     pub diagnostics: Vec<String>,
+    /// The server's diagnostics, formatted and bounded. They are kept apart
+    /// from the protocol notices so the number of them can be capped.
+    diagnostic_lines: Vec<String>,
     dead: Option<String>,
 }
 
@@ -344,12 +363,13 @@ pub fn spawn(spec: ServerSpec) -> Result<Session, String> {
         timeout: spec.timeout,
         root: spec.root.clone(),
         canonical_root,
-        opened: std::collections::HashSet::new(),
+        opened: std::collections::HashMap::new(),
         refs_supported: false,
         diagnostic_provider: false,
         server_version: String::new(),
         position_encoding: "utf-16".to_string(),
         diagnostics: Vec::new(),
+        diagnostic_lines: Vec::new(),
         dead: None,
     };
     session.initialize(&spec)?;
@@ -444,15 +464,24 @@ impl Session {
                 Ok(Incoming::Response { id: got, body }) => {
                     if got == want {
                         if std::env::var("RILTRA_LSP_DEBUG").is_ok() {
-                            eprintln!("LSP <- {body}");
+                            eprintln!("{}", debug_response(&body.to_string()));
                         }
                         if let Some(err) = body.get("error") {
-                            return Err(format!("server error: {err}"));
+                            // The retryable marker must survive the cap: the
+                            // decision is made on the parsed value, not on
+                            // the rendered text.
+                            let retryable = err.get("code").and_then(Value::as_i64) == Some(-32801)
+                                || err.to_string().contains(RETRYABLE_CODE);
+                            let text = bounded_server_text(&err.to_string(), MAX_NOTICE_CHARS);
+                            return Err(if retryable {
+                                format!("{RETRYABLE_CODE} {text}")
+                            } else {
+                                format!("server error: {text}")
+                            });
                         }
                         return Ok(body.get("result").cloned().unwrap_or(Value::Null));
                     }
-                    self.diagnostics
-                        .push(format!("stray response id {got} during {method}"));
+                    self.push_notice(format!("stray response id {got} during {method}"));
                 }
                 Ok(Incoming::Notify {
                     method: m,
@@ -470,7 +499,11 @@ impl Session {
                     }
                 }
                 Ok(Incoming::Broken(e)) => {
-                    return Err(self.fail(format!("server broken: {e}{}", self.stderr_tail())));
+                    return Err(self.fail(format!(
+                        "server broken: {}{}",
+                        bounded_server_text(&e, MAX_NOTICE_CHARS),
+                        self.stderr_tail()
+                    )));
                 }
                 Err(_) => {
                     // Timeout: cancel, then kill + reap, then report.
@@ -482,30 +515,194 @@ impl Session {
     }
 
     fn stderr_tail(&self) -> String {
+        // The tail starts at a line boundary: a window that starts inside a
+        // path would hide the path's start and let the rest through.
         let log = self.stderr_log.lock().unwrap();
         if log.is_empty() {
             return String::new();
         }
-        let tail = &log[log.len().saturating_sub(512)..];
-        format!("; stderr tail: {}", String::from_utf8_lossy(tail))
+        let mut start = log.len().saturating_sub(512);
+        if start > 0 && log[start - 1] != b'\n' {
+            // The first line of the window is the tail of a longer line: it
+            // may be the tail of a path, so it is dropped.
+            match log[start..].iter().position(|b| *b == b'\n') {
+                Some(newline) => start += newline + 1,
+                None => start = log.len(),
+            }
+        }
+        let tail = &log[start..];
+        // The server's stderr reaches the caller's output: it is sanitized
+        // like every other piece of server text. A tail keeps its END, so the
+        // cut is taken from the front.
+        let clean = sanitize_message(&String::from_utf8_lossy(tail));
+        let kept: String = if clean.chars().count() > MAX_NOTICE_CHARS {
+            let skip = clean.chars().count() - MAX_NOTICE_CHARS;
+            clean.chars().skip(skip).collect()
+        } else {
+            clean
+        };
+        format!("; stderr tail: {kept}")
     }
 
     fn note_notification(&mut self, method: &str, params: &Value) {
+        if method == "textDocument/publishDiagnostics" {
+            // The server's own verdict about the file: severity, code, where
+            // it is, and what it says. Bounded, and never an absolute path.
+            for line in self.format_diagnostics(params, MAX_DIAGNOSTICS) {
+                if self.diagnostic_lines.len() >= MAX_DIAGNOSTICS {
+                    break;
+                }
+                self.diagnostic_lines.push(line);
+            }
+            return;
+        }
         match method {
             "$/progress" | "window/logMessage" | "window/showMessage" | "telemetry/event" => {
-                self.diagnostics.push(format!("{method}: {params}"));
+                self.push_notice(format!("{method}: {params}"));
             }
             _ if method.starts_with("$/") => {
-                self.diagnostics
-                    .push(format!("unknown-notification: {method}"));
+                self.push_notice(format!("unknown-notification: {method}"));
             }
             _ => {
-                self.diagnostics.push(format!("notification: {method}"));
+                self.push_notice(format!("notification: {method}"));
             }
         }
+    }
+
+    /// A protocol notice: bounded in length and free of absolute paths,
+    /// because it travels in the caller's output.
+    fn push_notice(&mut self, text: String) {
+        // The raw text is cut first: the sanitizer works on the whole string,
+        // and an untrusted notice can be megabytes long.
+        let raw: String = text
+            .chars()
+            .take(MAX_NOTICE_CHARS.saturating_mul(4))
+            .collect();
+        let clean = sanitize_message(&raw);
+        let notice = if clean.chars().count() <= MAX_NOTICE_CHARS {
+            clean
+        } else {
+            let mut short: String = clean.chars().take(MAX_NOTICE_CHARS).collect();
+            short.push_str("...");
+            short
+        };
+        self.diagnostics.push(notice);
         if self.diagnostics.len() > 256 {
             self.diagnostics.remove(0);
         }
+    }
+
+    /// The diagnostics of one notification, as compact lines. A diagnostic
+    /// for a file OUTSIDE the repository is not reported at all: the
+    /// repository is the boundary of what Riltra may talk about.
+    fn format_diagnostics(&self, params: &Value, budget: usize) -> Vec<String> {
+        let Some(uri) = params.get("uri").and_then(Value::as_str) else {
+            return Vec::new();
+        };
+        let Some(rel) = self.relative_repo_path(uri) else {
+            return Vec::new();
+        };
+        let Some(items) = params.get("diagnostics").and_then(Value::as_array) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for item in items.iter().take(budget) {
+            let severity = severity_name(item.get("severity").and_then(Value::as_u64));
+            let code = diagnostic_code(item);
+            let message = diagnostic_message(item);
+            let line = item
+                .get("range")
+                .and_then(|r| r.get("start"))
+                .and_then(|s| s.get("line"))
+                .and_then(Value::as_u64)
+                .and_then(|l| l.checked_add(1));
+            let mut text = format!("diagnostic: {severity}");
+            if !code.is_empty() {
+                text.push('[');
+                text.push_str(&code);
+                text.push(']');
+            }
+            if !rel.is_empty() {
+                match line {
+                    Some(line) => text.push_str(&format!(" {rel}:{line}")),
+                    None => text.push_str(&format!(" {rel}")),
+                }
+            }
+            if !message.is_empty() {
+                text.push(' ');
+                text.push_str(&message);
+            }
+            out.push(text);
+        }
+        out
+    }
+
+    /// Read the notifications that arrive just after the answer. A server
+    /// may publish a warning a moment later, and the caller must not lose it.
+    /// Bounded twice over: a quiet period ends the drain, and a hard cap
+    /// ends it even if the server keeps talking.
+    ///
+    /// shortcut: a diagnostic published more than `DIAGNOSTIC_QUIET` after
+    /// the answer is not delivered. Raise the quiet period, or make the
+    /// server push its diagnostics before it answers, when a server is found
+    /// that reports late.
+    fn drain_notifications(&mut self) {
+        let start = std::time::Instant::now();
+        let mut last = std::time::Instant::now();
+        while start.elapsed() < DIAGNOSTIC_DRAIN_MAX {
+            match self.inbox.recv_timeout(Duration::from_millis(20)) {
+                Ok(Incoming::Response { id, .. }) => {
+                    self.push_notice(format!("stray response id {id}"));
+                    last = std::time::Instant::now();
+                }
+                Ok(Incoming::Notify { method, params }) => {
+                    // A server request still has to be answered, or a server
+                    // that waits for it would stall the shutdown.
+                    if let Some(_req) = method.strip_prefix("request:") {
+                        let rid = params.get("id").cloned().unwrap_or(Value::Null);
+                        let _ = self.send_value(&serde_json::json!({
+                            "jsonrpc": "2.0", "id": rid,
+                            "error": {"code": -32601, "message": "not implemented"}
+                        }));
+                    } else {
+                        self.note_notification(&method, &params);
+                    }
+                    last = std::time::Instant::now();
+                }
+                Ok(Incoming::Broken(e)) => {
+                    self.dead = Some(format!(
+                        "server broken: {}",
+                        bounded_server_text(&e, MAX_NOTICE_CHARS)
+                    ));
+                    return;
+                }
+                Err(_) => {
+                    if last.elapsed() >= DIAGNOSTIC_QUIET {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    /// The diagnostics of the server, the diagnostics first: they are the
+    /// part the caller acts on, the protocol notices come after them.
+    fn answer_diagnostics(&self) -> Vec<String> {
+        let mut out = self.diagnostic_lines.clone();
+        out.extend(self.diagnostics.iter().cloned());
+        out
+    }
+
+    /// The path of a URI relative to the repository root, or `None` when the
+    /// URI points outside it. Only relative paths ever leave this function.
+    fn relative_repo_path(&self, uri: &str) -> Option<String> {
+        let path = semantic::uri_path(uri).ok()?;
+        if !crate::paths::contains(&self.canonical_root, &path) {
+            return None;
+        }
+        let canonical = path.canonicalize().ok()?;
+        let rel = canonical.strip_prefix(&self.canonical_root).ok()?;
+        Some(rel.to_string_lossy().replace('\\', "/"))
     }
 
     fn initialize(&mut self, spec: &ServerSpec) -> Result<(), String> {
@@ -542,11 +739,10 @@ impl Session {
             self.position_encoding = enc.to_string();
         }
         if let Some(info) = result.get("serverInfo") {
-            self.server_version = info
-                .get("version")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
+            self.server_version = bounded_server_text(
+                info.get("version").and_then(Value::as_str).unwrap_or(""),
+                MAX_NOTICE_CHARS,
+            );
         }
         self.send_value(
             &serde_json::json!({"jsonrpc": "2.0", "method": "initialized", "params": {}}),
@@ -565,7 +761,7 @@ impl Session {
         }
         let text =
             std::fs::read_to_string(&disk).map_err(|e| format!("cannot read '{rel}': {e}"))?;
-        if self.opened.insert(validated.clone()) {
+        if !self.opened.contains_key(&validated) {
             // Real languageId: servers index "plaintext" as nothing (proven
             // by an empty rust-analyzer answer in Tier B).
             let language_id = match crate::syntax::classify(&disk) {
@@ -582,9 +778,58 @@ impl Session {
                     "version": 1, "text": text
                 }}
             }))?;
+            // The content the server now holds: the answer is about THIS
+            // text, and the check below compares it with the file on disk.
+            self.opened.insert(
+                validated.clone(),
+                crate::store::content_digest(text.as_bytes()),
+            );
             self.await_analysis(&validated)?;
         }
         Ok((disk, text))
+    }
+
+    /// Mark the facts whose source is provably not the source the answer is
+    /// about.
+    ///
+    /// A server may answer from an index that no longer matches the files on
+    /// disk. What a client can PROVE is narrow but real: a file it read
+    /// changed while the answer was produced. That is marked `Stale` — the
+    /// contract's own "out of date with the live source" state — and never
+    /// hidden. A server whose index is stale for a file that changed BEFORE
+    /// the session cannot be detected from here; such a fact stays
+    /// `Unverified`, which is exactly what it is.
+    fn mark_changed_sources(&mut self, facts: &mut [Evidence], rel: &str) {
+        // The file the question was asked about: the server answered against
+        // the text it was given when the document was opened.
+        if let Some(sent) = self.opened.get(rel).cloned() {
+            if self.disk_digest(rel).as_deref() != Some(sent.as_str()) {
+                for fact in facts.iter_mut() {
+                    fact.verification = semantic::Verification::Stale;
+                }
+                return;
+            }
+        }
+        // Each file the answer points at: the fact's digest was computed
+        // from the bytes its span was read in, so a changed file means the
+        // fact is out of date with the live source.
+        for fact in facts.iter_mut() {
+            let path = fact.location.path.clone();
+            if self.disk_digest(&path).as_deref() != Some(fact.location.digest.as_str()) {
+                fact.verification = semantic::Verification::Stale;
+            }
+        }
+    }
+
+    /// The digest of a repository-relative file as it is on disk now, or
+    /// `None` when it cannot be read.
+    fn disk_digest(&self, rel: &str) -> Option<String> {
+        let mut disk = self.root.clone();
+        for part in rel.split('/') {
+            disk.push(part);
+        }
+        let bytes = std::fs::read(&disk).ok()?;
+        Some(crate::store::content_digest(&bytes))
     }
 
     /// Warmup: when the server advertises push diagnostics, wait (bounded)
@@ -623,11 +868,14 @@ impl Session {
                     }
                 }
                 Ok(Incoming::Response { id, .. }) => {
-                    self.diagnostics
-                        .push(format!("stray response id {id} during warmup"));
+                    self.push_notice(format!("stray response id {id} during warmup"));
                 }
                 Ok(Incoming::Broken(e)) => {
-                    return Err(self.fail(format!("server broken: {e}{}", self.stderr_tail())));
+                    return Err(self.fail(format!(
+                        "server broken: {}{}",
+                        bounded_server_text(&e, MAX_NOTICE_CHARS),
+                        self.stderr_tail()
+                    )));
                 }
                 Err(_) => continue,
             }
@@ -688,16 +936,19 @@ impl Session {
                 line_starts.push(offset);
                 offset += line.len() + 1;
             }
+            // The path of a fact is always relative to the repository: an
+            // absolute path would leave the machine in the caller's output.
+            let relative = disk
+                .canonicalize()
+                .ok()
+                .and_then(|c| {
+                    c.strip_prefix(&self.canonical_root)
+                        .map(|p| p.to_string_lossy().replace('\\', "/"))
+                        .ok()
+                })
+                .ok_or_else(|| "location outside repository".to_string())?;
             let mut evidence = Evidence::lsp_location(
-                disk.canonicalize()
-                    .ok()
-                    .and_then(|c| {
-                        c.strip_prefix(&self.canonical_root)
-                            .map(|p| p.to_string_lossy().replace('\\', "/"))
-                            .ok()
-                    })
-                    .unwrap_or_else(|| disk.to_string_lossy().to_string())
-                    .as_str(),
+                relative.as_str(),
                 &digest,
                 semantic::SpanBytes {
                     start_line: sl as u32,
@@ -740,11 +991,13 @@ impl Session {
             self.diagnostics
                 .push(format!("definition converged after {tries} retries"));
         }
+        self.drain_notifications();
+        self.mark_changed_sources(&mut facts, rel);
         Ok(LspEvidence {
             facts,
             server_version: self.server_version.clone(),
             position_encoding: self.position_encoding.clone(),
-            diagnostics: self.diagnostics.clone(),
+            diagnostics: self.answer_diagnostics(),
         })
     }
 
@@ -769,11 +1022,13 @@ impl Session {
             }
             std::thread::sleep(Duration::from_secs(2));
         }
+        self.drain_notifications();
+        self.mark_changed_sources(&mut facts, rel);
         Ok(LspEvidence {
             facts,
             server_version: self.server_version.clone(),
             position_encoding: self.position_encoding.clone(),
-            diagnostics: self.diagnostics.clone(),
+            diagnostics: self.answer_diagnostics(),
         })
     }
 
@@ -799,9 +1054,11 @@ impl Session {
         // Drain stderr tail into diagnostics for post-mortem.
         let tail = self.stderr_tail();
         if !tail.is_empty() {
-            self.diagnostics.push(tail);
+            self.push_notice(tail);
         }
-        std::mem::take(&mut self.diagnostics)
+        // The diagnostics of the server travel with the notices: an error
+        // path that reported them must not lose them.
+        self.answer_diagnostics()
     }
 }
 
@@ -809,6 +1066,340 @@ impl Drop for Session {
     fn drop(&mut self) {
         self.kill_reap();
     }
+}
+
+/// The most diagnostics one answer may carry. A server can publish an
+/// unbounded number; the caller gets a bounded, readable summary.
+const MAX_DIAGNOSTICS: usize = 8;
+
+/// The most characters of one diagnostic message. The whole message is
+/// never needed to say "this file does not compile".
+const MAX_MESSAGE_CHARS: usize = 160;
+
+/// The most characters of one diagnostic code.
+const MAX_CODE_CHARS: usize = 64;
+
+/// The most characters of one protocol notice (`$/progress`,
+/// `window/logMessage`, ...). The notices travel in the same output as the
+/// diagnostics, so they are bounded and sanitized the same way.
+const MAX_NOTICE_CHARS: usize = 200;
+
+/// How long the adapter waits for a quiet inbox before it composes the
+/// answer: a server may publish a warning a moment after it answered.
+const DIAGNOSTIC_QUIET: Duration = Duration::from_millis(100);
+
+/// The hard cap on that wait, whatever the server does.
+const DIAGNOSTIC_DRAIN_MAX: Duration = Duration::from_millis(500);
+
+/// True when the token is a URL: a scheme, `://`, and a host. A URL is not a
+/// path, so it survives; a `file:` URL is a path in disguise and does not.
+fn is_url_token(token: &str) -> bool {
+    let lower = token.to_ascii_lowercase();
+    if lower.contains("file:") {
+        return false;
+    }
+    lower.contains("://") && !lower.starts_with('/')
+}
+
+/// True when a position may start an absolute path: the previous character
+/// ends a word. A letter, a digit, an underscore or a currency sign does
+/// not: a relative path (`geom/point.h`), a protocol name (`$/progress`) and
+/// a word that merely ends in a letter are never mistaken for a path.
+fn is_path_boundary(chars: &[char], i: usize) -> bool {
+    if i == 0 {
+        return true;
+    }
+    let previous = chars[i - 1];
+    !previous.is_alphanumeric() && !matches!(previous, '_' | '$' | '~' | '%')
+}
+
+/// True when the text carries an absolute path: a `file:` URI, a Windows
+/// drive path, a UNC path, a POSIX absolute path, or a compiler flag that
+/// names one. Relative paths (`geom/point.h`) and protocol names
+/// (`$/progress`) are not absolute paths.
+fn token_carries_absolute_path(token: &str) -> bool {
+    if token.is_empty() {
+        return false;
+    }
+    let chars: Vec<char> = token.chars().collect();
+    let lower: String = token.to_ascii_lowercase();
+    // A `file:` URI. The scheme needs its slashes, so that an ordinary word
+    // that ends in "file:" (a profile, a rule) is not mistaken for one.
+    if lower.contains("file://") {
+        return true;
+    }
+    // A Windows drive path: a single letter, a colon, a separator. The
+    // letter must not be part of a word, so `http://host` is not a drive
+    // path. The check runs before the URL exemption, so a URL that carries a
+    // drive path does not smuggle it through.
+    for i in 0..chars.len().saturating_sub(2) {
+        let single_letter = i == 0 || !chars[i - 1].is_alphanumeric();
+        if single_letter
+            && chars[i].is_ascii_alphabetic()
+            && chars[i + 1] == ':'
+            && (chars[i + 2] == '\\' || chars[i + 2] == '/')
+        {
+            return true;
+        }
+    }
+    if is_url_token(token) {
+        return false;
+    }
+    for i in 0..chars.len() {
+        if !is_path_boundary(&chars, i) {
+            continue;
+        }
+        // A relative path with a leading "./" or "../" is not absolute.
+        if chars[i] == '/' && i > 0 && chars[i - 1] == '.' && !token.starts_with('/') {
+            continue;
+        }
+        // A UNC path: two separators, a segment behind them, and a further
+        // separator of the same kind. A bare "//" (the integer division of
+        // ordinary prose) is not a path.
+        if chars[i] == '/' || chars[i] == '\\' {
+            let separator = chars[i];
+            if i + 2 < chars.len()
+                && chars[i + 1] == separator
+                && !chars[i + 2].is_whitespace()
+                && chars[i + 2..].contains(&separator)
+            {
+                return true;
+            }
+        }
+        // A POSIX absolute path: a separator with a segment behind it. A
+        // bare separator, a separator followed by a space (the "a / b" of
+        // ordinary prose), and the second separator of a "//" are not paths.
+        if chars[i] == '/'
+            && i + 1 < chars.len()
+            && chars[i + 1] != '/'
+            && !chars[i + 1].is_whitespace()
+            && !(i > 0 && (chars[i - 1] == '/' || chars[i - 1] == '\\'))
+        {
+            return true;
+        }
+        // A compiler flag that names a path: "-I/usr/include".
+        if chars[i] == '-' && token.contains('/') {
+            return true;
+        }
+    }
+    false
+}
+
+/// One token of a server message.
+struct Token {
+    text: String,
+    /// The token was quoted: its end is certain, so the redaction of a path
+    /// inside it is exact.
+    quoted: bool,
+    /// The token is a separator (a bracket, a quote, ...) rather than a word.
+    separator: bool,
+}
+
+/// Split a server message into tokens. A quoted section stays together with
+/// its quotes: a quoted path ends at its closing quote, so it can be redacted
+/// exactly. A word ends at whitespace or at a separator.
+fn tokenize_message(text: &str) -> Vec<Token> {
+    let mut out: Vec<Token> = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    let mut in_quote: Option<char> = None;
+    for ch in text.chars() {
+        if let Some(quote) = in_quote {
+            // An escaped quote does not close the section: a JSON value may
+            // contain one, and the path behind it must stay inside it. The
+            // backslashes are counted, so an odd run escapes the quote.
+            let run = current.chars().rev().take_while(|c| *c == '\\').count();
+            let escaped = ch == quote && run % 2 == 1;
+            current.push(ch);
+            if ch == quote && !escaped {
+                // The quoted section ends here: it is a token of its own, so
+                // the text around it cannot hide a path inside it.
+                in_quote = None;
+                out.push(Token {
+                    text: std::mem::take(&mut current),
+                    quoted,
+                    separator: false,
+                });
+                quoted = false;
+            }
+            continue;
+        }
+        if ch == '\'' || ch == '"' {
+            if !current.is_empty() {
+                out.push(Token {
+                    text: std::mem::take(&mut current),
+                    quoted: false,
+                    separator: false,
+                });
+            }
+            quoted = true;
+            in_quote = Some(ch);
+            current.push(ch);
+            continue;
+        }
+        if ch.is_whitespace() {
+            if !current.is_empty() {
+                out.push(Token {
+                    text: std::mem::take(&mut current),
+                    quoted,
+                    separator: false,
+                });
+                quoted = false;
+            }
+            out.push(Token {
+                text: ch.to_string(),
+                quoted: false,
+                separator: false,
+            });
+            continue;
+        }
+        if matches!(
+            ch,
+            '(' | ')' | '[' | ']' | '{' | '}' | '`' | '<' | '>' | '=' | ',' | ';'
+        ) {
+            if !current.is_empty() {
+                out.push(Token {
+                    text: std::mem::take(&mut current),
+                    quoted,
+                    separator: false,
+                });
+                quoted = false;
+            }
+            out.push(Token {
+                text: ch.to_string(),
+                quoted: false,
+                separator: true,
+            });
+            continue;
+        }
+        current.push(ch);
+    }
+    if !current.is_empty() {
+        out.push(Token {
+            text: current,
+            quoted,
+            separator: false,
+        });
+    }
+    out
+}
+
+/// The content of a token without its quotes. A quoted section that was
+/// never closed keeps its quote: the slicing is on characters, never on
+/// bytes, so a multi-byte character can never split it.
+fn token_content(token: &Token) -> &str {
+    let text = token.text.as_str();
+    if !token.quoted {
+        return text;
+    }
+    let Some(quote) = text.chars().next() else {
+        return text;
+    };
+    match text.strip_prefix(quote) {
+        Some(inner) => inner.strip_suffix(quote).unwrap_or(inner),
+        None => text,
+    }
+}
+
+/// Replace absolute paths in a server message with `<path>`. A diagnostic
+/// travels into the caller's output, so it must not carry a machine-local
+/// path.
+///
+/// A path with a space in it has no certain end. A **quoted** path ends at
+/// its closing quote, so it is redacted exactly. An **unquoted** one may
+/// continue into the words after it, so the redaction takes the ambiguous
+/// part with it: the words that follow are removed as well. Losing the tail
+/// of a message is cheaper than leaking half a path.
+///
+/// The separators (brackets, commas, ...) are kept, so the shape of the
+/// message survives the redaction.
+fn sanitize_message(text: &str) -> String {
+    let tokens = tokenize_message(text);
+    let mut out = String::with_capacity(text.len());
+    let mut swallow_words = false;
+    for token in &tokens {
+        if swallow_words && !token.separator {
+            continue;
+        }
+        if token.separator {
+            out.push_str(&token.text);
+            continue;
+        }
+        let content = token_content(token);
+        if token_carries_absolute_path(content) {
+            if token.quoted {
+                // The quoted path ends at its closing quote: the redaction is
+                // exact, and the quotes are kept so the shape of the message
+                // survives.
+                let quote = token.text.chars().next().unwrap_or('"');
+                out.push(quote);
+                out.push_str("<path>");
+                if token.text.chars().count() > 1 && token.text.ends_with(quote) {
+                    out.push(quote);
+                }
+            } else {
+                out.push_str("<path>");
+                // The path may continue into the words that follow.
+                swallow_words = true;
+            }
+            continue;
+        }
+        out.push_str(&token.text);
+    }
+    out
+}
+
+/// The debug line of one server response. Turning the debug flag on must not
+/// print the machine's layout, so the body is sanitized and bounded like
+/// every other piece of server text.
+fn debug_response(body: &str) -> String {
+    format!("LSP <- {}", bounded_server_text(body, MAX_NOTICE_CHARS))
+}
+
+/// Sanitize and bound a piece of server text that reaches the caller's
+/// output. The raw text is cut first: the sanitizer works on the whole
+/// string, and an untrusted message can be megabytes long.
+fn bounded_server_text(text: &str, max_chars: usize) -> String {
+    let raw: String = text.chars().take(max_chars.saturating_mul(4)).collect();
+    let clean = sanitize_message(&raw);
+    if clean.chars().count() <= max_chars {
+        return clean;
+    }
+    let mut short: String = clean.chars().take(max_chars).collect();
+    short.push_str("...");
+    short
+}
+
+/// The severity of a diagnostic, in the protocol's own numbering.
+fn severity_name(severity: Option<u64>) -> &'static str {
+    match severity {
+        Some(1) => "error",
+        Some(2) => "warning",
+        Some(3) => "note",
+        Some(4) => "hint",
+        _ => "info",
+    }
+}
+
+/// The diagnostic's code, which the protocol allows to be a string or a
+/// number. It travels in the caller's output like the message does, so it
+/// is sanitized and bounded the same way.
+fn diagnostic_code(item: &Value) -> String {
+    let raw = match item.get("code") {
+        Some(Value::String(code)) => code.clone(),
+        Some(Value::Number(code)) => code.to_string(),
+        _ => String::new(),
+    };
+    bounded_server_text(&raw, MAX_CODE_CHARS)
+}
+
+/// A diagnostic's message: sanitized, then bounded in length.
+fn diagnostic_message(item: &Value) -> String {
+    let raw = item
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    bounded_server_text(raw, MAX_MESSAGE_CHARS)
 }
 
 #[cfg(test)]
@@ -897,21 +1488,7 @@ mod tests {
     /// once per test process so the binary can never go stale. A missing
     /// binary fails loudly, never skips.
     fn mock_bin() -> std::path::PathBuf {
-        static BUILD: std::sync::Once = std::sync::Once::new();
-        BUILD.call_once(|| {
-            let status = std::process::Command::new("cargo")
-                .args(["build", "--offline", "--example", "mock_lsp"])
-                .status()
-                .expect("cargo build mock server");
-            assert!(status.success(), "mock server must build");
-        });
-        let mut p = std::env::current_exe().unwrap();
-        p.pop(); // test binary
-        p.pop(); // deps
-        p.push("examples");
-        p.push(format!("mock_lsp{}", std::env::consts::EXE_SUFFIX));
-        assert!(p.is_file(), "mock server missing: {}", p.display());
-        p
+        crate::testutil::mock_lsp_bin()
     }
 
     const MOCK_MAIN: &str = "fn main() {\n    let x = 1;\n    println!(\"{x}\");\n}\nfn helper() {}\nfn a() {}\nfn b() {}\nfn c() {}\nfn d() {}\n";
@@ -939,6 +1516,420 @@ mod tests {
         std::fs::write(dir.join("main.rs"), MOCK_MAIN).unwrap();
         let log = dir.join("mock.log");
         (dir, log)
+    }
+
+    /// The diagnostics the mock publishes: an ERROR (the shape a missing
+    /// compilation database produces), a WARNING on another line, a very long
+    /// message carrying an absolute path, a batch of extra diagnostics, and a
+    /// notification for a file OUTSIDE the repository.
+    fn mock_diagnostics_session(root: &std::path::Path) -> Session {
+        spawn(mock_spec("diagnostics", root, &root.join("mock.log"))).unwrap()
+    }
+
+    #[test]
+    fn a_path_with_a_space_leaves_nothing_sensitive() {
+        // A path with a space in it has no certain end: the redaction must
+        // remove the ambiguous part rather than leave half the path behind.
+        let quoted =
+            sanitize_message("cannot open 'C:\\Users\\Jane Doe\\private-project\\source.cc'");
+        for part in ["Jane", "Doe", "private-project", "source.cc"] {
+            assert!(!quoted.contains(part), "'{part}' survived: {quoted}");
+        }
+        assert!(quoted.contains("<path>"), "the path was replaced: {quoted}");
+
+        let bare =
+            sanitize_message("in C:\\Users\\Jane Doe\\private-project\\source.cc: no such file");
+        for part in ["Jane", "Doe", "private-project", "source.cc"] {
+            assert!(!bare.contains(part), "'{part}' survived: {bare}");
+        }
+
+        let posix = sanitize_message("in /opt/build/Jane Doe/source.cc: no such file");
+        for part in ["Jane", "Doe", "source.cc"] {
+            assert!(!posix.contains(part), "'{part}' survived: {posix}");
+        }
+
+        // The same path as a URI, quoted and unquoted.
+        let uri = sanitize_message("see 'file:///opt/build/Jane Doe/source.cc'");
+        for part in ["Jane", "Doe", "source.cc"] {
+            assert!(!uri.contains(part), "'{part}' survived: {uri}");
+        }
+    }
+
+    #[test]
+    fn a_path_inside_a_json_payload_is_redacted() {
+        // The normal shape of an LSP payload: the path sits in a JSON string
+        // value. The key must not hide the value from the redaction.
+        let line = debug_response(
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"workspace failed: /opt/build/Jane Doe/source.cc"}}"#,
+        );
+        assert!(!line.contains("Jane"), "no path in the debug line: {line}");
+        assert!(!line.contains("Doe"), "no path in the debug line: {line}");
+        assert!(
+            !line.contains("source.cc"),
+            "no path in the debug line: {line}"
+        );
+        assert!(line.contains("<path>"), "the path was replaced: {line}");
+
+        // The same path as a JSON value, with a space in it.
+        let value = sanitize_message(r#"{"path":"/opt/build/Jane Doe/source.cc"}"#);
+        for part in ["Jane", "Doe", "source.cc"] {
+            assert!(!value.contains(part), "'{part}' survived: {value}");
+        }
+    }
+
+    #[test]
+    fn the_lsp_debug_output_never_carries_a_path() {
+        // Turning the debug flag on must not print the machine's layout.
+        let body = r#"{"jsonrpc":"2.0","id":1,"result":{"uri":"file:///C:/Windows/System32/source.cc","range":{"start":{"line":3,"character":4}}}}"#;
+        let line = debug_response(body);
+        assert!(
+            !line.contains("System32"),
+            "no path in the debug line: {line}"
+        );
+        assert!(
+            !line.contains("source.cc"),
+            "no path in the debug line: {line}"
+        );
+        assert!(line.contains("<path>"), "the path was replaced: {line}");
+        assert!(
+            line.chars().count() <= MAX_NOTICE_CHARS + "LSP <- ".len() + 3,
+            "the debug line is bounded: {}",
+            line.chars().count()
+        );
+    }
+
+    #[test]
+    fn diagnostic_messages_never_carry_an_absolute_path() {
+        // The forms that must be redacted. The fixtures use absolute paths
+        // that are not home directories, so the repository's own privacy
+        // rules do not read them as real user paths.
+        assert_eq!(
+            sanitize_message("in C:\\Windows\\System32\\f.h"),
+            "in <path>"
+        );
+        assert_eq!(sanitize_message("in C:/Windows/System32/f.h"), "in <path>");
+        assert_eq!(sanitize_message("in /usr/include/f.h"), "in <path>");
+        assert_eq!(sanitize_message(r"in \\host\share\f.h"), "in <path>");
+        assert_eq!(
+            sanitize_message("see file:///usr/include/f.h"),
+            "see <path>"
+        );
+        assert_eq!(sanitize_message("flag -I/usr/include"), "flag <path>");
+        assert_eq!(
+            sanitize_message("argument unused during compilation: '-I/usr/include'"),
+            "argument unused during compilation: '<path>'"
+        );
+        assert_eq!(sanitize_message("path:C:\\Windows\\System32"), "<path>");
+        // The forms the second review found still leaking.
+        assert_eq!(
+            sanitize_message("see [main.rs](file:///usr/include/p/main.rs)"),
+            "see [main.rs](<path>)"
+        );
+        assert_eq!(sanitize_message("(/usr/include/f.h)"), "(<path>)");
+        assert_eq!(sanitize_message("X=/opt/build/f.h"), "X=<path>");
+        assert_eq!(sanitize_message("`/usr/include/f.h`"), "`<path>`");
+        // The forms that must survive untouched.
+        assert_eq!(
+            sanitize_message("'geom/point.h' file not found"),
+            "'geom/point.h' file not found"
+        );
+        assert_eq!(
+            sanitize_message("see http://example.com/x"),
+            "see http://example.com/x"
+        );
+        assert_eq!(sanitize_message("$/progress"), "$/progress");
+        assert_eq!(sanitize_message("a/b/c"), "a/b/c");
+        assert_eq!(sanitize_message("a / b"), "a / b");
+    }
+
+    #[test]
+    fn a_broken_server_stream_does_not_leak_its_output() {
+        // The server's stdout and stderr reach the caller: neither may carry
+        // a machine-local path.
+        let dir = crate::testutil::tmpdir("lsp-broken");
+        std::fs::write(dir.join("main.rs"), "fn main() {}\n").unwrap();
+        let err = spawn(mock_spec("pollution", &dir, &dir.join("m.log"))).unwrap_err();
+        assert!(err.contains("non-framing stdout"), "{err}");
+        assert!(!err.contains("private"), "no path in the reason: {err}");
+        assert!(err.contains("<path>"), "the path was replaced: {err}");
+    }
+
+    #[test]
+    fn a_server_request_after_the_answer_is_answered() {
+        // A server that asks the client something after it answered waits for
+        // the reply: the adapter has to send one.
+        let (dir, log) = mock_repo();
+        let mut session = spawn(mock_spec("client-request", &dir, &log)).unwrap();
+        let def = session.definition("main.rs", 1, 5).unwrap();
+        assert_eq!(def.facts.len(), 1, "the server answered: {def:?}");
+        let logged = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(
+            logged.contains("client-request-answered"),
+            "the client answered the server's request: {logged}"
+        );
+    }
+
+    #[test]
+    fn a_stray_response_is_recorded_as_a_bounded_notice() {
+        let (dir, log) = mock_repo();
+        let mut session = spawn(mock_spec("stray-response", &dir, &log)).unwrap();
+        let def = session.definition("main.rs", 1, 5).unwrap();
+        let joined = def.diagnostics.join("\n");
+        assert!(
+            joined.contains("stray response id"),
+            "the stray response is recorded: {joined}"
+        );
+        // The server controls the response id, and it may carry a path.
+        assert!(
+            !joined.contains("System32"),
+            "no path in the notice: {joined}"
+        );
+    }
+
+    #[test]
+    fn a_failed_query_keeps_the_diagnostics_of_the_server() {
+        // The server explains itself and then fails: the explanation must
+        // travel with the failure.
+        let (dir, log) = mock_repo();
+        let mut session = spawn(mock_spec("fail-after-diagnostics", &dir, &log)).unwrap();
+        let err = session.definition("main.rs", 1, 5).unwrap_err();
+        assert!(err.contains("the server refused"), "{err}");
+        let diagnostics = session.shutdown();
+        let joined = diagnostics.join("\n");
+        assert!(
+            joined.contains("pp_file_not_found"),
+            "the diagnostics survive the failure: {joined}"
+        );
+    }
+
+    #[test]
+    fn a_diagnostic_code_is_bounded_and_sanitized() {
+        let long = "C:\\Windows\\System32\\".to_string() + &"x".repeat(500);
+        let item = serde_json::json!({"code": long, "message": "m"});
+        let code = diagnostic_code(&item);
+        assert!(!code.contains("Users"), "the code is sanitized: {code}");
+        assert!(
+            code.chars().count() <= MAX_CODE_CHARS + 3,
+            "bounded: {code}"
+        );
+    }
+
+    #[test]
+    fn a_diagnostic_line_number_cannot_overflow() {
+        let item = serde_json::json!({
+            "range": {"start": {"line": u64::MAX, "character": 0}},
+            "message": "m"
+        });
+        // The formatter must not panic and must not report a wrapped line.
+        let session_dir = crate::testutil::tmpdir("lsp-line");
+        std::fs::write(session_dir.join("main.rs"), "fn main() {}\n").unwrap();
+        let session = spawn(mock_spec(
+            "success",
+            &session_dir,
+            &session_dir.join("m.log"),
+        ))
+        .unwrap();
+        let params = serde_json::json!({
+            "uri": file_uri(&session_dir.join("main.rs")),
+            "diagnostics": [item]
+        });
+        let lines = session.format_diagnostics(&params, MAX_DIAGNOSTICS);
+        assert!(lines[0].contains("diagnostic: info"), "{lines:?}");
+        assert!(!lines[0].contains("18446744073709551615"), "{lines:?}");
+    }
+
+    #[test]
+    fn mock_diagnostics_are_reported_with_severity_code_and_location() {
+        let (dir, _log) = mock_repo();
+        let mut session = mock_diagnostics_session(&dir);
+        let def = session.definition("main.rs", 1, 5).unwrap();
+        let joined = def.diagnostics.join("\n");
+        assert!(joined.contains("error"), "severity kept: {joined}");
+        assert!(joined.contains("pp_file_not_found"), "code kept: {joined}");
+        assert!(joined.contains("main.rs:4"), "location kept: {joined}");
+        assert!(
+            joined.contains("'geom/point.h' file not found"),
+            "message kept: {joined}"
+        );
+    }
+
+    #[test]
+    fn mock_diagnostics_never_fail_the_answer() {
+        let (dir, _log) = mock_repo();
+        let mut session = mock_diagnostics_session(&dir);
+        let def = session.definition("main.rs", 1, 5).unwrap();
+        assert!(!def.facts.is_empty(), "answer intact: {def:?}");
+        // A warning is delivered, and the answer is still a real answer.
+        assert!(
+            def.diagnostics.iter().any(|d| d.contains("warning")),
+            "warning delivered: {:?}",
+            def.diagnostics
+        );
+    }
+
+    #[test]
+    fn mock_diagnostics_outside_the_repository_are_dropped() {
+        let (dir, _log) = mock_repo();
+        let mut session = mock_diagnostics_session(&dir);
+        let def = session.definition("main.rs", 1, 5).unwrap();
+        let joined = def.diagnostics.join("\n");
+        // The diagnostics of the file INSIDE the repository are delivered, so
+        // the filter is selective and not a blanket drop.
+        assert!(
+            joined.contains("pp_file_not_found"),
+            "the inside diagnostics are delivered: {joined}"
+        );
+        assert!(
+            !joined.contains("outside-the-repository"),
+            "a file outside the repository is not reported: {joined}"
+        );
+        assert!(
+            !joined.contains("outside/main.rs"),
+            "no path outside the repository leaks: {joined}"
+        );
+    }
+
+    #[test]
+    fn mock_diagnostics_are_bounded_and_carry_no_absolute_path() {
+        let (dir, _log) = mock_repo();
+        let mut session = mock_diagnostics_session(&dir);
+        let def = session.definition("main.rs", 1, 5).unwrap();
+        let joined = def.diagnostics.join("\n");
+        let diagnostic_count = def
+            .diagnostics
+            .iter()
+            .filter(|d| d.starts_with("diagnostic: "))
+            .count();
+        assert_eq!(
+            diagnostic_count, MAX_DIAGNOSTICS,
+            "the number of diagnostics is capped: {:?}",
+            def.diagnostics
+        );
+        // The root is in the message in both spellings (the mock writes it
+        // with forward slashes, the filesystem reports backslashes).
+        let root_forward = dir.to_string_lossy().replace('\\', "/");
+        assert!(
+            !joined.contains(&root_forward),
+            "no absolute path is reported: {joined}"
+        );
+        assert!(
+            !joined.contains(&dir.to_string_lossy().to_string()),
+            "no absolute path is reported: {joined}"
+        );
+        assert!(
+            joined.contains("<path>"),
+            "the path was replaced, not dropped: {joined}"
+        );
+        assert!(
+            joined.chars().count() < 2000,
+            "the reported diagnostics stay small: {}",
+            joined.chars().count()
+        );
+    }
+
+    #[test]
+    fn mock_diagnostics_after_the_answer_are_still_delivered() {
+        let (dir, _log) = mock_repo();
+        let mut session =
+            spawn(mock_spec("late-diagnostics", &dir, &dir.join("mock.log"))).unwrap();
+        let def = session.definition("main.rs", 1, 5).unwrap();
+        assert_eq!(def.facts.len(), 1, "the server answered: {def:?}");
+        assert!(
+            def.diagnostics
+                .iter()
+                .any(|d| d.contains("pp_file_not_found")),
+            "a diagnostic published after the answer is still delivered: {:?}",
+            def.diagnostics
+        );
+    }
+
+    #[test]
+    fn mock_empty_answer_with_an_error_stays_empty() {
+        let (dir, _log) = mock_repo();
+        let mut session = spawn(mock_spec("empty", &dir, &dir.join("mock.log"))).unwrap();
+        let def = session.definition("main.rs", 1, 5).unwrap();
+        assert!(def.facts.is_empty(), "an empty answer stays empty: {def:?}");
+        assert!(
+            def.diagnostics
+                .iter()
+                .any(|d| d.contains("pp_file_not_found")),
+            "the diagnostic explains the empty answer: {:?}",
+            def.diagnostics
+        );
+    }
+
+    #[test]
+    fn a_target_file_that_changed_marks_only_its_fact_stale() {
+        // The second branch of the staleness check: the file the ANSWER points
+        // at changed after the fact was assembled. The window is a race in
+        // production, so the check is exercised directly here.
+        let (dir, _log) = mock_repo();
+        std::fs::write(dir.join("other.rs"), "fn other() {}\n").unwrap();
+        let mut session = spawn(mock_spec("success", &dir, &dir.join("mock.log"))).unwrap();
+        let span = crate::semantic::SpanBytes {
+            start_line: 1,
+            start_col: 4,
+            end_line: 1,
+            end_col: 7,
+            byte_start: 16,
+            byte_end: 19,
+        };
+        let mut facts = vec![
+            // The file that changed: its digest is not the one on disk.
+            crate::semantic::Evidence::lsp_location(
+                "main.rs",
+                "not-the-digest-on-disk",
+                span.clone(),
+            ),
+            // Another file, untouched: its digest is the one on disk, so the
+            // fact stays unverified.
+            crate::semantic::Evidence::lsp_location(
+                "other.rs",
+                &crate::store::content_digest(&std::fs::read(dir.join("other.rs")).unwrap()),
+                span,
+            ),
+        ];
+        session.mark_changed_sources(&mut facts, "main.rs");
+        assert_eq!(
+            facts[0].verification,
+            crate::semantic::Verification::Stale,
+            "a fact whose file changed is not presented as current"
+        );
+        assert_eq!(
+            facts[1].verification,
+            crate::semantic::Verification::Unverified,
+            "only the changed file's fact is marked"
+        );
+    }
+
+    #[test]
+    fn mock_stale_input_marks_the_facts_stale() {
+        let (dir, _log) = mock_repo();
+        let mut session = spawn(mock_spec("stale-input", &dir, &dir.join("mock.log"))).unwrap();
+        let def = session.definition("main.rs", 1, 5).unwrap();
+        assert_eq!(def.facts.len(), 1, "the server still answered: {def:?}");
+        assert_eq!(
+            def.facts[0].verification,
+            crate::semantic::Verification::Stale,
+            "a source that changed under the server is not presented as current"
+        );
+    }
+
+    #[test]
+    fn mock_unchanged_source_keeps_the_facts_unverified() {
+        let (dir, _log) = mock_repo();
+        let mut session = spawn(mock_spec("success", &dir, &dir.join("mock.log"))).unwrap();
+        let def = session.definition("main.rs", 1, 5).unwrap();
+        assert_eq!(def.facts.len(), 1, "the server answered: {def:?}");
+        assert_eq!(
+            def.facts[0].verification,
+            crate::semantic::Verification::Unverified
+        );
+        assert_eq!(
+            def.facts[0].precision,
+            crate::semantic::Precision::Heuristic,
+            "an LSP fact is never promoted to an exact fact"
+        );
     }
 
     #[test]
@@ -1010,6 +2001,142 @@ mod tests {
             diags.iter().any(|d| d.contains("stderr tail")),
             "stderr captured: {diags:?}"
         );
+        // The server's stderr is captured (the flood must not deadlock the
+        // adapter) and its tail is delivered.
+        assert!(
+            diags.iter().any(|d| d.contains("stderr tail")),
+            "stderr captured: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn a_path_behind_odd_punctuation_is_still_redacted() {
+        // The path may follow any punctuation, not only ASCII: a full-width
+        // bracket, a quotation mark, a replacement character.
+        for input in [
+            "Fehler（/opt/build/Jane Doe/source.cc）",
+            "“/opt/build/Jane Doe/source.cc”",
+            "|/opt/build/Jane Doe/source.cc",
+        ] {
+            let out = sanitize_message(input);
+            assert!(!out.contains("Jane"), "the path survived: {out}");
+            assert!(!out.contains("Doe"), "the path survived: {out}");
+            assert!(!out.contains("source.cc"), "the path survived: {out}");
+        }
+    }
+
+    #[test]
+    fn an_escaped_quote_does_not_end_the_section() {
+        // A JSON value may contain an escaped quote: the path behind it must
+        // stay inside the value.
+        let out = sanitize_message(
+            r#"{"message":"cannot open /opt/build/Jane/\"private dir\"/source.cc"}"#,
+        );
+        assert!(!out.contains("Jane"), "the path survived: {out}");
+        assert!(!out.contains("private dir"), "the path survived: {out}");
+        assert!(!out.contains("source.cc"), "the path survived: {out}");
+    }
+
+    #[test]
+    fn ordinary_prose_with_a_slash_survives() {
+        // A slash between two words is not a path.
+        assert_eq!(
+            sanitize_message(r#"{"message":"use a / b here"}"#),
+            r#"{"message":"use a / b here"}"#
+        );
+        assert_eq!(sanitize_message("set profile: x"), "set profile: x");
+        // A bare "//" is the integer division of ordinary prose, not a UNC
+        // path.
+        let division = sanitize_message("unsupported operand type(s) for //: 'int' and 'str'");
+        assert!(
+            division.contains("'int' and 'str'"),
+            "the text survived: {division}"
+        );
+        // A relative include path keeps its spelling.
+        assert_eq!(
+            sanitize_message("'../include/geom/point.h' file not found"),
+            "'../include/geom/point.h' file not found"
+        );
+    }
+
+    #[test]
+    fn a_unc_path_is_still_redacted() {
+        let unc = sanitize_message(r"in \\host\share\f.h");
+        assert!(unc.contains("<path>"), "the UNC path was replaced: {unc}");
+        assert!(!unc.contains("host"), "the UNC path was replaced: {unc}");
+    }
+
+    #[test]
+    fn an_odd_run_of_backslashes_escapes_the_quote() {
+        // Three backslashes: the quote is escaped, so the path behind it
+        // stays inside the value.
+        let out =
+            sanitize_message(r#"{"message":"cannot open /opt/build/Jane\\\" Doe/private.cc"}"#);
+        assert!(!out.contains("Doe"), "the path survived: {out}");
+        assert!(!out.contains("private.cc"), "the path survived: {out}");
+    }
+
+    #[test]
+    fn an_unterminated_quote_with_a_multibyte_character_does_not_panic() {
+        // The text is cut before it is sanitized, so a quoted section can end
+        // in the middle of a character.
+        assert!(sanitize_message("\"é").contains("é"));
+        // The path in an unterminated quoted section is redacted, and the
+        // multi-byte character at its end does not panic the sanitizer.
+        let out = sanitize_message("\"cannot open '/opt/build/sourcé");
+        assert!(!out.contains("sourcé"), "the path survived: {out}");
+    }
+
+    #[test]
+    fn a_retryable_server_answer_is_retried() {
+        // The server says "not indexed yet" once. The marker that says so
+        // must survive the sanitizing, or the answer would never be retried.
+        let (dir, log) = mock_repo();
+        let mut session = spawn(mock_spec("retryable", &dir, &log)).unwrap();
+        let def = session.definition("main.rs", 1, 5).unwrap();
+        assert_eq!(def.facts.len(), 1, "the answer was found: {def:?}");
+        assert!(
+            def.diagnostics
+                .iter()
+                .any(|d| d.contains("converged after")),
+            "the answer was retried: {:?}",
+            def.diagnostics
+        );
+    }
+
+    #[test]
+    fn the_stderr_tail_starts_at_a_line_boundary() {
+        // A window that starts inside a path would hide the path's start and
+        // let the rest of it through: the partial first line is dropped.
+        let (dir, log) = mock_repo();
+        let session = spawn(mock_spec("success", &dir, &log)).unwrap();
+        {
+            let mut stderr = session.stderr_log.lock().unwrap();
+            // The last line is longer than the window, so the window opens
+            // inside the path.
+            let long = format!("/opt/build/{}/Jane Doe/source.cc", "a".repeat(520));
+            stderr.extend_from_slice(format!("\nindexing {long}\n").as_bytes());
+        }
+        let tail = session.stderr_tail();
+        assert!(!tail.contains("Jane"), "no path in the tail: {tail}");
+        assert!(!tail.contains("Doe"), "no path in the tail: {tail}");
+        session.shutdown();
+    }
+
+    #[test]
+    fn the_stderr_tail_never_carries_a_path() {
+        // The server's stderr reaches the caller: a path in it must be
+        // replaced, and the tail keeps its END (the newest text).
+        let (dir, log) = mock_repo();
+        let session = spawn(mock_spec("success", &dir, &log)).unwrap();
+        {
+            let mut stderr = session.stderr_log.lock().unwrap();
+            stderr.extend_from_slice(b"indexing C:\\Windows\\System32\\private\n");
+        }
+        let tail = session.stderr_tail();
+        assert!(!tail.contains("System32"), "no path in the tail: {tail}");
+        assert!(tail.contains("<path>"), "the path was replaced: {tail}");
+        session.shutdown();
     }
 
     #[test]

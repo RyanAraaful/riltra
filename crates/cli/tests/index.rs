@@ -177,6 +177,668 @@ fn build_reopen_search_is_consistent() {
     assert!(snapshot_ids_consistent(&first));
 }
 
+/// A C++ header with a data member, a method declaration and a
+/// function-pointer member. The data member is on line 3, its identifier
+/// starts at column 10; the class spans the bytes 0..68.
+const CPP_FIELDS: &str =
+    "class Options {\n public:\n  double max_triangulation_angle = -1.0f;\n};\n";
+
+#[test]
+fn a_cpp_data_member_is_searchable_as_a_field() {
+    let h = home("field-search");
+    let repo = mkrepo(&h, "work");
+    std::fs::write(repo.join("options.h"), CPP_FIELDS).unwrap();
+    init_and_index(&h, &repo, "r");
+    let (code, out, err) = run(
+        &h,
+        &[
+            "search",
+            "--repo",
+            "r",
+            "--symbol",
+            "max_triangulation_angle",
+        ],
+    );
+    assert_eq!(code, 0, "search failed: {err}");
+    assert!(out.contains("\"kind\":\"field\""), "got: {out}");
+    assert!(
+        out.contains("\"name\":\"max_triangulation_angle\""),
+        "got: {out}"
+    );
+    assert!(out.contains("options.h"), "got: {out}");
+    // The symbol points at its NAME: line 3, column 10.
+    assert!(out.contains("\"start_line\":3"), "got: {out}");
+    assert!(out.contains("\"start_col\":10"), "got: {out}");
+}
+
+#[test]
+fn a_cpp_method_or_function_pointer_member_is_not_a_field() {
+    let h = home("field-exclude");
+    let repo = mkrepo(&h, "work");
+    std::fs::write(
+        repo.join("options.h"),
+        "class Options {\n public:\n  int process(int x);\n\n  int (*callback)();\n};\n",
+    )
+    .unwrap();
+    init_and_index(&h, &repo, "r");
+    for name in ["process", "callback"] {
+        let (code, out, err) = run(&h, &["search", "--repo", "r", "--symbol", name]);
+        assert_eq!(code, 0, "search failed: {err}");
+        assert!(
+            !out.contains("\"kind\":\"field\""),
+            "{name} must not be indexed as a data member: {out}"
+        );
+    }
+}
+
+fn edge_doc(h: &Path, command: &str, path: &str, line: &str, col: &str) -> serde_json::Value {
+    let (code, out, err) = run(
+        h,
+        &[
+            command, "--repo", "r", "--path", path, "--line", line, "--col", col,
+        ],
+    );
+    assert_eq!(code, 0, "{command} failed: {err}");
+    serde_json::from_str(&out).unwrap_or_else(|e| panic!("not JSON ({e}): {out}"))
+}
+
+#[test]
+fn a_position_on_a_data_member_name_anchors_the_member_not_its_class() {
+    // The anchor of a position on a data member's NAME is the member itself,
+    // so callers and impact answer about the member and never about the
+    // enclosing class (the class spans 0..68, the member name 34..57).
+    let h = home("field-anchor");
+    let repo = mkrepo(&h, "work");
+    std::fs::write(repo.join("options.h"), CPP_FIELDS).unwrap();
+    init_and_index(&h, &repo, "r");
+    for command in ["callers", "callees"] {
+        let doc = edge_doc(&h, command, "options.h", "3", "10");
+        assert_eq!(
+            doc["anchor"]["span"],
+            serde_json::json!([34, 57]),
+            "{command}: {doc}"
+        );
+        assert_eq!(doc["anchor"]["endpoint"]["byte_start"], 34, "{command}");
+    }
+    // The anchor says what it is and where the references are listed.
+    let doc = edge_doc(&h, "callers", "options.h", "3", "10");
+    let note = doc["anchor"]["anchor_uncertainty"].as_str().unwrap();
+    assert!(
+        note.contains("data member 'max_triangulation_angle'"),
+        "{note}"
+    );
+    assert!(note.contains("search --occurrences"), "{note}");
+}
+
+#[test]
+fn a_position_in_a_class_body_outside_any_member_name_still_anchors_the_class() {
+    let h = home("field-anchor-class");
+    let repo = mkrepo(&h, "work");
+    std::fs::write(repo.join("options.h"), CPP_FIELDS).unwrap();
+    init_and_index(&h, &repo, "r");
+    // ` public:` (line 2) and the type of the member (line 3, column 3) are
+    // inside the class but on no member name.
+    for (line, col) in [("2", "2"), ("3", "4")] {
+        let doc = edge_doc(&h, "callers", "options.h", line, col);
+        assert_eq!(
+            doc["anchor"]["span"],
+            serde_json::json!([0, 68]),
+            "{line}:{col}"
+        );
+        assert_eq!(
+            doc["anchor"]["anchor_uncertainty"],
+            "syntax-only anchor: no semantic identity at this position"
+        );
+    }
+}
+
+#[test]
+fn impact_at_a_data_member_is_unknown_and_anchored_at_the_member() {
+    let h = home("field-anchor-impact");
+    let repo = mkrepo(&h, "work");
+    std::fs::write(repo.join("options.h"), CPP_FIELDS).unwrap();
+    std::fs::write(repo.join("use.cc"), OCC_USE_CC).unwrap();
+    init_and_index(&h, &repo, "r");
+    let doc = edge_doc(&h, "impact", "options.h", "3", "10");
+    assert_eq!(doc["verdict"], "UNKNOWN");
+    assert_eq!(doc["anchor"]["span"], serde_json::json!([34, 57]));
+    assert_eq!(doc["completeness"]["status"], "partial");
+    assert_eq!(doc["paths"], serde_json::json!([]));
+    assert!(
+        !doc.to_string().contains("\"occurrences\""),
+        "the graph carries no occurrence data, only the pointer in the note: {doc}"
+    );
+    assert!(doc["anchor"]["anchor_uncertainty"]
+        .as_str()
+        .unwrap()
+        .contains("search --occurrences"));
+}
+
+#[test]
+fn callers_of_an_out_of_line_method_match_calls_by_the_method_name() {
+    // `Widget::run` is defined out of line, so its symbol name is the
+    // qualified text, while a call is recorded by its terminal name `run`.
+    let h = home("qualified-callers");
+    let repo = mkrepo(&h, "work");
+    std::fs::write(
+        repo.join("widget.cc"),
+        "struct Widget {\n  void run();\n  void again();\n};\nvoid Widget::run() {}\nvoid Widget::again() {\n  run();\n}\n",
+    )
+    .unwrap();
+    init_and_index(&h, &repo, "r");
+    let doc = edge_doc(&h, "callers", "widget.cc", "5", "8");
+    let edges = doc["edges"].as_array().unwrap();
+    assert_eq!(edges.len(), 1, "{doc}");
+    assert_eq!(edges[0]["kind"], "POTENTIAL_CALL");
+    assert_eq!(edges[0]["precision"], "Heuristic");
+    assert_eq!(edges[0]["callee_name"], "run");
+    assert_eq!(
+        edges[0]["callee"],
+        serde_json::Value::Null,
+        "never resolved"
+    );
+}
+
+#[test]
+fn callers_of_an_out_of_line_method_reach_the_files_that_include_its_declaring_header() {
+    // `Widget::run` is defined in widget.cc but declared in widget.h, which
+    // main.cc includes: the call in main.cc is a candidate. other.cc includes
+    // nothing, so its `run` call is out of scope.
+    let h = home("declaring-header");
+    let repo = mkrepo(&h, "work");
+    std::fs::write(
+        repo.join("widget.h"),
+        "struct Widget {\n  void run();\n};\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("widget.cc"),
+        "#include \"widget.h\"\nvoid Widget::run() {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("main.cc"),
+        "#include \"widget.h\"\nvoid go(Widget& w) {\n  w.run();\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("other.cc"),
+        "void stray(Other& o) {\n  o.run();\n}\n",
+    )
+    .unwrap();
+    init_and_index(&h, &repo, "r");
+    let doc = edge_doc(&h, "callers", "widget.cc", "2", "8");
+    let callers: Vec<&str> = doc["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["caller_path"].as_str().unwrap())
+        .collect();
+    assert_eq!(callers, vec!["main.cc"], "{doc}");
+    assert_eq!(doc["edges"][0]["kind"], "POTENTIAL_CALL");
+    assert_eq!(doc["edges"][0]["callee"], serde_json::Value::Null);
+}
+
+#[test]
+fn callers_of_a_data_member_never_list_a_same_named_call() {
+    // A member is not callable: a call named like the member (here the method
+    // `Box::value`) is no caller of the member `Holder::value`.
+    let h = home("field-anchor-nocall");
+    let repo = mkrepo(&h, "work");
+    std::fs::write(
+        repo.join("types.h"),
+        "struct Holder {\n  int value;\n};\nstruct Box {\n  int value() const;\n};\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("use.cc"),
+        "#include \"types.h\"\nint f(Box& b) {\n  return b.value();\n}\n",
+    )
+    .unwrap();
+    init_and_index(&h, &repo, "r");
+    let doc = edge_doc(&h, "callers", "types.h", "2", "7");
+    assert_eq!(doc["anchor"]["span"], serde_json::json!([22, 27]), "{doc}");
+    assert_eq!(doc["edges"], serde_json::json!([]), "{doc}");
+    assert_eq!(doc["completeness"]["total"], 0);
+}
+
+#[test]
+fn an_index_from_the_previous_parser_version_is_rebuilt() {
+    let h = home("field-parser");
+    let repo = mkrepo(&h, "work");
+    std::fs::write(repo.join("options.h"), CPP_FIELDS).unwrap();
+    init_and_index(&h, &repo, "r");
+    // An index written by the previous parser version: the old parser
+    // version, and no field facts in it.
+    let db = h.join("index").join("r.db");
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute("UPDATE snapshots SET parser_version = 1", [])
+            .unwrap();
+        conn.execute("DELETE FROM symbols WHERE kind = 'field'", [])
+            .unwrap();
+    }
+    let (code, out, err) = run(
+        &h,
+        &[
+            "search",
+            "--repo",
+            "r",
+            "--symbol",
+            "max_triangulation_angle",
+        ],
+    );
+    assert_eq!(code, 0, "search failed: {err}");
+    assert!(
+        !out.contains("\"kind\":\"field\""),
+        "the old index must not have field facts: {out}"
+    );
+    let (code, out, err) = run(&h, &["index", "status", "--repo", "r"]);
+    assert_eq!(code, 0, "index status failed: {err}");
+    assert!(out.contains("\"freshness\":\"stale\""), "got: {out}");
+    assert!(out.contains("parser-changed"), "got: {out}");
+    let (code, out, err) = run(&h, &["index", "--repo", "r"]);
+    assert_eq!(code, 0, "index failed: {err}");
+    assert!(out.contains("\"mode\":\"fallback-full\""), "got: {out}");
+    assert!(out.contains("parser-changed"), "got: {out}");
+    let (code, out, err) = run(
+        &h,
+        &[
+            "search",
+            "--repo",
+            "r",
+            "--symbol",
+            "max_triangulation_angle",
+        ],
+    );
+    assert_eq!(code, 0, "search failed: {err}");
+    assert!(out.contains("\"kind\":\"field\""), "got: {out}");
+}
+
+/// `.inl` is C++ source (a template body that headers include): it is indexed
+/// like a `.h`, and a fragment that is not a complete unit keeps its errors.
+#[test]
+fn inl_files_are_indexed_as_cpp_and_fragments_keep_their_errors() {
+    let h = home("inl-index");
+    let repo = mkrepo(&h, "work");
+    std::fs::write(
+        repo.join("widget.inl"),
+        "inline int Widget::size() const { return count_; }\nvoid Widget::run() {\n  helper();\n}\n",
+    )
+    .unwrap();
+    std::fs::write(repo.join("tail.inl"), "  count_ = 0;\n}\n").unwrap();
+    init_and_index(&h, &repo, "r");
+    let (code, out, err) = run(&h, &["scan", "--repo", "r"]);
+    assert_eq!(code, 0, "scan failed: {err}");
+    let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let entry = |path: &str| {
+        doc["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["path"] == path)
+            .unwrap_or_else(|| panic!("{path} missing from scan: {out}"))
+            .clone()
+    };
+    let widget = entry("widget.inl");
+    assert_eq!(widget["language"], "cpp", "got: {widget}");
+    assert_eq!(widget["errors"], 0, "got: {widget}");
+    let tail = entry("tail.inl");
+    assert_eq!(tail["language"], "cpp", "got: {tail}");
+    assert!(tail["errors"].as_u64().unwrap() > 0, "got: {tail}");
+    let (code, out, err) = run(&h, &["search", "--repo", "r", "--symbol", "run"]);
+    assert_eq!(code, 0, "search failed: {err}");
+    assert!(out.contains("\"name\":\"Widget::run\""), "got: {out}");
+    assert!(out.contains("\"path\":\"widget.inl\""), "got: {out}");
+}
+
+#[test]
+fn inl_edits_make_the_index_stale_until_it_is_rebuilt() {
+    let h = home("inl-stale");
+    let repo = mkrepo(&h, "work");
+    std::fs::write(
+        repo.join("widget.inl"),
+        "int Widget::size() { return 1; }\n",
+    )
+    .unwrap();
+    init_and_index(&h, &repo, "r");
+    std::fs::write(
+        repo.join("widget.inl"),
+        "int Widget::count() { return 2; }\n",
+    )
+    .unwrap();
+    let (code, out, err) = run(&h, &["index", "status", "--repo", "r"]);
+    assert_eq!(code, 0, "index status failed: {err}");
+    assert!(out.contains("\"freshness\":\"stale\""), "got: {out}");
+    assert!(out.contains("content-changed"), "got: {out}");
+    init_and_index(&h, &repo, "r");
+    let (_, out, _) = run(&h, &["index", "status", "--repo", "r"]);
+    assert!(out.contains("\"freshness\":\"fresh\""), "got: {out}");
+    let (_, out, _) = run(&h, &["search", "--repo", "r", "--symbol", "count"]);
+    assert!(out.contains("\"name\":\"Widget::count\""), "got: {out}");
+    let (_, out, _) = run(&h, &["search", "--repo", "r", "--symbol", "size"]);
+    assert!(out.contains("\"total\":0"), "got: {out}");
+}
+
+#[test]
+fn inl_support_rebuilds_an_index_from_parser_version_five() {
+    let h = home("inl-parser");
+    let repo = mkrepo(&h, "work");
+    std::fs::write(
+        repo.join("widget.inl"),
+        "int Widget::size() { return 1; }\n",
+    )
+    .unwrap();
+    init_and_index(&h, &repo, "r");
+    // Parser version 5 did not index `.inl` files, so its index has no facts
+    // for them.
+    let db = h.join("index").join("r.db");
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute("UPDATE snapshots SET parser_version = 5", [])
+            .unwrap();
+        conn.execute("DELETE FROM symbols", []).unwrap();
+    }
+    let (code, out, err) = run(&h, &["index", "status", "--repo", "r"]);
+    assert_eq!(code, 0, "index status failed: {err}");
+    assert!(out.contains("\"freshness\":\"stale\""), "got: {out}");
+    assert!(out.contains("parser-changed"), "got: {out}");
+    let (code, out, err) = run(&h, &["index", "--repo", "r"]);
+    assert_eq!(code, 0, "index failed: {err}");
+    assert!(out.contains("\"mode\":\"fallback-full\""), "got: {out}");
+    let (_, out, _) = run(&h, &["search", "--repo", "r", "--symbol", "size"]);
+    assert!(out.contains("\"name\":\"Widget::size\""), "got: {out}");
+}
+
+#[test]
+fn an_index_from_the_previous_parser_version_has_no_occurrences_until_it_is_rebuilt() {
+    let h = home("occ-parser");
+    let repo = mkrepo(&h, "work");
+    std::fs::write(repo.join("options.h"), CPP_FIELDS).unwrap();
+    std::fs::write(
+        repo.join("use.cc"),
+        "#include \"options.h\"\ndouble read(Options& o) {\n  return o.max_triangulation_angle;\n}\n",
+    )
+    .unwrap();
+    init_and_index(&h, &repo, "r");
+    let db = h.join("index").join("r.db");
+    let occurrences = || -> i64 {
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM reference_occurrences", [], |r| {
+                r.get(0)
+            })
+            .unwrap()
+    };
+    assert_eq!(occurrences(), 1, "the member access is stored by the index");
+    // An index written by the previous parser version has no occurrence rows.
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute(
+            "UPDATE snapshots SET parser_version = parser_version - 1",
+            [],
+        )
+        .unwrap();
+        conn.execute("DELETE FROM reference_occurrences", [])
+            .unwrap();
+    }
+    assert_eq!(occurrences(), 0);
+    let (code, out, err) = run(&h, &["index", "status", "--repo", "r"]);
+    assert_eq!(code, 0, "index status failed: {err}");
+    assert!(out.contains("\"freshness\":\"stale\""), "got: {out}");
+    assert!(out.contains("parser-changed"), "got: {out}");
+    let (code, out, err) = run(&h, &["index", "--repo", "r"]);
+    assert_eq!(code, 0, "index failed: {err}");
+    assert!(out.contains("\"mode\":\"fallback-full\""), "got: {out}");
+    assert!(out.contains("parser-changed"), "got: {out}");
+    assert_eq!(occurrences(), 1, "the rebuild stores the occurrence again");
+}
+
+/// Uses of the `CPP_FIELDS` member: a member access in a same-file macro
+/// argument (line 4), the address of the member (line 5), a plain member read
+/// (line 6) and a parameter of the same name passed to the macro (line 9).
+const OCC_USE_CC: &str = "#include \"options.h\"\n#define PRINT(x) (x)\ndouble read(Options& o) {\n  PRINT(o.max_triangulation_angle);\n  double* p = &o.max_triangulation_angle;\n  return o.max_triangulation_angle;\n}\nvoid show(double max_triangulation_angle) {\n  PRINT(max_triangulation_angle);\n}\n";
+
+fn occurrence_repo(tag: &str) -> (PathBuf, PathBuf) {
+    let h = home(tag);
+    let repo = mkrepo(&h, "work");
+    std::fs::write(repo.join("options.h"), CPP_FIELDS).unwrap();
+    std::fs::write(repo.join("use.cc"), OCC_USE_CC).unwrap();
+    init_and_index(&h, &repo, "r");
+    (h, repo)
+}
+
+fn occurrence_search(h: &Path, name: &str, extra: &[&str]) -> (String, serde_json::Value) {
+    let mut args = vec!["search", "--repo", "r", "--symbol", name, "--occurrences"];
+    args.extend_from_slice(extra);
+    let (code, out, err) = run(h, &args);
+    assert_eq!(code, 0, "search failed: {err}");
+    let doc = serde_json::from_str(&out).unwrap_or_else(|e| panic!("not JSON ({e}): {out}"));
+    (out, doc)
+}
+
+#[test]
+fn search_occurrences_lists_each_use_with_its_role_and_the_ambiguity_counts() {
+    let (h, repo) = occurrence_repo("occ-list");
+    let (out, doc) = occurrence_search(&h, "max_triangulation_angle", &[]);
+    // The section follows `truncated`, with a fixed key order.
+    assert!(
+        out.contains("\"truncated\":false,\"occurrences\":{\"scope\":\"repository-wide-exact-name\",\"binding\":\"unbound\",\"field_declarations\":1,\"symbol_declarations\":1,\"total\":4,\"truncated\":false,\"items\":[{\"path\":\"use.cc\",\"role\":\"member-access\",\"confidence\":\"observed\",\"span\":{\"start_line\":4,\"start_col\":11,"),
+        "got: {out}"
+    );
+    let occ = &doc["occurrences"];
+    let items: Vec<(String, String, String, u64, u64)> = occ["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| {
+            (
+                i["path"].as_str().unwrap().to_string(),
+                i["role"].as_str().unwrap().to_string(),
+                i["confidence"].as_str().unwrap().to_string(),
+                i["span"]["start_line"].as_u64().unwrap(),
+                i["span"]["start_col"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    let row = |role: &str, confidence: &str, line: u64, col: u64| {
+        (
+            "use.cc".to_string(),
+            role.to_string(),
+            confidence.to_string(),
+            line,
+            col,
+        )
+    };
+    assert_eq!(
+        items,
+        vec![
+            row("member-access", "observed", 4, 11),
+            row("address-of-binding", "observed", 5, 18),
+            row("member-access", "observed", 6, 12),
+            row("macro-argument", "candidate", 9, 9),
+        ]
+    );
+    // The recorded bytes address exactly the identifier.
+    let source = std::fs::read(repo.join("use.cc")).unwrap();
+    for item in occ["items"].as_array().unwrap() {
+        let start = item["bytes"][0].as_u64().unwrap() as usize;
+        let end = item["bytes"][1].as_u64().unwrap() as usize;
+        assert_eq!(&source[start..end], b"max_triangulation_angle");
+    }
+    assert_eq!(
+        occ["items"][0]["provenance"],
+        serde_json::json!({"provider": "syntax", "grammar": "cpp:0.23.4", "language": "cpp"})
+    );
+    // The declaration is a search hit and never an occurrence.
+    let results = doc["results"].as_array().unwrap();
+    assert!(results
+        .iter()
+        .any(|r| r["kind"] == "field" && r["path"] == "options.h"));
+    assert_eq!(doc["freshness"], "fresh");
+}
+
+#[test]
+fn search_without_the_occurrences_flag_has_no_occurrences_member() {
+    let (h, _repo) = occurrence_repo("occ-absent-flag");
+    let (code, out, err) = run(
+        &h,
+        &[
+            "search",
+            "--repo",
+            "r",
+            "--symbol",
+            "max_triangulation_angle",
+        ],
+    );
+    assert_eq!(code, 0, "search failed: {err}");
+    assert!(!out.contains("occurrences"), "got: {out}");
+}
+
+#[test]
+fn an_absent_name_has_an_explicit_empty_occurrence_list() {
+    let (h, _repo) = occurrence_repo("occ-empty");
+    let (_, doc) = occurrence_search(&h, "no_such_member", &[]);
+    let occ = &doc["occurrences"];
+    assert_eq!(occ["total"], 0);
+    assert_eq!(occ["truncated"], false);
+    assert_eq!(occ["items"], serde_json::json!([]));
+    assert_eq!(occ["field_declarations"], 0);
+    assert_eq!(occ["scope"], "repository-wide-exact-name");
+    assert_eq!(occ["binding"], "unbound");
+    assert_eq!(
+        doc["freshness"], "fresh",
+        "the verdict travels with the list"
+    );
+}
+
+#[test]
+fn the_occurrence_lookup_is_exact_while_the_symbol_list_keeps_prefix_matching() {
+    let h = home("occ-exact");
+    let repo = mkrepo(&h, "work");
+    std::fs::write(
+        repo.join("options.h"),
+        "class Options {\n public:\n  double angle = 1.0;\n  double angle_rad = 2.0;\n};\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("use.cc"),
+        "#include \"options.h\"\ndouble read(Options& o) {\n  return o.angle + o.angle_rad;\n}\n",
+    )
+    .unwrap();
+    init_and_index(&h, &repo, "r");
+    let (_, doc) = occurrence_search(&h, "angle", &[]);
+    assert_eq!(doc["total"], 2, "the symbol list matches both field names");
+    let occ = &doc["occurrences"];
+    assert_eq!(occ["symbol_declarations"], 1, "exact name only");
+    assert_eq!(occ["total"], 1, "only the exact name's use: {occ}");
+}
+
+#[test]
+fn occurrence_paging_applies_to_each_list_with_its_own_totals() {
+    let (h, _repo) = occurrence_repo("occ-page");
+    // Symbol list: one hit, so offset 1 is past it; occurrence list: 4 rows.
+    let (_, doc) = occurrence_search(
+        &h,
+        "max_triangulation_angle",
+        &["--limit", "1", "--offset", "1"],
+    );
+    assert_eq!(doc["total"], 1);
+    assert_eq!(doc["results"], serde_json::json!([]));
+    assert_eq!(doc["truncated"], false);
+    let occ = &doc["occurrences"];
+    assert_eq!(occ["total"], 4);
+    assert_eq!(occ["items"].as_array().unwrap().len(), 1);
+    assert_eq!(occ["items"][0]["span"]["start_line"], 5, "second row");
+    assert_eq!(occ["truncated"], true);
+    let (_, last) = occurrence_search(
+        &h,
+        "max_triangulation_angle",
+        &["--limit", "2", "--offset", "3"],
+    );
+    assert_eq!(last["occurrences"]["items"].as_array().unwrap().len(), 1);
+    assert_eq!(last["occurrences"]["truncated"], false);
+}
+
+#[test]
+fn search_occurrences_is_deterministic() {
+    let (h, _repo) = occurrence_repo("occ-determinism");
+    let (first, _) = occurrence_search(&h, "max_triangulation_angle", &[]);
+    let (second, _) = occurrence_search(&h, "max_triangulation_angle", &[]);
+    assert_eq!(first, second);
+}
+
+#[test]
+fn search_occurrences_without_an_index_adds_no_member() {
+    let h = home("occ-no-index");
+    let repo = mkrepo(&h, "work");
+    std::fs::write(repo.join("options.h"), CPP_FIELDS).unwrap();
+    let (code, _, err) = run(
+        &h,
+        &["init", "--repo", repo.to_str().unwrap(), "--name", "r"],
+    );
+    assert_eq!(code, 0, "init failed: {err}");
+    let (code, out, err) = run(
+        &h,
+        &[
+            "search",
+            "--repo",
+            "r",
+            "--symbol",
+            "max_triangulation_angle",
+            "--occurrences",
+        ],
+    );
+    assert_eq!(code, 0, "search failed: {err}");
+    assert!(out.contains("\"freshness\":\"unknown\""), "got: {out}");
+    assert!(out.contains("no-index"), "got: {out}");
+    assert!(
+        !out.contains("occurrences"),
+        "the flag cannot manufacture facts: {out}"
+    );
+}
+
+#[test]
+fn an_old_index_answers_stale_with_no_occurrences_until_it_is_rebuilt() {
+    let (h, _repo) = occurrence_repo("occ-stale");
+    let db = h.join("index").join("r.db");
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute(
+            "UPDATE snapshots SET parser_version = parser_version - 1",
+            [],
+        )
+        .unwrap();
+        conn.execute("DELETE FROM reference_occurrences", [])
+            .unwrap();
+    }
+    let (_, stale) = occurrence_search(&h, "max_triangulation_angle", &[]);
+    assert_eq!(stale["freshness"], "stale");
+    assert!(stale["reasons"].to_string().contains("parser-changed"));
+    assert_eq!(
+        stale["occurrences"]["total"], 0,
+        "the stale reason travels with it"
+    );
+    let (code, _, err) = run(&h, &["index", "--repo", "r"]);
+    assert_eq!(code, 0, "index failed: {err}");
+    let (_, fresh) = occurrence_search(&h, "max_triangulation_angle", &[]);
+    assert_eq!(fresh["freshness"], "fresh");
+    assert_eq!(fresh["occurrences"]["total"], 4);
+}
+
+#[test]
+fn the_usage_line_documents_the_occurrences_flag() {
+    let h = home("occ-usage");
+    let (code, out, _) = run(&h, &["--help"]);
+    assert_eq!(code, 0);
+    assert!(
+        out.contains(
+            "search --repo <name> --symbol <substr> [--limit <n>] [--offset <n>] [--occurrences]"
+        ),
+        "got: {out}"
+    );
+}
+
 #[test]
 fn dirty_without_head_change_is_stale_but_served() {
     let h = home("dirty");

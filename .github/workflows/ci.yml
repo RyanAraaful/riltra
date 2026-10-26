@@ -9,9 +9,31 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # macos-latest (macOS 26 Arm64) had a prolonged no-runner outage; restore it when capacity recovers.
-        os: [windows-latest, ubuntu-latest, macos-15]
-    runs-on: ${{ matrix.os }}
+        # The `name` of each entry is the JOB NAME, and the job names are the
+        # required status-check contexts of the `protect-master` ruleset
+        # ("check (windows-latest)", "check (ubuntu-latest)", "check
+        # (macos-15)"). They must not change: a renamed context is never
+        # reported, so every pull request to master would stay blocked.
+        #
+        # What changed is the RUNNER. `macos-15` is the macOS 15 ARM64
+        # image, and so was `macos-latest` before it, so the earlier pin
+        # (4c47625) moved from one ARM64 label to another and kept the same
+        # capacity constraint. A job that cannot be given a runner is
+        # cancelled after GitHub's acquisition retries ("The job was not
+        # acquired by Runner of type hosted even after multiple attempts"),
+        # which leaves the required context missing. `macos-15-intel` is the
+        # same macOS 15 release on the separate x64 pool.
+        #
+        # macOS ARM64 is therefore no longer covered by this matrix. Restore
+        # it as a SEPARATE, NON-REQUIRED workflow once the ARM64 pool
+        # recovers; a `continue-on-error` matrix entry would report a
+        # cancelled job as a pass, which is not acceptable evidence.
+        include:
+          - { name: windows-latest, runner: windows-latest }
+          - { name: ubuntu-latest, runner: ubuntu-latest }
+          - { name: macos-15, runner: macos-15-intel }
+    name: check (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

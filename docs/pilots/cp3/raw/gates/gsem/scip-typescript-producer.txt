@@ -1,0 +1,2 @@
++ <CP3_HOME>-sem\fixture-ts (30ms)
+done <CP3_HOME>-sem\fixture-ts\index.scip

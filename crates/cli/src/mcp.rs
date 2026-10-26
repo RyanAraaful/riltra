@@ -2,13 +2,15 @@
 //! M8 CP1/CP3/CP4/CP5/CP6: MCP stdio server. CP1 serves initialize; CP3
 //! registers the first read-only tools; CP4 adds the graph tools (callers,
 //! callees, trace, impact); CP5 adds the knowledge tools (search, show,
-//! related); CP6 adds the composed `riltra_health` tool — eleven tools total
+//! related); CP6 adds the composed `riltra_health` tool — twelve tools total
 //! (design gate §3) through the rmcp tool macros. Tool calls
 //! reuse the CLI's response formatters byte-for-byte, and the index read path
 //! (`store::open_read`) and the knowledge read path
 //! (`knowledge_store::open_knowledge(…, false)`) never create, migrate, or
 //! replace a database. stdout stays protocol-only; blocking work runs on the
-//! tokio blocking pool.
+//! tokio blocking pool. `riltra_code_semantic` is the one tool that starts a
+//! subprocess (the operator's language server, `RILTRA_LSP_SERVER`); it
+//! reads the repository and never touches the index or the knowledge store.
 
 use std::path::{Path, PathBuf};
 
@@ -43,6 +45,10 @@ struct CodeSearchInput {
     limit: Option<usize>,
     /// Hits to skip before returning results (default 0).
     offset: Option<usize>,
+    /// Also list where the exact name occurs in C++ code (member accesses,
+    /// the address of a member, same-file macro arguments): a name census,
+    /// not a binding. Off by default; the document is unchanged without it.
+    occurrences: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -179,6 +185,33 @@ struct KnowledgeRelatedInput {
 #[serde(deny_unknown_fields)]
 #[schemars(crate = "rmcp::schemars")]
 struct HealthInput {}
+
+/// Which semantic question the client asked.
+#[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+#[schemars(crate = "rmcp::schemars")]
+enum Operation {
+    Definition,
+    References,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(crate = "rmcp::schemars")]
+struct SemanticInput {
+    /// Registered repository name.
+    repo: String,
+    /// Repository-relative path of the anchor position.
+    path: String,
+    /// 1-based line of the anchor position.
+    line: u32,
+    /// 1-based column of the anchor position, in the position unit the
+    /// language server negotiated (utf-16 by default). This is NOT the byte
+    /// column the graph tools use.
+    col: u32,
+    /// "definition" or "references".
+    operation: Operation,
+}
 
 struct RiltraMcp;
 
@@ -350,6 +383,24 @@ impl RiltraMcp {
         Parameters(input): Parameters<KnowledgeRelatedInput>,
     ) -> CallToolResult {
         blocking(move || knowledge_related_doc(&input)).await
+    }
+
+    #[tool(
+        name = "riltra_code_semantic",
+        description = "Definition or references of the symbol at a position, answered by a language server (the same document as CLI `semantic query --lsp-server`). References are locations, not call edges: they are never edges, and they are never a completeness claim — the provider's project index and compilation database may be incomplete. An empty answer means the provider found nothing at this position; it is not a claim that the symbol does not exist. A path that does not exist is reported as a path-containment refusal (`document path escapes repository`), never as an empty answer. The answer carries the provider's verification state and its diagnostics. The language server is a local process that the operator configured; it reads the project and may write its own index cache, and what it runs is provider-dependent — some servers run the project's build tools — so this tool is not read-only.",
+        annotations(
+            title = "Semantic definition or references",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
+    )]
+    async fn riltra_code_semantic(
+        &self,
+        Parameters(input): Parameters<SemanticInput>,
+    ) -> CallToolResult {
+        blocking(move || semantic_doc(&input)).await
     }
 
     #[tool(
@@ -555,6 +606,7 @@ fn code_search_doc(input: &CodeSearchInput) -> CallToolResult {
             offset,
             0,
             &[],
+            None,
         ),
         store::IndexRead::Outdated(version) => {
             tool_error("schema_outdated", &outdated_message(&input.repo, version))
@@ -598,6 +650,7 @@ fn code_search_doc(input: &CodeSearchInput) -> CallToolResult {
                         offset,
                         0,
                         &[],
+                        None,
                     );
                 }
             };
@@ -608,6 +661,14 @@ fn code_search_doc(input: &CodeSearchInput) -> CallToolResult {
                     Ok(found) => found,
                     Err(e) => return tool_error("store_error", &e),
                 };
+            let census = if input.occurrences == Some(true) {
+                match store::occurrences_for(&tx, snapshot.id, &input.query, limit, offset) {
+                    Ok(list) => Some(list),
+                    Err(e) => return tool_error("store_error", &e),
+                }
+            } else {
+                None
+            };
             let _ = tx.commit();
             search_doc(
                 &input.repo,
@@ -620,6 +681,7 @@ fn code_search_doc(input: &CodeSearchInput) -> CallToolResult {
                 offset,
                 total,
                 &hits,
+                census.as_ref(),
             )
         }
     }
@@ -638,6 +700,7 @@ fn search_doc(
     offset: usize,
     total: usize,
     hits: &[store::Hit],
+    occurrences: Option<&store::OccurrenceList>,
 ) -> CallToolResult {
     doc(&response::search_response_json(&response::SearchResponse {
         repo,
@@ -650,6 +713,7 @@ fn search_doc(
         offset,
         total,
         hits,
+        occurrences,
     }))
 }
 
@@ -985,6 +1049,65 @@ fn impact_doc(input: &ImpactInput) -> CallToolResult {
     )
 }
 
+// --- semantic tool ------------------------------------------------------------
+
+/// The language server executable: the operator's configuration, never the
+/// request's. An absolute path only — no PATH lookup, no auto-install, no
+/// client-supplied executable or argument.
+fn provider_exe() -> Result<String, CallToolResult> {
+    let exe = std::env::var("RILTRA_LSP_SERVER").unwrap_or_default();
+    if exe.is_empty() || !Path::new(&exe).is_absolute() {
+        return Err(tool_error(
+            "provider_unavailable",
+            "no language server configured; set RILTRA_LSP_SERVER to an absolute path",
+        ));
+    }
+    Ok(exe)
+}
+
+/// Classify a semantic-query refusal by its CLI text: a document-path
+/// problem → `invalid_input`; everything else fails closed as `store_error`,
+/// message preserved.
+fn semantic_query_error(message: String) -> CallToolResult {
+    let kind = if message.contains("document path") {
+        "invalid_input"
+    } else {
+        "store_error"
+    };
+    tool_error(kind, &message)
+}
+
+/// The semantic query: the same code path and the same document as the
+/// CLI's `semantic query --lsp-server`. The checks run in a fixed order —
+/// repository, position, document path, provider — so a bad path is
+/// reported as such even when no provider is configured.
+fn semantic_doc(input: &SemanticInput) -> CallToolResult {
+    let (_home, canon) = match repo_root(&input.repo) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    if let Err(e) = graph_anchor(input.line, input.col) {
+        return e;
+    }
+    if let Err(e) = crate::semantic::validate_doc_path(&canon, &input.path) {
+        return tool_error("invalid_input", &e);
+    }
+    let exe = match provider_exe() {
+        Ok(exe) => exe,
+        Err(e) => return e,
+    };
+    let span = index::SpanQuery {
+        rel: &input.path,
+        line1: input.line,
+        col1: input.col,
+        refs: matches!(input.operation, Operation::References),
+    };
+    match index::semantic_query_lsp(&canon, &span, &exe) {
+        Ok(out) => doc(&response::semantic_query_json(&input.repo, &out)),
+        Err(e) => semantic_query_error(e),
+    }
+}
+
 // --- CP5: knowledge tools ----------------------------------------------------
 
 /// CLI-parity page-range check for the knowledge tools (`--limit` default 50,
@@ -1246,20 +1369,29 @@ fn health_doc() -> CallToolResult {
             "code_index_schema": store::SCHEMA_VERSION,
             "knowledge_schema": knowledge_store::KNOWLEDGE_SCHEMA_VERSION,
         },
+        // The capability flags describe the **potential** effects of the
+        // whole server, not what every call does: `riltra_code_semantic`
+        // starts a language server, which may write its own index cache and
+        // may reach the network. Riltra itself still mutates nothing through
+        // that path — the semantic query never opens the index or the
+        // knowledge store (`index::semantic_query_lsp` takes no database
+        // handle) — but the server as a whole is not read-only, may mutate
+        // the machine (the provider's cache) and may use the network.
         "capabilities": {
             "transport": "stdio",
             "operations": ["tools"],
-            "read_only": true,
-            "mutations": false,
+            "read_only": false,
+            "mutations": true,
             "resources": false,
             "prompts": false,
-            "network": false,
+            "network": true,
             "knowledge_schema_v1_readable": true,
             "tools": [
                 "riltra_code_callees",
                 "riltra_code_callers",
                 "riltra_code_impact",
                 "riltra_code_search",
+                "riltra_code_semantic",
                 "riltra_code_trace",
                 "riltra_health",
                 "riltra_knowledge_related",

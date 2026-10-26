@@ -1,0 +1,3 @@
+sha256 of index DB before and after one read-only mcp-smoke run (home copy)
+before 23d87917537528d9dabe
+after  23d87917537528d9dabe

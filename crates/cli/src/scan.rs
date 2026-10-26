@@ -103,7 +103,7 @@ fn unsupported_json(rel: &str, reason: &str) -> String {
     )
 }
 
-fn unsupported_reason(kind: &FileKind) -> &'static str {
+pub(crate) fn unsupported_reason(kind: &FileKind) -> &'static str {
     match kind {
         FileKind::Supported(_) => "supported",
         FileKind::CudaExperimental => "cuda-experimental",

@@ -6,6 +6,7 @@
 //! written (e.g. `w.process`), never a resolved target. Anything the grammar
 //! cannot represent is reported via `errors` or left out, never guessed.
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use crate::json::escape;
@@ -55,10 +56,11 @@ pub enum FileKind {
     UnsupportedExtension,
 }
 
-/// Extension map. Headers (`.h`) parse as C++: real-world headers mix both
-/// languages and the C++ grammar covers C declarations, while the C grammar
-/// misreads C++ constructs (namespaces/classes) as functions with errors.
-/// Use `.c` for strict C parsing.
+/// Extension map. Headers (`.h`) and `.inl` template bodies parse as C++:
+/// real-world headers mix both languages, and the C++ grammar covers C
+/// declarations, while the C grammar misreads C++ constructs (namespaces and
+/// classes) as functions with errors. A `.inl` fragment that needs its header
+/// context keeps its errors in `errors`. Use `.c` for strict C parsing.
 pub fn classify(path: &Path) -> FileKind {
     match path
         .extension()
@@ -72,7 +74,7 @@ pub fn classify(path: &Path) -> FileKind {
         Some("tsx") => FileKind::Supported(Language::Tsx),
         Some("rs") => FileKind::Supported(Language::Rust),
         Some("c") => FileKind::Supported(Language::C),
-        Some("h" | "hh" | "hpp" | "hxx") => FileKind::Supported(Language::Cpp),
+        Some("h" | "hh" | "hpp" | "hxx" | "inl") => FileKind::Supported(Language::Cpp),
         Some("cc" | "cpp" | "cxx") => FileKind::Supported(Language::Cpp),
         Some("cu" | "cuh") => FileKind::CudaExperimental,
         _ => FileKind::UnsupportedExtension,
@@ -123,7 +125,27 @@ pub struct FileFacts {
     pub definitions: Vec<Fact>,
     pub imports: Vec<Fact>,
     pub calls: Vec<Fact>,
+    /// Name occurrences of a C++ source (E7 Slice 2): `kind` is the role, the
+    /// name is the identifier text, the span and bytes address the identifier.
+    /// Never part of the `scan` document; stored and queried by the index only.
+    pub reference_occurrences: Vec<Fact>,
     pub errors: u32,
+}
+
+/// Roles of a reference occurrence. These strings are stored in
+/// `reference_occurrences.role` and reported by `search --occurrences`.
+pub const ROLE_MEMBER_ACCESS: &str = "member-access";
+pub const ROLE_ADDRESS_OF_BINDING: &str = "address-of-binding";
+pub const ROLE_MACRO_ARGUMENT: &str = "macro-argument";
+
+/// Confidence of an occurrence, derived from its role and never stored: the
+/// syntax proves the role and the location (`observed`), or the role needs an
+/// assumption outside the syntax (`candidate`).
+pub fn occurrence_confidence(role: &str) -> &'static str {
+    match role {
+        ROLE_MEMBER_ACCESS | ROLE_ADDRESS_OF_BINDING => "observed",
+        _ => "candidate",
+    }
 }
 
 fn ts_language(lang: Language) -> tree_sitter::Language {
@@ -247,6 +269,32 @@ pub fn relationship_proof(lang: Language, src: &[u8]) -> RelationshipProof {
         node.child_by_field_name("name")
             .or_else(|| c_name_node(node))
     }
+    /// Nearest enclosing callable definition of `node`, if any.
+    fn enclosing_owner(node: tree_sitter::Node<'_>) -> Option<(usize, usize)> {
+        let mut parent = node.parent();
+        while let Some(p) = parent {
+            if callable(p) && name(p).is_some() {
+                return Some((p.start_byte(), p.end_byte()));
+            }
+            if matches!(
+                p.kind(),
+                "lambda"
+                    | "lambda_expression"
+                    | "arrow_function"
+                    | "closure_expression"
+                    | "function_expression"
+                    | "generator_function"
+                    | "class_definition"
+                    | "class_declaration"
+                    | "class_specifier"
+                    | "struct_specifier"
+            ) {
+                return None;
+            }
+            parent = p.parent();
+        }
+        None
+    }
     let mut proof = RelationshipProof::default();
     let mut parser = tree_sitter::Parser::new();
     if parser.set_language(&ts_language(lang)).is_err() {
@@ -266,33 +314,18 @@ pub fn relationship_proof(lang: Language, src: &[u8]) -> RelationshipProof {
             }
         }
         if matches!(node.kind(), "call" | "call_expression") {
-            let mut parent = node.parent();
-            let mut owner = None;
-            while let Some(p) = parent {
-                if callable(p) && name(p).is_some() {
-                    owner = Some((p.start_byte(), p.end_byte()));
-                    break;
-                }
-                if matches!(
-                    p.kind(),
-                    "lambda"
-                        | "lambda_expression"
-                        | "arrow_function"
-                        | "closure_expression"
-                        | "function_expression"
-                        | "generator_function"
-                        | "class_definition"
-                        | "class_declaration"
-                        | "class_specifier"
-                        | "struct_specifier"
-                ) {
-                    break;
-                }
-                parent = p.parent();
-            }
             proof
                 .owners
-                .insert((node.start_byte(), node.end_byte()), owner);
+                .insert((node.start_byte(), node.end_byte()), enclosing_owner(node));
+        }
+        // A C++ direct-initialization call has no `call_expression` node, so
+        // its owner is recorded against the same range the call fact uses.
+        if node.kind() == "declaration" {
+            if let Some((ty, args)) = direct_init_parts(node) {
+                proof
+                    .owners
+                    .insert((ty.start_byte(), args.end_byte()), enclosing_owner(node));
+            }
         }
         for i in (0..node.named_child_count()).rev() {
             if let Some(child) = node.named_child(i) {
@@ -339,11 +372,13 @@ fn push_import(facts: &mut FileFacts, node: tree_sitter::Node, src: &[u8]) {
         end -= 1;
     }
     let pos = node.start_position();
+    // Both end coordinates come from the same trimmed offset.
+    let (end_line, end_col) = position_of(src, end);
     let span = Span {
         start_line: (pos.row + 1) as u32,
         start_col: (pos.column + 1) as u32,
-        end_line: (pos.row + 1) as u32,
-        end_col: (end - line_start(src, end) + 1) as u32,
+        end_line,
+        end_col,
     };
     facts.imports.push(Fact {
         kind: "import",
@@ -357,14 +392,6 @@ fn push_import(facts: &mut FileFacts, node: tree_sitter::Node, src: &[u8]) {
         callee: None,
         tcallee: None,
     });
-}
-
-fn line_start(src: &[u8], end: usize) -> usize {
-    let mut start = end.min(src.len());
-    while start > 0 && src[start - 1] != b'\n' {
-        start -= 1;
-    }
-    start
 }
 
 /// Named `struct X {...}` or anonymous `typedef struct {...} X` (name from the
@@ -397,25 +424,185 @@ fn push_struct(facts: &mut FileFacts, node: tree_sitter::Node, src: &[u8]) {
     });
 }
 
+/// C++ data member: a `field_declaration` whose declarator ends in a
+/// `field_identifier`. The fact points at the NAME (the identifier), so the
+/// anchor of a member is its identifier, not its type.
+///
+/// A `function_declarator` is never a data member: a method declaration, a
+/// constructor and the ambiguous function-pointer form
+/// (`int (*target)();`) are all skipped rather than guessed.
+fn push_field(facts: &mut FileFacts, node: tree_sitter::Node, src: &[u8]) {
+    let mut cursor = node.walk();
+    for declarator in node.children_by_field_name("declarator", &mut cursor) {
+        let Some(name_node) = field_identifier_of(declarator) else {
+            continue;
+        };
+        let (span, byte_start, byte_end) = span_of(name_node);
+        facts.definitions.push(Fact {
+            kind: "field",
+            name: node_text(name_node, src).map(str::to_string),
+            text: None,
+            span,
+            byte_start,
+            byte_end,
+            callee: None,
+            tcallee: None,
+        });
+    }
+}
+
+/// The `field_identifier` at the end of a data-member declarator chain.
+/// Pointer, reference, array, parenthesized and attributed declarators wrap
+/// it; a `function_declarator` never does, so it yields nothing.
+fn field_identifier_of(declarator: tree_sitter::Node) -> Option<tree_sitter::Node> {
+    let mut current = declarator;
+    for _ in 0..6 {
+        match current.kind() {
+            "field_identifier" => return Some(current),
+            "function_declarator" => return None,
+            "pointer_declarator"
+            | "reference_declarator"
+            | "array_declarator"
+            | "parenthesized_declarator"
+            | "attributed_declarator" => {
+                current = inner_declarator(current)?;
+            }
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// The declarator inside a wrapper node: its `declarator` field when it has
+/// one, else the first named child that can carry it (the reference and
+/// parenthesized declarators have no field of their own).
+fn inner_declarator(node: tree_sitter::Node) -> Option<tree_sitter::Node> {
+    if let Some(inner) = node.child_by_field_name("declarator") {
+        return Some(inner);
+    }
+    for i in 0..node.named_child_count() {
+        let Some(child) = node.named_child(i) else {
+            continue;
+        };
+        if matches!(
+            child.kind(),
+            "field_identifier"
+                | "function_declarator"
+                | "pointer_declarator"
+                | "reference_declarator"
+                | "array_declarator"
+                | "parenthesized_declarator"
+                | "attributed_declarator"
+        ) {
+            return Some(child);
+        }
+    }
+    None
+}
+
+fn push_occurrence(facts: &mut FileFacts, role: &'static str, name: tree_sitter::Node, src: &[u8]) {
+    let (span, byte_start, byte_end) = span_of(name);
+    facts.reference_occurrences.push(Fact {
+        kind: role,
+        name: node_text(name, src).map(str::to_string),
+        text: None,
+        span,
+        byte_start,
+        byte_end,
+        callee: None,
+        tcallee: None,
+    });
+}
+
+/// C++ member access: a `field_expression` whose field is a plain
+/// `field_identifier` (`a.b`, `p->b`, `p->*b`; `a.T::b` has a qualified field
+/// and is not recorded). The row is the field identifier. Under `&` the role
+/// is the address-of binding, which replaces the member access for the same
+/// identifier, so one identifier is one row.
+fn push_member_access(facts: &mut FileFacts, node: tree_sitter::Node, src: &[u8]) {
+    let Some(field) = node
+        .child_by_field_name("field")
+        .filter(|f| f.kind() == "field_identifier")
+    else {
+        return;
+    };
+    let role = if is_address_of_operand(node) {
+        ROLE_ADDRESS_OF_BINDING
+    } else {
+        ROLE_MEMBER_ACCESS
+    };
+    push_occurrence(facts, role, field, src);
+}
+
+/// True when `node` is the direct operand of a unary `&`.
+fn is_address_of_operand(node: tree_sitter::Node) -> bool {
+    node.parent().is_some_and(|parent| {
+        parent.kind() == "pointer_expression"
+            && parent
+                .child_by_field_name("operator")
+                .is_some_and(|op| op.kind() == "&")
+            && parent
+                .child_by_field_name("argument")
+                .is_some_and(|arg| arg.id() == node.id())
+    })
+}
+
+/// A bare identifier argument of a call whose callee is a bare identifier
+/// naming a function-like macro defined in this file. The macro's expansion
+/// is unknown, so the row is a candidate; the callee itself is never a row.
+fn push_macro_argument(
+    facts: &mut FileFacts,
+    node: tree_sitter::Node,
+    src: &[u8],
+    macros: &HashSet<&str>,
+) {
+    let Some(args) = node.parent().filter(|p| p.kind() == "argument_list") else {
+        return;
+    };
+    let Some(call) = args.parent().filter(|p| p.kind() == "call_expression") else {
+        return;
+    };
+    let is_call_arguments = call
+        .child_by_field_name("arguments")
+        .is_some_and(|a| a.id() == args.id());
+    let calls_a_local_macro = call
+        .child_by_field_name("function")
+        .filter(|f| f.kind() == "identifier")
+        .and_then(|f| node_text(f, src))
+        .is_some_and(|name| macros.contains(name));
+    if is_call_arguments && calls_a_local_macro {
+        push_occurrence(facts, ROLE_MACRO_ARGUMENT, node, src);
+    }
+}
+
+/// Names of the function-like macros (`#define NAME(args)`) defined in the
+/// file, wherever the definition sits (any preprocessor branch, before or
+/// after the use). Object-like macros are not callable and are not included.
+fn function_macro_names<'a>(root: tree_sitter::Node<'a>, src: &'a [u8]) -> HashSet<&'a str> {
+    let mut names = HashSet::new();
+    let mut pending = vec![root];
+    while let Some(node) = pending.pop() {
+        if node.kind() == "preproc_function_def" {
+            if let Some(name) = node
+                .child_by_field_name("name")
+                .and_then(|n| node_text(n, src))
+            {
+                names.insert(name);
+            }
+        }
+        for i in 0..node.child_count() {
+            if let Some(child) = node.child(i) {
+                pending.push(child);
+            }
+        }
+    }
+    names
+}
+
 fn push_call(facts: &mut FileFacts, node: tree_sitter::Node, src: &[u8]) {
     let func = node.child_by_field_name("function");
     let callee = func.and_then(|f| node_text(f, src).map(|s| s.to_string()));
     let (span, byte_start, byte_end) = span_of(node);
-    let (callee_span, terminal_span) = match func {
-        Some(f) => {
-            let (cspan, cbs, cbe) = span_of(f);
-            let callee_span = CalleeSpan {
-                start_line: cspan.start_line,
-                start_col: cspan.start_col,
-                end_line: cspan.end_line,
-                end_col: cspan.end_col,
-                byte_start: cbs,
-                byte_end: cbe,
-            };
-            (Some(callee_span), terminal_span(src, cbs, cbe))
-        }
-        None => (None, None),
-    };
     facts.calls.push(Fact {
         kind: "call",
         name: callee,
@@ -423,17 +610,123 @@ fn push_call(facts: &mut FileFacts, node: tree_sitter::Node, src: &[u8]) {
         span,
         byte_start,
         byte_end,
-        callee: callee_span,
-        tcallee: terminal_span,
+        callee: func.map(callee_span_of),
+        tcallee: func.and_then(|f| terminal_span(src, f)),
     });
 }
 
-/// Terminal identifier/property of a callee expression: the text after the
+/// Span and byte range of a node, as a call fact records its callee.
+fn callee_span_of(node: tree_sitter::Node) -> CalleeSpan {
+    let (span, byte_start, byte_end) = span_of(node);
+    CalleeSpan {
+        start_line: span.start_line,
+        start_col: span.start_col,
+        end_line: span.end_line,
+        end_col: span.end_col,
+        byte_start,
+        byte_end,
+    }
+}
+
+/// C++ direct initialization (`T var(args);`) has no `call_expression` node:
+/// the grammar models it as `declaration` -> `init_declarator` ->
+/// `argument_list`, with the called type in the declaration's type field.
+/// Only that form is a constructor call: the argument list holds
+/// expressions, so C++ reads the declaration as a variable definition.
+///
+/// The grammar also models `T var(a, b);` as a `function_declarator`
+/// (C++'s most-vexing-parse shape). There the arguments are read as a
+/// parameter-type-list, and C++ reads the declaration as a function
+/// declaration when the argument names denote types and as a variable
+/// definition when they denote variables. Only name lookup can decide, so
+/// the syntax layer must not assert a constructor call for that form: a
+/// block-scope function declaration is legal C++, so the scope does not
+/// settle it either. Returns the called type node and the argument list.
+fn direct_init_parts(node: tree_sitter::Node) -> Option<(tree_sitter::Node, tree_sitter::Node)> {
+    let decl = node.child_by_field_name("declarator")?;
+    // Direct initialization puts the argument list in the declarator's
+    // `value` field; copy initialization (`T v = T(args);`) puts a
+    // `call_expression` there, which is captured on its own.
+    if decl.kind() != "init_declarator" {
+        return None;
+    }
+    let value = decl.child_by_field_name("value")?;
+    if value.kind() != "argument_list" {
+        return None;
+    }
+    let ty = node.child_by_field_name("type")?;
+    // Only a named type can be a constructor: `int x(5);` is not a call.
+    // shortcut: a typedef is indistinguishable from a class here, so
+    // `size_t n(0);` is recorded as a call to `size_t` although it may be
+    // a functional cast; a name lookup would settle it (gap E12).
+    if !matches!(ty.kind(), "type_identifier" | "qualified_identifier") {
+        return None;
+    }
+    Some((ty, value))
+}
+
+/// Record a C++ direct-initialization constructor call as a call fact. The
+/// call range runs from the called type to the end of the argument list
+/// (`Widget w(1)`), the callee is the type (`Widget`), and the terminal is
+/// the type's last name part.
+fn push_direct_init_call(facts: &mut FileFacts, node: tree_sitter::Node, src: &[u8]) {
+    let Some((ty, args)) = direct_init_parts(node) else {
+        return;
+    };
+    let (ty_span, ty_start, _) = span_of(ty);
+    let (args_span, _, args_end) = span_of(args);
+    let span = Span {
+        start_line: ty_span.start_line,
+        start_col: ty_span.start_col,
+        end_line: args_span.end_line,
+        end_col: args_span.end_col,
+    };
+    facts.calls.push(Fact {
+        kind: "call",
+        name: node_text(ty, src).map(|s| s.to_string()),
+        text: None,
+        span,
+        byte_start: ty_start,
+        byte_end: args_end,
+        callee: Some(callee_span_of(ty)),
+        tcallee: terminal_span(src, ty),
+    });
+}
+
+/// Name node of a callee whose last name carries a template argument list:
+/// `make_shared` in `std::make_shared<T>`, `get` in `obj.get<T>()` and
+/// `ptr->template get<T>()`, `vector` in `std::vector<T> v(n)`. `None` for
+/// every other callee shape, including template arguments that only appear in
+/// a scope (`Foo<T>::create`).
+fn template_name(callee: tree_sitter::Node) -> Option<tree_sitter::Node> {
+    let mut node = callee;
+    loop {
+        match node.kind() {
+            "template_function" | "template_method" | "template_type" => {
+                return node.child_by_field_name("name");
+            }
+            "qualified_identifier" => node = node.child_by_field_name("name")?,
+            "field_expression" => node = node.child_by_field_name("field")?,
+            "dependent_name" => node = node.named_child(0)?,
+            _ => return None,
+        }
+    }
+}
+
+/// Terminal identifier/property of a callee expression. A callee whose last
+/// name has template arguments takes its terminal from the grammar: the text
+/// after a separator would start inside the arguments (`PatchMatchController>`
+/// for `std::make_shared<mvs::PatchMatchController>`) and the arguments are
+/// not part of the called name. Every other callee takes the text after the
 /// last `.`, `::`, or `->` separator. Separators are ASCII, so byte
-/// arithmetic on the UTF-8 source is exact. Returns `None` when no
-/// separator-split terminal exists (plain `foo`) — callers treat the whole
-/// callee as the terminal — or when the range is empty.
-fn terminal_span(src: &[u8], callee_bs: usize, callee_be: usize) -> Option<CalleeSpan> {
+/// arithmetic on the UTF-8 source is exact. Returns `None` when the callee
+/// ends in a separator or is not valid UTF-8; a plain `foo` is its own
+/// terminal.
+fn terminal_span(src: &[u8], callee: tree_sitter::Node) -> Option<CalleeSpan> {
+    if let Some(name) = template_name(callee) {
+        return Some(callee_span_of(name));
+    }
+    let (callee_bs, callee_be) = (callee.start_byte(), callee.end_byte());
     let text = std::str::from_utf8(src.get(callee_bs..callee_be)?).ok()?;
     let mut cut: Option<usize> = None;
     let bytes = text.as_bytes();
@@ -485,7 +778,13 @@ fn position_of(src: &[u8], off: usize) -> (u32, u32) {
     (line, col)
 }
 
-fn visit(lang: Language, node: tree_sitter::Node, src: &[u8], facts: &mut FileFacts) {
+fn visit(
+    lang: Language,
+    node: tree_sitter::Node,
+    src: &[u8],
+    facts: &mut FileFacts,
+    macros: &HashSet<&str>,
+) {
     // Missing tokens (e.g. a `)` the parser inserts) are anonymous: count
     // every child, named or not, or recovery evidence goes missing.
     if node.is_missing() || node.kind() == "ERROR" {
@@ -534,14 +833,18 @@ fn visit(lang: Language, node: tree_sitter::Node, src: &[u8], facts: &mut FileFa
             "function_definition" => push_c_def(facts, "function", node, src),
             "struct_specifier" => push_struct(facts, node, src),
             "class_specifier" => push_def(facts, "class", node, src),
+            "field_declaration" => push_field(facts, node, src),
             "preproc_include" => push_import(facts, node, src),
             "call_expression" => push_call(facts, node, src),
+            "declaration" => push_direct_init_call(facts, node, src),
+            "field_expression" => push_member_access(facts, node, src),
+            "identifier" => push_macro_argument(facts, node, src, macros),
             _ => {}
         },
     }
     for i in 0..node.child_count() {
         if let Some(child) = node.child(i) {
-            visit(lang, child, src, facts);
+            visit(lang, child, src, facts, macros);
         }
     }
 }
@@ -555,6 +858,7 @@ pub fn parse_source(lang: Language, src: &[u8]) -> FileFacts {
         definitions: Vec::new(),
         imports: Vec::new(),
         calls: Vec::new(),
+        reference_occurrences: Vec::new(),
         errors: 0,
     };
     let mut parser = tree_sitter::Parser::new();
@@ -564,7 +868,12 @@ pub fn parse_source(lang: Language, src: &[u8]) -> FileFacts {
         return facts;
     }
     if let Some(tree) = parser.parse(src, None) {
-        visit(lang, tree.root_node(), src, &mut facts);
+        let macros = if lang == Language::Cpp {
+            function_macro_names(tree.root_node(), src)
+        } else {
+            HashSet::new()
+        };
+        visit(lang, tree.root_node(), src, &mut facts, &macros);
     } else {
         facts.errors += 1;
     }
@@ -652,6 +961,10 @@ mod tests {
             FileKind::Supported(Language::Cpp)
         );
         assert_eq!(
+            classify(Path::new("widget.inl")),
+            FileKind::Supported(Language::Cpp)
+        );
+        assert_eq!(
             classify(Path::new("A.PY")),
             FileKind::Supported(Language::Python)
         );
@@ -663,6 +976,15 @@ mod tests {
         assert_eq!(classify(Path::new("k.cuh")), FileKind::CudaExperimental);
         assert_eq!(
             classify(Path::new("note.xyz")),
+            FileKind::UnsupportedExtension
+        );
+        // Other C++ template-body extensions stay out of scope (see README).
+        assert_eq!(
+            classify(Path::new("widget.ipp")),
+            FileKind::UnsupportedExtension
+        );
+        assert_eq!(
+            classify(Path::new("widget.tpp")),
             FileKind::UnsupportedExtension
         );
         assert_eq!(
@@ -709,6 +1031,62 @@ mod tests {
     }
 
     #[test]
+    fn python_multiline_import_end_is_on_its_last_line() {
+        let src = b"from pkg import (\n    alpha,\n    beta,\n)\n";
+        let facts = parse_source(Language::Python, src);
+        assert_eq!(facts.errors, 0);
+        assert_eq!(facts.imports.len(), 1);
+        let import = &facts.imports[0];
+        assert_eq!(
+            &src[import.byte_start..import.byte_end],
+            b"from pkg import (\n    alpha,\n    beta,\n)"
+        );
+        assert_eq!((import.span.start_line, import.span.start_col), (1, 1));
+        assert_eq!((import.span.end_line, import.span.end_col), (4, 2));
+    }
+
+    #[test]
+    fn typescript_multiline_import_end_is_on_its_last_line() {
+        let src = b"import {\n  alpha,\n  beta,\n} from \"./pkg\";\n";
+        let facts = parse_source(Language::TypeScript, src);
+        assert_eq!(facts.errors, 0);
+        assert_eq!(facts.imports.len(), 1);
+        let import = &facts.imports[0];
+        assert_eq!(
+            &src[import.byte_start..import.byte_end],
+            b"import {\n  alpha,\n  beta,\n} from \"./pkg\";"
+        );
+        assert_eq!((import.span.start_line, import.span.start_col), (1, 1));
+        assert_eq!((import.span.end_line, import.span.end_col), (4, 16));
+    }
+
+    #[test]
+    fn single_line_python_import_span_is_unchanged() {
+        let src = b"import os\n";
+        let facts = parse_source(Language::Python, src);
+        assert_eq!(facts.imports.len(), 1);
+        let import = &facts.imports[0];
+        assert_eq!(&src[import.byte_start..import.byte_end], b"import os");
+        assert_eq!((import.span.start_line, import.span.start_col), (1, 1));
+        assert_eq!((import.span.end_line, import.span.end_col), (1, 10));
+    }
+
+    #[test]
+    fn include_trailing_newline_is_trimmed_before_end_coordinates() {
+        let src = b"#include <stdio.h>\nint main(void) {\n  return 0;\n}\n";
+        let facts = parse_source(Language::C, src);
+        assert_eq!(facts.imports.len(), 1);
+        let import = &facts.imports[0];
+        assert_eq!(import.byte_end, 18);
+        assert_eq!(
+            &src[import.byte_start..import.byte_end],
+            b"#include <stdio.h>"
+        );
+        assert_eq!((import.span.start_line, import.span.start_col), (1, 1));
+        assert_eq!((import.span.end_line, import.span.end_col), (1, 19));
+    }
+
+    #[test]
     fn counts_syntax_errors_without_failing() {
         let src = b"def broken(:\n    pass\n";
         let facts = parse_source(Language::Python, src);
@@ -721,9 +1099,574 @@ mod tests {
         assert_eq!(language_name(Language::Tsx), "tsx");
     }
 
+    /// The C++ data members of a source: (name, start_line, start_col, text).
+    fn cpp_fields(src: &[u8]) -> Vec<(String, u32, u32, String)> {
+        parse_source(Language::Cpp, src)
+            .definitions
+            .iter()
+            .filter(|d| d.kind == "field")
+            .map(|d| {
+                (
+                    d.name.clone().unwrap_or_default(),
+                    d.span.start_line,
+                    d.span.start_col,
+                    String::from_utf8_lossy(&src[d.byte_start..d.byte_end]).into_owned(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn extracts_a_cpp_data_member_as_a_field() {
+        // A data member points at its NAME, so the anchor is the identifier
+        // (the frozen CP1 anchor `patch_match_options.h:56:10`).
+        let src = b"class Options {\n  double max_triangulation_angle = -1.0f;\n};\n";
+        let fields = cpp_fields(src);
+        assert_eq!(fields.len(), 1, "{fields:?}");
+        assert_eq!(fields[0].0, "max_triangulation_angle");
+        assert_eq!((fields[0].1, fields[0].2), (2, 10));
+        assert_eq!(fields[0].3, "max_triangulation_angle");
+    }
+
+    #[test]
+    fn a_cpp_field_with_an_initializer_is_a_field() {
+        let src = b"struct Holder { int value = 1; };\n";
+        let fields = cpp_fields(src);
+        assert_eq!(fields.len(), 1, "{fields:?}");
+        assert_eq!(fields[0].0, "value");
+        assert_eq!(fields[0].3, "value");
+    }
+
+    #[test]
+    fn multiple_cpp_declarators_are_separate_fields() {
+        let src = b"struct S { int a, b; };\n";
+        let fields = cpp_fields(src);
+        let names: Vec<&str> = fields.iter().map(|f| f.0.as_str()).collect();
+        assert_eq!(names, vec!["a", "b"], "{fields:?}");
+    }
+
+    #[test]
+    fn pointer_reference_and_array_members_are_fields() {
+        let src = b"struct S {\n  double* p;\n  double& r;\n  double arr[4];\n};\n";
+        let fields = cpp_fields(src);
+        let names: Vec<&str> = fields.iter().map(|f| f.0.as_str()).collect();
+        assert_eq!(names, vec!["p", "r", "arr"], "{fields:?}");
+    }
+
+    #[test]
+    fn a_cpp_method_declaration_is_not_a_field() {
+        // A method declaration is a field_declaration node whose declarator
+        // is a function declarator: it is never a data member.
+        let src = b"class W {\n public:\n  int process(int x);\n};\n";
+        assert!(cpp_fields(src).is_empty(), "a method is not a data member");
+    }
+
+    #[test]
+    fn a_cpp_function_pointer_member_is_not_a_field() {
+        // `int (*target)();` is a member, but its declarator is a function
+        // declarator: the ambiguous form is not indexed as a data member.
+        let src = b"struct Obj { int (*target)(); };\n";
+        assert!(
+            cpp_fields(src).is_empty(),
+            "a function-pointer declarator is not indexed"
+        );
+    }
+
+    #[test]
+    fn same_named_cpp_fields_stay_separate_symbols() {
+        let src = b"struct A { int value; };\nstruct B { int value; };\n";
+        let fields = cpp_fields(src);
+        assert_eq!(fields.len(), 2, "{fields:?}");
+        assert_eq!(fields[0].0, "value");
+        assert_eq!(fields[1].0, "value");
+        assert_ne!(fields[0].1, fields[1].1, "distinct declarations");
+    }
+
+    #[test]
+    fn qualified_and_derived_cpp_members_are_fields() {
+        // A static, a mutable, a bitfield and a member of an anonymous union
+        // are data members; a template class member is one too.
+        let src = b"class C {\n public:\n  static int counter;\n  mutable double ratio;\n  unsigned int flags : 3;\n  union { int raw; float as_float; };\n};\n";
+        let fields = cpp_fields(src);
+        let names: Vec<&str> = fields.iter().map(|f| f.0.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["counter", "ratio", "flags", "raw", "as_float"],
+            "{fields:?}"
+        );
+        // One row per declaration: a member is never indexed twice.
+        let mut unique = names.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), names.len(), "no duplicate field rows");
+    }
+
     #[test]
     fn grammar_versions_match_lockfile_entries() {
         assert_eq!(grammar_version(Language::Python), "python:0.25.0");
         assert_eq!(grammar_version(Language::Cpp), "cpp:0.23.4");
+    }
+
+    #[test]
+    fn cpp_direct_initialization_is_a_call() {
+        // C++ has no `call_expression` for `T var(args);`: the grammar models
+        // it as declaration -> init_declarator -> argument_list, so the
+        // constructor call is invisible unless it is captured explicitly.
+        let src = b"struct Widget { Widget(int a); };\nvoid caller() {\n  Widget w(1);\n  Widget w2 = Widget(2);\n}\n";
+        let facts = parse_source(Language::Cpp, src);
+        let names: Vec<&str> = facts
+            .calls
+            .iter()
+            .map(|c| c.name.as_deref().unwrap_or(""))
+            .collect();
+        assert_eq!(
+            names,
+            vec!["Widget", "Widget"],
+            "direct initialization and copy initialization are both constructor calls"
+        );
+        let direct = &facts.calls[0];
+        // The call range covers the called type through the argument list.
+        assert_eq!(&src[direct.byte_start..direct.byte_end], b"Widget w(1)");
+        let callee = direct.callee.as_ref().expect("callee span recorded");
+        assert_eq!(&src[callee.byte_start..callee.byte_end], b"Widget");
+        let terminal = direct.tcallee.as_ref().expect("terminal span recorded");
+        assert_eq!(&src[terminal.byte_start..terminal.byte_end], b"Widget");
+    }
+
+    #[test]
+    fn cpp_direct_initialization_keeps_the_qualified_terminal() {
+        let src = b"void caller() {\n  ns::Widget w(1);\n}\n";
+        let facts = parse_source(Language::Cpp, src);
+        assert_eq!(facts.calls.len(), 1);
+        let call = &facts.calls[0];
+        assert_eq!(call.name.as_deref(), Some("ns::Widget"));
+        let terminal = call.tcallee.as_ref().expect("terminal span recorded");
+        assert_eq!(&src[terminal.byte_start..terminal.byte_end], b"Widget");
+    }
+
+    #[test]
+    fn cpp_primitive_direct_initialization_is_not_a_call() {
+        // `int x(5);` is not a constructor call; a primitive type must not
+        // become a call name.
+        let src = b"void caller() {\n  int x(5);\n}\n";
+        let facts = parse_source(Language::Cpp, src);
+        assert!(
+            facts.calls.is_empty(),
+            "primitive initialization is not a call"
+        );
+    }
+
+    #[test]
+    fn cpp_most_vexing_parse_is_ambiguous_and_not_a_call() {
+        // `T v(a, b);` with identifier-like arguments is parsed by the
+        // grammar as a function declarator. C++ reads it as a function
+        // declaration when `a`/`b` denote types and as a variable
+        // definition when they denote variables; only name lookup can
+        // decide, so the syntax layer must not assert a constructor call.
+        let src = b"void caller() {\n  Widget w(options, problem);\n}\n";
+        let facts = parse_source(Language::Cpp, src);
+        assert!(
+            facts.calls.is_empty(),
+            "an ambiguous most-vexing-parse form must not become a call fact"
+        );
+    }
+
+    #[test]
+    fn cpp_block_scope_type_argument_is_not_a_call() {
+        // `Widget w(int);` inside a function body declares the function
+        // `w` taking an int (MSVC: the type of `w` is `Widget(int)`), not
+        // a variable: a function declaration is legal C++ at block scope,
+        // so the declaration is not a constructor call.
+        let src = b"void caller() {\n  Widget w(int);\n}\n";
+        let facts = parse_source(Language::Cpp, src);
+        assert!(
+            facts.calls.is_empty(),
+            "a block-scope function declaration is not a constructor call"
+        );
+    }
+
+    #[test]
+    fn cpp_block_scope_function_declaration_is_not_a_call() {
+        // The same shape with a named return type is the canonical
+        // block-scope function declaration, which C++ accepts.
+        let src = b"void caller() {\n  Widget helper(int);\n}\n";
+        let facts = parse_source(Language::Cpp, src);
+        assert!(
+            facts.calls.is_empty(),
+            "a block-scope function declaration is not a constructor call"
+        );
+    }
+
+    #[test]
+    fn cpp_block_scope_empty_parentheses_is_not_a_call() {
+        // `Widget w();` declares the function `w` (MSVC: the type of `w` is
+        // `Widget(void)`), never a default-constructed variable.
+        let src = b"void caller() {\n  Widget w();\n}\n";
+        let facts = parse_source(Language::Cpp, src);
+        assert!(
+            facts.calls.is_empty(),
+            "an empty argument list declares a function, not a call"
+        );
+    }
+
+    #[test]
+    fn cpp_block_scope_function_type_argument_is_not_a_call() {
+        // `Widget w(T());` is the classic most-vexing parse: `T()` is a
+        // function type, so the declaration is a function declaration
+        // (MSVC: the type of `w` is `Widget(T(void))`).
+        let src = b"struct T {};\nvoid caller() {\n  Widget w(T());\n}\n";
+        let facts = parse_source(Language::Cpp, src);
+        assert!(
+            facts.calls.is_empty(),
+            "a function-type argument declares a function, not a call"
+        );
+    }
+
+    #[test]
+    fn cpp_prototype_at_namespace_scope_is_not_a_call() {
+        // The same shape outside a function body is a prototype, not a call.
+        let src = b"Widget w(options, problem);\n";
+        let facts = parse_source(Language::Cpp, src);
+        assert!(
+            facts.calls.is_empty(),
+            "a namespace-scope prototype is not a constructor call"
+        );
+    }
+
+    #[test]
+    fn cpp_local_declaration_in_a_preprocessor_branch_is_a_call() {
+        // A preprocessor branch does not change the scope: the declaration is
+        // still local, so a direct initialization is a constructor call.
+        let src = b"void caller() {\n#if defined(X)\n  Widget w(1);\n#endif\n}\n";
+        let facts = parse_source(Language::Cpp, src);
+        assert_eq!(facts.calls.len(), 1);
+        assert_eq!(facts.calls[0].name.as_deref(), Some("Widget"));
+    }
+
+    #[test]
+    fn cpp_direct_initialization_records_the_first_declarator_only() {
+        // Known limit: a declaration with several declarators yields the
+        // fact for the first one only. The omission is conservative - a
+        // missing fact, never a wrong one.
+        let src = b"void caller() {\n  Widget a(1), b(2);\n}\n";
+        let facts = parse_source(Language::Cpp, src);
+        assert_eq!(
+            facts.calls.len(),
+            1,
+            "only the first declarator of a multi-declarator declaration is recorded"
+        );
+    }
+
+    #[test]
+    fn cpp_template_type_direct_initialization_is_a_call() {
+        // A template type is a qualified_identifier in the type field, so
+        // the call is recorded. The callee stays as written; the terminal is
+        // the template name without its arguments.
+        let src = b"void caller() {\n  std::vector<int> v(10);\n}\n";
+        let facts = parse_source(Language::Cpp, src);
+        assert_eq!(facts.calls.len(), 1);
+        let call = &facts.calls[0];
+        assert_eq!(call.name.as_deref(), Some("std::vector<int>"));
+        let callee = call.callee.as_ref().expect("callee span recorded");
+        assert_eq!(
+            &src[callee.byte_start..callee.byte_end],
+            b"std::vector<int>"
+        );
+        assert_eq!(terminal_text(src, call), "vector");
+    }
+
+    #[test]
+    fn cpp_template_type_direct_initialization_terminal_ignores_argument_separators() {
+        let src = b"void caller() {\n  std::vector<ns::Item> items(10);\n}\n";
+        let facts = parse_source(Language::Cpp, src);
+        assert_eq!(facts.calls.len(), 1);
+        assert_eq!(terminal_text(src, &facts.calls[0]), "vector");
+    }
+
+    /// Text covered by the terminal span of a call fact.
+    fn terminal_text<'a>(src: &'a [u8], call: &super::Fact) -> &'a str {
+        let terminal = call.tcallee.as_ref().expect("terminal span recorded");
+        std::str::from_utf8(&src[terminal.byte_start..terminal.byte_end]).unwrap()
+    }
+
+    /// Terminal of the single call in `void caller() { <expr>; }`.
+    fn cpp_terminal_of(expr: &str) -> String {
+        let src = format!("void caller() {{\n  {expr};\n}}\n");
+        let facts = parse_source(Language::Cpp, src.as_bytes());
+        assert_eq!(facts.calls.len(), 1, "one call in {expr:?}");
+        terminal_text(src.as_bytes(), &facts.calls[0]).to_string()
+    }
+
+    #[test]
+    fn cpp_template_call_terminal_is_the_function_not_the_type_argument() {
+        // `mvs::PatchMatchController` is a template type argument of the
+        // called function `make_shared`, not part of the called name. The
+        // callee stays as written; the terminal is the function name.
+        let src = b"void caller() {\n  std::make_shared<mvs::PatchMatchController>(options);\n}\n";
+        let facts = parse_source(Language::Cpp, src);
+        assert_eq!(facts.calls.len(), 1);
+        let call = &facts.calls[0];
+        assert_eq!(
+            call.name.as_deref(),
+            Some("std::make_shared<mvs::PatchMatchController>")
+        );
+        let callee = call.callee.as_ref().expect("callee span recorded");
+        assert_eq!(
+            &src[callee.byte_start..callee.byte_end],
+            b"std::make_shared<mvs::PatchMatchController>"
+        );
+        assert_eq!(terminal_text(src, call), "make_shared");
+        // The line/column pair agrees with the byte range (1-based).
+        let terminal = call.tcallee.as_ref().expect("terminal span recorded");
+        assert_eq!(
+            (
+                terminal.start_line,
+                terminal.start_col,
+                terminal.end_line,
+                terminal.end_col
+            ),
+            (2, 8, 2, 19)
+        );
+    }
+
+    #[test]
+    fn cpp_template_call_terminal_excludes_every_template_argument_list() {
+        // The terminal is the called name for every shape that carries a
+        // template argument list, whatever the arguments contain.
+        let cases = [
+            (
+                "std::make_unique<std::vector<std::string>>(n)",
+                "make_unique",
+            ),
+            ("make<ns::Thing>(x)", "make"),
+            ("std::get<0>(t)", "get"),
+            ("obj.get<ns::Thing>()", "get"),
+            ("ptr->get<ns::Thing>()", "get"),
+            ("ptr->template get<ns::Thing>()", "get"),
+            ("Foo<ns::T>::template create<ns::U>(x)", "create"),
+        ];
+        for (expr, terminal) in cases {
+            assert_eq!(cpp_terminal_of(expr), terminal, "terminal of {expr:?}");
+        }
+    }
+
+    #[test]
+    fn cpp_call_terminal_is_unchanged_without_a_template_argument_list() {
+        // Calls that were already identified correctly keep their terminal,
+        // including template arguments that only appear in a scope.
+        let cases = [
+            ("foo(1)", "foo"),
+            ("ns::inner::run(x)", "run"),
+            ("a.b.c(x)", "c"),
+            ("ptr->run(x)", "run"),
+            ("Foo<ns::T>::create(x)", "create"),
+            ("ns::Foo<ns::Bar>::Baz<ns::Qux>::run(x)", "run"),
+        ];
+        for (expr, terminal) in cases {
+            assert_eq!(cpp_terminal_of(expr), terminal, "terminal of {expr:?}");
+        }
+    }
+
+    #[test]
+    fn cpp_unqualified_template_call_has_no_receiver() {
+        // Nothing precedes the called name, so the terminal starts where the
+        // callee starts (the graph reads this as "no receiver").
+        let src = b"void caller() {\n  make<ns::Thing>(x);\n}\n";
+        let facts = parse_source(Language::Cpp, src);
+        let call = &facts.calls[0];
+        let callee = call.callee.as_ref().expect("callee span recorded");
+        let terminal = call.tcallee.as_ref().expect("terminal span recorded");
+        assert_eq!(terminal.byte_start, callee.byte_start);
+    }
+
+    #[test]
+    fn cpp_class_member_declaration_is_not_a_call() {
+        // A declaration inside a class body is a member declaration, not a
+        // constructor call.
+        let src = b"struct Holder { Holder(int a); };\n";
+        let facts = parse_source(Language::Cpp, src);
+        assert!(
+            facts.calls.is_empty(),
+            "a class member declaration is not a constructor call"
+        );
+    }
+
+    /// The reference occurrences of a C++ source: (role, name, start_line,
+    /// start_col, the text under the recorded byte range).
+    fn cpp_occurrences(src: &[u8]) -> Vec<(String, String, u32, u32, String)> {
+        parse_source(Language::Cpp, src)
+            .reference_occurrences
+            .iter()
+            .map(|o| {
+                (
+                    o.kind.to_string(),
+                    o.name.clone().unwrap_or_default(),
+                    o.span.start_line,
+                    o.span.start_col,
+                    String::from_utf8_lossy(&src[o.byte_start..o.byte_end]).into_owned(),
+                )
+            })
+            .collect()
+    }
+
+    fn occurrence(
+        role: &str,
+        name: &str,
+        line: u32,
+        col: u32,
+    ) -> (String, String, u32, u32, String) {
+        (role.into(), name.into(), line, col, name.into())
+    }
+
+    #[test]
+    fn a_cpp_member_access_is_an_observed_occurrence_at_the_identifier() {
+        // `.` and `->` are both member accesses; the row points at the field
+        // identifier, and the bytes address exactly that identifier.
+        let src = b"struct S { int b; };\nint f(S a, S* p) {\n  return a.b + p->b;\n}\n";
+        assert_eq!(
+            cpp_occurrences(src),
+            vec![
+                occurrence("member-access", "b", 3, 12),
+                occurrence("member-access", "b", 3, 19),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_method_call_receiver_is_a_member_access_by_name_next_to_its_call() {
+        // Any `field_expression` with a `field_identifier` is a member access;
+        // the call fact is recorded separately and is unchanged.
+        let src = b"struct W { void run(); };\nvoid g(W w) {\n  w.run();\n}\n";
+        assert_eq!(
+            cpp_occurrences(src),
+            vec![occurrence("member-access", "run", 3, 5)]
+        );
+        assert_eq!(parse_source(Language::Cpp, src).calls.len(), 1);
+    }
+
+    #[test]
+    fn the_address_of_a_member_is_one_address_of_binding_row() {
+        // `&p->b` is a single row with the address-of role: the binding rule
+        // replaces the member-access row, it does not add a second one.
+        let src = b"struct S { int b; };\nvoid f(S* p) {\n  int* q = &p->b;\n}\n";
+        assert_eq!(
+            cpp_occurrences(src),
+            vec![occurrence("address-of-binding", "b", 3, 16)]
+        );
+    }
+
+    #[test]
+    fn a_dereferenced_member_is_a_member_access_not_an_address_of_binding() {
+        // Only the `&` operator binds: `*p->b` dereferences the member.
+        let src = b"struct S { int* b; };\nint f(S* p) {\n  int v = *p->b;\n  return v;\n}\n";
+        assert_eq!(
+            cpp_occurrences(src),
+            vec![occurrence("member-access", "b", 3, 15)]
+        );
+    }
+
+    #[test]
+    fn a_bare_argument_of_a_same_file_function_macro_is_a_candidate() {
+        // The callee `PRINT` is a function-like macro defined in this file,
+        // so the bare identifier argument is a macro-argument row. The macro
+        // name itself is never an occurrence.
+        let src = b"#define PRINT(x) (x)\nvoid f() {\n  int b = 0;\n  PRINT(b);\n}\n";
+        assert_eq!(
+            cpp_occurrences(src),
+            vec![occurrence("macro-argument", "b", 4, 9)]
+        );
+    }
+
+    #[test]
+    fn a_function_macro_defined_after_its_use_is_still_a_candidate() {
+        // The macro-name pre-pass is order-insensitive; the `candidate`
+        // confidence is the honest ceiling for it.
+        let src = b"void f() {\n  int b = 0;\n  M(b);\n}\n#define M(x) (x)\n";
+        assert_eq!(
+            cpp_occurrences(src),
+            vec![occurrence("macro-argument", "b", 3, 5)]
+        );
+    }
+
+    #[test]
+    fn object_like_foreign_and_ordinary_callees_have_no_macro_arguments() {
+        // `K` is an object-like macro (not callable), `FOREIGN` is defined
+        // nowhere in this file and `real` is an ordinary call: none of their
+        // arguments is a macro-argument row.
+        let src = b"#define K 1\nvoid f() {\n  int b = 0;\n  K(b);\n  FOREIGN(b);\n  real(b);\n}\n";
+        assert!(
+            cpp_occurrences(src).is_empty(),
+            "{:?}",
+            cpp_occurrences(src)
+        );
+    }
+
+    #[test]
+    fn a_member_access_inside_a_macro_argument_is_a_member_access() {
+        // Only a BARE identifier argument is a macro argument: `a.b` is a
+        // member access of `b`, and `a` (the receiver) is not an occurrence.
+        let src = b"#define M(x) (x)\nstruct S { int b; };\nvoid f(S a) {\n  M(a.b);\n}\n";
+        assert_eq!(
+            cpp_occurrences(src),
+            vec![occurrence("member-access", "b", 4, 7)]
+        );
+    }
+
+    #[test]
+    fn a_string_literal_is_never_an_occurrence() {
+        let src = b"#define M(x) (x)\nvoid f() {\n  M(\"b\");\n  const char* s = \"b\";\n}\n";
+        assert!(
+            cpp_occurrences(src).is_empty(),
+            "{:?}",
+            cpp_occurrences(src)
+        );
+    }
+
+    #[test]
+    fn declarations_are_not_occurrences() {
+        // A data member declaration is the `field` symbol of Slice 1, never
+        // an occurrence row.
+        let src = b"struct S { int a; int b, c; };\n";
+        assert!(
+            cpp_occurrences(src).is_empty(),
+            "{:?}",
+            cpp_occurrences(src)
+        );
+        assert_eq!(cpp_fields(src).len(), 3);
+    }
+
+    #[test]
+    fn a_qualified_member_name_is_not_an_occurrence() {
+        // `Type::member` and `a.Type::member` have a qualified identifier,
+        // not a field identifier, in the field position: a recorded coverage
+        // limit, never a guess.
+        let src = b"struct A { static int b; };\nint f(A a) {\n  return A::b + a.A::b;\n}\n";
+        assert!(
+            cpp_occurrences(src).is_empty(),
+            "{:?}",
+            cpp_occurrences(src)
+        );
+    }
+
+    #[test]
+    fn c_sources_produce_no_reference_occurrences() {
+        // The C walker is untouched: a C struct member census is a separate
+        // decision (the C++ arm only).
+        let src = b"struct S { int b; };\nint f(struct S a) { return a.b; }\n";
+        assert!(parse_source(Language::C, src)
+            .reference_occurrences
+            .is_empty());
+    }
+
+    #[test]
+    fn the_confidence_of_an_occurrence_is_derived_from_its_role() {
+        use super::{
+            occurrence_confidence, ROLE_ADDRESS_OF_BINDING, ROLE_MACRO_ARGUMENT, ROLE_MEMBER_ACCESS,
+        };
+        assert_eq!(occurrence_confidence(ROLE_MEMBER_ACCESS), "observed");
+        assert_eq!(occurrence_confidence(ROLE_ADDRESS_OF_BINDING), "observed");
+        assert_eq!(occurrence_confidence(ROLE_MACRO_ARGUMENT), "candidate");
+        // An unknown role never claims more than a candidate.
+        assert_eq!(occurrence_confidence("anything-else"), "candidate");
     }
 }

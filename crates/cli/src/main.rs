@@ -45,7 +45,7 @@ pub(crate) const SCOPE: &str = "m1-registry";
 
 pub(crate) fn usage() -> String {
     format!(
-        "Usage:\n  {NAME} [--help] [--version] status\n  {NAME} init --repo <path> [--name <name>]\n  {NAME} repo list\n  {NAME} repo status --repo <name>\n  {NAME} doctor [--repo <name>]\n  {NAME} scan --repo <name> [--path <relpath>]... [--symbol <substr>]\n  {NAME} index --repo <name> [--full]\n  {NAME} index status --repo <name>\n  {NAME} search --repo <name> --symbol <substr> [--limit <n>] [--offset <n>]
+        "Usage:\n  {NAME} [--help] [--version] status\n  {NAME} init --repo <path> [--name <name>]\n  {NAME} repo list\n  {NAME} repo status --repo <name>\n  {NAME} doctor [--repo <name>]\n  {NAME} scan --repo <name> [--path <relpath>]... [--symbol <substr>]\n  {NAME} index --repo <name> [--full]\n  {NAME} index status --repo <name>\n  {NAME} search --repo <name> --symbol <substr> [--limit <n>] [--offset <n>] [--occurrences]
   {NAME} semantic import --repo <name> --scip <file> [--source-digest <hex>]
   {NAME} semantic status --repo <name>
   {NAME} semantic query --repo <name> --path <rel> --line <n> --col <n> [--refs] [--lsp-server <abs-path>]
@@ -304,6 +304,7 @@ fn cmd_search(
     symbol: &str,
     limit: Option<&str>,
     offset: Option<&str>,
+    occurrences: bool,
     out: &mut String,
     err: &mut String,
 ) -> i32 {
@@ -357,6 +358,7 @@ fn cmd_search(
             offset,
             total: 0,
             hits: &[],
+            occurrences: None,
         }) + "\n";
         return 0;
     }
@@ -398,6 +400,7 @@ fn cmd_search(
                 offset,
                 total: 0,
                 hits: &[],
+                occurrences: None,
             }) + "\n";
             return 0;
         }
@@ -409,6 +412,17 @@ fn cmd_search(
             err.push_str(&format!("error: {e}\n"));
             return 3;
         }
+    };
+    let census = if occurrences {
+        match store::occurrences_for(&tx, snapshot.id, symbol, limit, offset) {
+            Ok(list) => Some(list),
+            Err(e) => {
+                err.push_str(&format!("error: {e}\n"));
+                return 3;
+            }
+        }
+    } else {
+        None
     };
     let _ = tx.commit();
     *out = response::search_response_json(&response::SearchResponse {
@@ -422,6 +436,7 @@ fn cmd_search(
         offset,
         total,
         hits: &hits,
+        occurrences: census.as_ref(),
     }) + "\n";
     0
 }
@@ -566,11 +581,13 @@ fn dispatch(cmd: Command, out: &mut String, err: &mut String) -> i32 {
             symbol,
             limit,
             offset,
+            occurrences,
         } => cmd_search(
             &repo,
             &symbol,
             limit.as_deref(),
             offset.as_deref(),
+            occurrences,
             out,
             err,
         ),
@@ -901,30 +918,6 @@ fn cmd_semantic_status(name: &str, out: &mut String, err: &mut String) -> i32 {
     }
 }
 
-fn semantic_hit_json(hit: &index::SemanticHit) -> String {
-    format!(
-        "{{\"symbol_uri\":{},\"display_name\":{},\"path\":\"{}\",\"span\":{{\"start_line\":{},\"start_col\":{},\"end_line\":{},\"end_col\":{},\"byte_start\":{},\"byte_end\":{}}},\"roles\":{},\"precision\":\"{}\",\"verification\":\"{}\"}}",
-        match &hit.symbol_uri {
-            Some(u) => format!("\"{}\"", json::escape(u)),
-            None => "null".to_string(),
-        },
-        match &hit.display_name {
-            Some(n) => format!("\"{}\"", json::escape(n)),
-            None => "null".to_string(),
-        },
-        json::escape(&hit.path),
-        hit.start_line,
-        hit.start_col,
-        hit.end_line,
-        hit.end_col,
-        hit.byte_start,
-        hit.byte_end,
-        hit.roles,
-        hit.precision,
-        hit.verification
-    )
-}
-
 fn cmd_semantic_query(
     name: &str,
     query: &QueryArgs<'_>,
@@ -963,27 +956,7 @@ fn cmd_semantic_query(
     };
     match answer {
         Ok(o) => {
-            let defs: Vec<String> = o.definitions.iter().map(semantic_hit_json).collect();
-            let references: Vec<String> = o.references.iter().map(semantic_hit_json).collect();
-            let diags: Vec<String> = o
-                .server_diagnostics
-                .iter()
-                .map(|d| format!("\"{}\"", json::escape(d)))
-                .collect();
-            *out = format!(
-                "{{\"repo\":\"{}\",\"definitions\":[{}],\"references\":[{}],\"provider\":\"{}\",\"provider_version\":\"{}\",\"verification\":\"{}\",\"server_diagnostics\":[{}],\"fallback\":{}}}\n",
-                json::escape(name),
-                defs.join(","),
-                references.join(","),
-                json::escape(&o.provider_name),
-                json::escape(&o.provider_version),
-                o.verification,
-                diags.join(","),
-                match &o.fallback {
-                    Some(reason) => semantic::fallback_report(&o.provider_name, reason),
-                    None => "null".to_string(),
-                }
-            );
+            *out = response::semantic_query_json(name, &o);
             0
         }
         Err(e) => {

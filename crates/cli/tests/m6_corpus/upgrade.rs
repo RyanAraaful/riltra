@@ -289,15 +289,10 @@ fn reimport_revalidates_every_import_without_changing_snapshot() {
         before_source,
         "reimport must not rewrite indexed source identity"
     );
-    // Reimport is append-only under the accepted import-identity contract.
-    // Duplicate source identities stay explicitly ambiguous, never merged.
-    for cmd in ["callers", "callees", "trace", "impact"] {
-        let (code, out, err) = query(&h, &m[0], "alias", cmd);
-        assert_eq!(code, 3);
-        assert!(out.is_empty());
-        assert!(err.contains("ambiguous"), "{err}");
-        assert!(!err.contains("graph-proof-incompatible"));
-    }
+    // Identical bytes on the same snapshot revalidate the existing import
+    // instead of appending a duplicate (owner decision, F2 option a). The
+    // re-derived graph answers for alias as it does for the other cases.
+    restored(&h, &m[0], "alias");
     restored(&h, &m[1], "nested_anonymous");
     restored(&h, &m[2], "direct");
     assert_eq!(db(&h).query_row("SELECT COUNT(*) FROM code_edges WHERE edge_kind='CALLS' AND callee_uri LIKE '%/a().'",[],|r|r.get::<_,i64>(0)).unwrap(),0);
@@ -305,7 +300,7 @@ fn reimport_revalidates_every_import_without_changing_snapshot() {
         db(&h)
             .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        4
+        5
     );
 }
 

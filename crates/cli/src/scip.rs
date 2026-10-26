@@ -992,13 +992,27 @@ pub fn import_file(
         ],
     )
     .map_err(|e| e.to_string())?;
+    // Identical bytes already on this snapshot revalidate that import in place:
+    // the oldest one keeps its id and takes this attempt's facts, and any other
+    // duplicate goes. Every edge is re-derived below, so none can dangle.
+    let duplicates = store::semantic_import_duplicates(conn, snapshot_id, import_id)?;
+    let import_id = match duplicates.split_first() {
+        Some((&keep, older)) => {
+            for &other in older {
+                store::delete_semantic_import(conn, snapshot_id, other)?;
+            }
+            store::replace_semantic_import(conn, snapshot_id, keep, import_id)?;
+            keep
+        }
+        None => import_id,
+    };
     let graph_was_proven = store::graph_proof_current(conn, snapshot_id)?;
     let generation = store::semantic_generation(conn)?;
     store::meta_set(conn, "semantic_generation", &(generation + 1).to_string())?;
     // Task7 source-proof validation may reparse digest-matching source during
     // derivation. Certification shares this transaction with facts and edges;
     // any failure rolls back all of them, including the generation counter.
-    if graph_was_proven {
+    if graph_was_proven && duplicates.is_empty() {
         crate::edges::upsert_semantic_edges(conn, snapshot_id, import_id)?;
         store::mark_graph_proof(conn, snapshot_id)?;
     } else {

@@ -1,0 +1,71 @@
+name: release-candidate
+
+# Builds the release-candidate archive of each native target, checks it with a
+# clean-install smoke (the shipped binary only, no source tree) and keeps it
+# as a workflow artifact. It is started by hand or by a `v*-rc*` tag, and only
+# from master: the guard job refuses a manual start from any other branch and a
+# tag whose commit is not on master. It never creates a release, a tag, a
+# signature or an installer: the v0.1.0 release itself is a separate owner
+# decision (design gate D-M9-6).
+#
+# macOS runs on the x64 pool for the reason recorded in ci.yml; macOS ARM64 is
+# not covered by this workflow either.
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*-rc*'
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    name: master only
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Refuse any ref other than master
+        shell: bash
+        run: |
+          case "$GITHUB_EVENT_NAME" in
+            workflow_dispatch)
+              [ "$GITHUB_REF" = "refs/heads/master" ] && exit 0 ;;
+            push)
+              git merge-base --is-ancestor "$GITHUB_SHA" origin/master && exit 0 ;;
+          esac
+          echo "release-candidate runs only from master (event=$GITHUB_EVENT_NAME, ref=$GITHUB_REF)" >&2
+          exit 1
+
+  package:
+    needs: guard
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: windows-x64, runner: windows-latest, ext: zip }
+          - { name: linux-x64, runner: ubuntu-latest, ext: tar.gz }
+          - { name: macos-x64, runner: macos-15-intel, ext: tar.gz }
+    name: package (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Release build
+        run: cargo build --release --locked -p riltra
+      - name: Release documents match the locked dependency graph
+        run: cargo run --locked -q --example release_docs -- --check
+      - name: Package
+        shell: bash
+        run: bash release/package.sh "${{ matrix.name }}" "${{ matrix.ext }}"
+      - name: Clean-install smoke of the archive
+        shell: bash
+        run: bash release/smoke.sh dist/riltra-*-${{ matrix.name }}.${{ matrix.ext }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: riltra-${{ matrix.name }}
+          path: dist/riltra-*
+          if-no-files-found: error

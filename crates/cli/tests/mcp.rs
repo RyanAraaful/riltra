@@ -42,6 +42,9 @@ fn spawn_with<F: FnOnce(&mut Command)>(home: &Path, configure: F) -> Session {
     child
         .arg("mcp")
         .env("RILTRA_HOME", home)
+        // Hermetic by default: the operator's provider must not leak into a
+        // test that means to have none. The semantic tests set it explicitly.
+        .env_remove("RILTRA_LSP_SERVER")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -80,9 +83,15 @@ impl Session {
     /// Next stdout line, which must be a JSON-RPC 2.0 message (stdout is
     /// protocol-only by CP1 contract).
     fn recv(&self) -> serde_json::Value {
+        self.recv_with(TIMEOUT)
+    }
+
+    /// Next stdout line with an explicit timeout: a provider's own deadline
+    /// can be longer than the harness default.
+    fn recv_with(&self, timeout: Duration) -> serde_json::Value {
         let line = self
             .lines
-            .recv_timeout(TIMEOUT)
+            .recv_timeout(timeout)
             .expect("timed out waiting for a stdout line");
         let v: serde_json::Value = serde_json::from_str(&line)
             .unwrap_or_else(|e| panic!("non-JSON on MCP stdout: {line:?} ({e})"));
@@ -172,7 +181,7 @@ fn mcp_initialize_handshake_reports_identity() {
 }
 
 #[test]
-fn mcp_tools_list_advertises_exactly_eleven_readonly_tools() {
+fn mcp_tools_list_advertises_the_twelve_tools() {
     let h = home("tools");
     let mut s = ready(&h);
     s.send(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#);
@@ -191,6 +200,7 @@ fn mcp_tools_list_advertises_exactly_eleven_readonly_tools() {
             "riltra_code_callers",
             "riltra_code_impact",
             "riltra_code_search",
+            "riltra_code_semantic",
             "riltra_code_trace",
             "riltra_health",
             "riltra_knowledge_related",
@@ -199,7 +209,7 @@ fn mcp_tools_list_advertises_exactly_eleven_readonly_tools() {
             "riltra_repo_list",
             "riltra_repo_status"
         ],
-        "CP6 advertises exactly the eleven read-only tools"
+        "the server advertises exactly the twelve tools"
     );
     assert!(
         !names.iter().any(|n| n.contains("write")),
@@ -216,10 +226,30 @@ fn mcp_tools_list_advertises_exactly_eleven_readonly_tools() {
             t["description"].as_str().is_some_and(|d| !d.is_empty()),
             "{name}: description required"
         );
+        if name == "riltra_code_semantic" {
+            // The disclosure the tool promises: a path that does not exist is
+            // a containment refusal, not an empty answer.
+            assert!(
+                t["description"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("document path escapes repository"),
+                "{name}: the containment text must be disclosed"
+            );
+        }
         let ann = &t["annotations"];
-        assert_eq!(ann["readOnlyHint"], true, "{name}: readOnlyHint");
-        assert_eq!(ann["openWorldHint"], false, "{name}: openWorldHint");
-        assert_eq!(ann["idempotentHint"], true, "{name}: idempotentHint");
+        if name == "riltra_code_semantic" {
+            // The one tool that starts a language server: it reads the
+            // project and the provider may write its own cache, so it is not
+            // read-only, not idempotent, and it may reach the network.
+            assert_eq!(ann["readOnlyHint"], false, "{name}: readOnlyHint");
+            assert_eq!(ann["openWorldHint"], true, "{name}: openWorldHint");
+            assert_eq!(ann["idempotentHint"], false, "{name}: idempotentHint");
+        } else {
+            assert_eq!(ann["readOnlyHint"], true, "{name}: readOnlyHint");
+            assert_eq!(ann["openWorldHint"], false, "{name}: openWorldHint");
+            assert_eq!(ann["idempotentHint"], true, "{name}: idempotentHint");
+        }
         let schema = &t["inputSchema"];
         assert_eq!(schema["type"], "object", "{name}: schema type");
     }
@@ -256,6 +286,7 @@ fn mcp_tools_list_advertises_exactly_eleven_readonly_tools() {
         "riltra_code_callers",
         "riltra_code_impact",
         "riltra_code_search",
+        "riltra_code_semantic",
         "riltra_code_trace",
         "riltra_knowledge_related",
         "riltra_knowledge_search",
@@ -268,6 +299,30 @@ fn mcp_tools_list_advertises_exactly_eleven_readonly_tools() {
             "{name} must reject unsupported fields: {schema}"
         );
     }
+    // The semantic tool's operation is an enum, not a free-form string.
+    let semantic_schema = &find("riltra_code_semantic")["inputSchema"];
+    let operation = &semantic_schema["properties"]["operation"];
+    let advertised = operation
+        .get("enum")
+        .cloned()
+        .or_else(|| {
+            // The enum may be advertised through a definition.
+            let reference = operation["$ref"].as_str()?;
+            let name = reference.rsplit('/').next()?;
+            semantic_schema["$defs"][name]["enum"]
+                .as_array()
+                .map(|v| Value::Array(v.clone()))
+        })
+        .unwrap_or(Value::Null);
+    assert_eq!(
+        advertised,
+        json!(["definition", "references"]),
+        "the operation must be advertised as an enum: {semantic_schema}"
+    );
+    assert_eq!(
+        semantic_schema["required"],
+        json!(["repo", "path", "line", "col", "operation"])
+    );
     let status_schema = &find("riltra_repo_status")["inputSchema"];
     assert_eq!(status_schema["required"], json!(["repo"]));
     assert!(status_schema["properties"]["repo"].is_object());
@@ -279,7 +334,11 @@ fn mcp_tools_list_advertises_exactly_eleven_readonly_tools() {
         .map(|v| v.as_str().unwrap())
         .collect();
     assert!(required.contains(&"repo") && required.contains(&"query"));
-    for key in ["repo", "query", "limit", "offset"] {
+    assert!(
+        !required.contains(&"occurrences"),
+        "the opt-in property must stay optional: {search_schema}"
+    );
+    for key in ["repo", "query", "limit", "offset", "occurrences"] {
         assert!(
             search_schema["properties"][key].is_object(),
             "code_search missing property {key}: {search_schema}"
@@ -444,7 +503,7 @@ fn t1_health_composition_matches_cli_and_creates_nothing() {
     assert_eq!(d["doctor"]["scope"], json!("environment"));
     assert_eq!(d["doctor"]["pass"], json!(true));
     assert_eq!(d["versions"]["riltra"], json!(env!("CARGO_PKG_VERSION")));
-    assert_eq!(d["versions"]["code_index_schema"], json!(4));
+    assert_eq!(d["versions"]["code_index_schema"], json!(CODE_INDEX_SCHEMA));
     assert_eq!(d["versions"]["knowledge_schema"], json!(2));
     assert_eq!(d["limits"]["code_search"]["default_limit"], json!(50));
     assert_eq!(d["limits"]["code_search"]["max_limit"], json!(1000));
@@ -455,12 +514,39 @@ fn t1_health_composition_matches_cli_and_creates_nothing() {
     assert_eq!(d["limits"]["graph_traversal"]["default_limit"], json!(50));
     assert_eq!(d["limits"]["graph_traversal"]["max_limit"], json!(1000));
     assert_eq!(d["capabilities"]["transport"], json!("stdio"));
-    assert_eq!(d["capabilities"]["read_only"], json!(true));
-    assert_eq!(d["capabilities"]["mutations"], json!(false));
+    // The flags describe the POTENTIAL effects of the whole server: the
+    // semantic tool starts a language server, which may write its own cache
+    // and may reach the network. Riltra itself still mutates no store.
+    assert_eq!(d["capabilities"]["read_only"], json!(false));
+    assert_eq!(d["capabilities"]["mutations"], json!(true));
     assert_eq!(d["capabilities"]["resources"], json!(false));
     assert_eq!(d["capabilities"]["prompts"], json!(false));
-    assert_eq!(d["capabilities"]["network"], json!(false));
-    assert_eq!(d["capabilities"]["tools"].as_array().unwrap().len(), 11);
+    assert_eq!(d["capabilities"]["network"], json!(true));
+    let mut health_tools: Vec<&str> = d["capabilities"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t.as_str().unwrap())
+        .collect();
+    health_tools.sort_unstable();
+    assert_eq!(
+        health_tools,
+        [
+            "riltra_code_callees",
+            "riltra_code_callers",
+            "riltra_code_impact",
+            "riltra_code_search",
+            "riltra_code_semantic",
+            "riltra_code_trace",
+            "riltra_health",
+            "riltra_knowledge_related",
+            "riltra_knowledge_search",
+            "riltra_knowledge_show",
+            "riltra_repo_list",
+            "riltra_repo_status"
+        ],
+        "the health document must list the twelve tools"
+    );
     assert_eq!(d["repo_count"], json!(2));
     let (code, _) = s.finish();
     assert_eq!(code, 0);
@@ -584,6 +670,11 @@ fn g4_unknown_input_fields_are_rejected_not_ignored() {
             json!({"repo": "r", "id": "d1", "bogus": 1}),
         ),
         (11, "riltra_health", json!({"bogus": 1})),
+        (
+            12,
+            "riltra_code_semantic",
+            json!({"repo": "r", "path": "main.rs", "line": 1, "col": 1, "operation": "definition", "bogus": 1}),
+        ),
     ] {
         s.send(
             &json!({
@@ -877,11 +968,17 @@ fn mcp_stdin_eof_exits_without_hang_or_storage() {
 // --- CP3 helpers ------------------------------------------------------------
 
 fn run_cli(cfg: &Path, args: &[&str]) -> (i32, String, String) {
-    let output = Command::new(env!("CARGO_BIN_EXE_riltra"))
-        .args(args)
-        .env("RILTRA_HOME", cfg)
-        .output()
-        .expect("spawn riltra");
+    run_cli_with_env(cfg, args, &[])
+}
+
+/// The CLI with extra environment variables (the mock language server's).
+fn run_cli_with_env(cfg: &Path, args: &[&str], env: &[(&str, &str)]) -> (i32, String, String) {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_riltra"));
+    command.args(args).env("RILTRA_HOME", cfg);
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let output = command.output().expect("spawn riltra");
     (
         output.status.code().unwrap_or(-1),
         String::from_utf8_lossy(&output.stdout).into_owned(),
@@ -911,6 +1008,19 @@ fn indexed_repo(cfg: &Path, dir: &Path, name: &str) {
 }
 
 fn call_tool(s: &mut Session, id: i64, name: &str, args: &Value) -> Value {
+    call_tool_with_timeout(s, id, name, args, TIMEOUT)
+}
+
+/// A tool call with an explicit receive timeout: a provider's own deadline
+/// (and the adapter's retry schedule) can be longer than the harness
+/// default.
+fn call_tool_with_timeout(
+    s: &mut Session,
+    id: i64,
+    name: &str,
+    args: &Value,
+    timeout: Duration,
+) -> Value {
     s.send(
         &json!({
             "jsonrpc": "2.0",
@@ -920,7 +1030,7 @@ fn call_tool(s: &mut Session, id: i64, name: &str, args: &Value) -> Value {
         })
         .to_string(),
     );
-    let v = s.recv();
+    let v = s.recv_with(timeout);
     assert_eq!(v["id"], id, "response for {name}: {v}");
     assert!(
         v.get("error").is_none(),
@@ -973,6 +1083,9 @@ fn listing(dir: &Path) -> Vec<String> {
 fn db_path(cfg: &Path, name: &str) -> PathBuf {
     cfg.join("index").join(format!("{name}.db"))
 }
+
+/// The code-index schema version this binary supports (`PRAGMA user_version`).
+const CODE_INDEX_SCHEMA: u32 = 5;
 
 fn user_version(path: &Path) -> u32 {
     let conn = rusqlite::Connection::open(path).unwrap();
@@ -1035,6 +1148,68 @@ fn write_search_fixture(root: &Path) {
     .unwrap();
     std::fs::write(root.join("b.py"), "def beta():\n    pass\n").unwrap();
     std::fs::write(root.join("sp ace/c.py"), "def alpha_three():\n    pass\n").unwrap();
+}
+
+#[test]
+fn code_search_occurrences_is_the_cli_document_and_off_by_default() {
+    let h = home("occ-search");
+    let r = home("occ-search-repo");
+    std::fs::write(
+        r.join("options.h"),
+        "class Options {\n public:\n  double angle = 1.0;\n};\n",
+    )
+    .unwrap();
+    std::fs::write(
+        r.join("use.cc"),
+        "#include \"options.h\"\ndouble read(Options& o) {\n  double* p = &o.angle;\n  return o.angle;\n}\n",
+    )
+    .unwrap();
+    indexed_repo(&h, &r, "r");
+    let mut s = ready(&h);
+    let with = doc(&call_tool(
+        &mut s,
+        2,
+        "riltra_code_search",
+        &json!({"repo": "r", "query": "angle", "occurrences": true}),
+    ));
+    assert_eq!(
+        with,
+        cli_json(
+            &h,
+            &[
+                "search",
+                "--repo",
+                "r",
+                "--symbol",
+                "angle",
+                "--occurrences"
+            ]
+        ),
+        "MCP/CLI parity of the occurrence section"
+    );
+    assert_eq!(with["occurrences"]["total"], 2, "{with}");
+    assert_eq!(with["occurrences"]["binding"], "unbound");
+    // Absent and false are the plain document: no occurrence member at all.
+    let plain = doc(&call_tool(
+        &mut s,
+        3,
+        "riltra_code_search",
+        &json!({"repo": "r", "query": "angle"}),
+    ));
+    assert!(plain.get("occurrences").is_none(), "{plain}");
+    assert_eq!(
+        plain,
+        cli_json(&h, &["search", "--repo", "r", "--symbol", "angle"])
+    );
+    let off = doc(&call_tool(
+        &mut s,
+        4,
+        "riltra_code_search",
+        &json!({"repo": "r", "query": "angle", "occurrences": false}),
+    ));
+    assert_eq!(off, plain);
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
 }
 
 const V1_TABLES: &str = "CREATE TABLE snapshots (id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1446,7 +1621,11 @@ fn f1_legacy_v1_refused_without_migration_and_still_cli_migratable() {
     let args: Vec<&str> = command.split_whitespace().skip(1).collect();
     let (code, out, err) = run_cli(&h, &args);
     assert_eq!(code, 0, "{out} {err}");
-    assert_eq!(user_version(&db), 4, "CLI migration path intact");
+    assert_eq!(
+        user_version(&db),
+        CODE_INDEX_SCHEMA,
+        "CLI migration path intact"
+    );
     // And the MCP read path works again on the migrated database.
     let d = doc(&call_tool(
         &mut s,
@@ -1477,7 +1656,7 @@ fn f1_flipped_v2_v3_refused_unchanged() {
     let db = db_path(&h, "r");
     let schema_before = schema_dump(&db);
     let mut s = ready(&h);
-    for (id, version) in (2..).zip([2u32, 3]) {
+    for (id, version) in (2..).zip([2u32, 3, 4]) {
         set_user_version(&db, version);
         let res = call_tool(
             &mut s,
@@ -1523,7 +1702,7 @@ fn f1_future_schema_is_refused_as_schema_ahead() {
             d["message"]
                 .as_str()
                 .unwrap()
-                .contains("newer than supported v4"),
+                .contains(&format!("newer than supported v{CODE_INDEX_SCHEMA}")),
             "{tool}: {d}"
         );
     }
@@ -1649,10 +1828,11 @@ fn f1_concurrent_version_flip_is_classified_and_never_migrates() {
             while !stop.load(Ordering::SeqCst) {
                 conn.execute(&format!("PRAGMA user_version = {version}"), [])
                     .unwrap();
-                version = if version == 1 { 4 } else { 1 };
+                version = if version == 1 { CODE_INDEX_SCHEMA } else { 1 };
                 std::thread::sleep(Duration::from_millis(5));
             }
-            conn.execute("PRAGMA user_version = 4", []).unwrap();
+            conn.execute(&format!("PRAGMA user_version = {CODE_INDEX_SCHEMA}"), [])
+                .unwrap();
         })
     };
     let mut s = ready(&h);
@@ -1680,7 +1860,7 @@ fn f1_concurrent_version_flip_is_classified_and_never_migrates() {
     assert_eq!(code, 0);
     assert_eq!(
         user_version(&db),
-        4,
+        CODE_INDEX_SCHEMA,
         "the flipper's last write stands; MCP never migrated"
     );
 }
@@ -1723,7 +1903,7 @@ fn f1_concurrent_cli_rebuild_does_not_disturb_mcp_reads() {
     rebuild.join().unwrap();
     let (code, _) = s.finish();
     assert_eq!(code, 0);
-    assert_eq!(user_version(&db_path(&h, "r")), 4);
+    assert_eq!(user_version(&db_path(&h, "r")), CODE_INDEX_SCHEMA);
 }
 
 // --- CP4 helpers: SCIP-backed graph fixture ---------------------------------
@@ -2483,7 +2663,7 @@ fn t4_graph_unknown_repo_and_missing_index_are_classified() {
     );
     // The CLI-created empty v4 database has no snapshot: still no_index.
     let db = db_path(&h, "s");
-    assert_eq!(user_version(&db), 4);
+    assert_eq!(user_version(&db), CODE_INDEX_SCHEMA);
     let res = call_tool(
         &mut s,
         7,
@@ -2492,7 +2672,11 @@ fn t4_graph_unknown_repo_and_missing_index_are_classified() {
     );
     let d = doc(&res);
     assert_eq!(d["kind"], "no_index", "{d}");
-    assert_eq!(user_version(&db), 4, "classification must not migrate");
+    assert_eq!(
+        user_version(&db),
+        CODE_INDEX_SCHEMA,
+        "classification must not migrate"
+    );
 
     let (code, _) = s.finish();
     assert_eq!(code, 0);
@@ -2535,12 +2719,12 @@ fn t4_graph_schema_guard_outdated_ahead_and_corrupt() {
     let (code, _) = s.finish();
     assert_eq!(code, 0);
 
-    // v5: schema_ahead, untouched.
+    // One past the supported schema: schema_ahead, untouched.
     let h2 = home("cp4-t4a");
     let r2 = home("cp4-t4a-repo");
     syntax_graph_repo(&h2, &r2, "s");
     let db2 = db_path(&h2, "s");
-    set_user_version(&db2, 5);
+    set_user_version(&db2, CODE_INDEX_SCHEMA + 1);
     let mut s2 = ready(&h2);
     let res = call_tool(
         &mut s2,
@@ -2557,7 +2741,11 @@ fn t4_graph_schema_guard_outdated_ahead_and_corrupt() {
             .contains("newer than supported"),
         "{d}"
     );
-    assert_eq!(user_version(&db2), 5, "ahead stores are never touched");
+    assert_eq!(
+        user_version(&db2),
+        CODE_INDEX_SCHEMA + 1,
+        "ahead stores are never touched"
+    );
     let (code, _) = s2.finish();
     assert_eq!(code, 0);
 
@@ -2789,7 +2977,11 @@ fn t5_graph_legacy_v1_refused_without_migration_and_still_cli_migratable() {
     let args: Vec<&str> = command.split_whitespace().skip(1).collect();
     let (code, out, err) = run_cli(&h, &args);
     assert_eq!(code, 0, "{out} {err}");
-    assert_eq!(user_version(&db), 4, "CLI migration path intact");
+    assert_eq!(
+        user_version(&db),
+        CODE_INDEX_SCHEMA,
+        "CLI migration path intact"
+    );
     // The v1 fixture has no graph proof: the migrated store is still refused
     // by the graph guard (classified, never fabricated).
     let res = call_tool(
@@ -2885,7 +3077,7 @@ fn t5_graph_reads_leave_v4_untouched_and_survive_concurrent_rebuild() {
     rebuild.join().unwrap();
     let (code, _) = s.finish();
     assert_eq!(code, 0);
-    assert_eq!(user_version(&db), 4);
+    assert_eq!(user_version(&db), CODE_INDEX_SCHEMA);
 }
 
 // --- CP5: knowledge tools ---------------------------------------------------
@@ -4155,4 +4347,610 @@ fn t5_knowledge_hostile_or_corrupt_store_fails_closed() {
         "the link must survive the refusal"
     );
     assert_eq!(std::fs::read(&elsewhere).unwrap(), b"not a store");
+}
+
+// --- M9: the semantic tool ----------------------------------------------------
+
+/// The mock language server binary, built once per test process. `testutil`
+/// is `#[cfg(test)]`-only, so an integration test cannot call it and repeats
+/// the build/locate logic `tests/semantic.rs` already uses.
+fn mock_lsp_bin() -> PathBuf {
+    static BUILD: std::sync::Once = std::sync::Once::new();
+    BUILD.call_once(|| {
+        let status = std::process::Command::new("cargo")
+            .args(["build", "--offline", "--example", "mock_lsp"])
+            .status()
+            .expect("cargo build mock server");
+        assert!(status.success(), "mock server must build");
+    });
+    let mut p = std::env::current_exe().unwrap();
+    p.pop(); // test binary
+    p.pop(); // deps
+    p.push("examples");
+    p.push(format!("mock_lsp{}", std::env::consts::EXE_SUFFIX));
+    assert!(p.is_file(), "mock server missing: {}", p.display());
+    p
+}
+
+/// A repository the mock can answer about. Line 2 carries a non-ASCII
+/// character, so a UTF-16 column and a byte column differ: the UTF-16
+/// character 12 of that line is the byte offset 13. The file is long enough
+/// for the mock's reference locations (lines 4 and 7).
+fn semantic_repo(cfg: &Path, dir: &Path, name: &str) {
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(
+        dir.join("main.rs"),
+        "fn main() {\n    let caf\u{e9} = 1;\n    let a = 2;\n    let b = 3;\n    let c = 4;\n    let d = 5;\n    let e = 6;\n    let f = 7;\n    let g = 8;\n}\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("other.rs"), "fn other() {}\n").unwrap();
+    init_repo(cfg, dir, name);
+}
+
+/// An MCP session whose language server is the mock, in the given mode. The
+/// mock's own log goes to a scratch directory outside the repository and
+/// outside the Riltra home, so the no-write assertions can compare both.
+fn semantic_session(cfg: &Path, dir: &Path, scratch: &Path, mode: &str) -> Session {
+    std::fs::create_dir_all(scratch).unwrap();
+    let server = mock_lsp_bin();
+    ready_with(cfg, |cmd| {
+        cmd.env("RILTRA_LSP_SERVER", &server);
+        cmd.env("RILTRA_MOCK_LSP", mode);
+        // Forward slashes: the mock builds a `file://` URI from the root and
+        // puts it in JSON, where a backslash would be an invalid escape.
+        cmd.env("RILTRA_MOCK_ROOT", dir.to_string_lossy().replace('\\', "/"));
+        cmd.env("RILTRA_MOCK_LOG", scratch.join("mock.log"));
+    })
+}
+
+/// The semantic query's arguments.
+fn semantic_args(repo: &str, path: &str, operation: &str) -> Value {
+    json!({"repo": repo, "path": path, "line": 2, "col": 13, "operation": operation})
+}
+
+#[test]
+fn semantic_mcp_carries_the_cli_document() {
+    let cfg = home("semantic-parity");
+    let dir = cfg.join("repo");
+    let scratch = home("semantic-parity-scratch");
+    semantic_repo(&cfg, &dir, "demo");
+    let server = mock_lsp_bin();
+    let cli = {
+        let (code, out, err) = run_cli_with_env(
+            &cfg,
+            &[
+                "semantic",
+                "query",
+                "--repo",
+                "demo",
+                "--path",
+                "main.rs",
+                "--line",
+                "2",
+                "--col",
+                "13",
+                "--lsp-server",
+                server.to_str().unwrap(),
+            ],
+            &[
+                ("RILTRA_MOCK_LSP", "success"),
+                (
+                    "RILTRA_MOCK_ROOT",
+                    &dir.to_string_lossy().replace('\\', "/"),
+                ),
+            ],
+        );
+        assert_eq!(code, 0, "the CLI's semantic query failed: {err}");
+        serde_json::from_str::<Value>(&out).expect("the CLI's semantic query is not JSON")
+    };
+    let mut s = semantic_session(&cfg, &dir, &scratch, "success");
+    let result = call_tool(
+        &mut s,
+        1,
+        "riltra_code_semantic",
+        &semantic_args("demo", "main.rs", "definition"),
+    );
+    assert!(!is_error(&result), "the semantic answer is not an error");
+    let mcp = doc(&result);
+    assert_eq!(
+        mcp, cli,
+        "the MCP document must carry the CLI's document unchanged"
+    );
+    assert_eq!(mcp["provider"], json!("lsp-subprocess"));
+    assert_eq!(mcp["verification"], json!("Unverified"));
+}
+
+#[test]
+fn semantic_definition_and_references_stay_separate() {
+    let cfg = home("semantic-separate");
+    let dir = cfg.join("repo");
+    let scratch = home("semantic-separate-scratch");
+    semantic_repo(&cfg, &dir, "demo");
+    let mut s = semantic_session(&cfg, &dir, &scratch, "success");
+    let def = doc(&call_tool(
+        &mut s,
+        1,
+        "riltra_code_semantic",
+        &semantic_args("demo", "main.rs", "definition"),
+    ));
+    assert_eq!(def["definitions"].as_array().unwrap().len(), 1);
+    assert!(def["references"].as_array().unwrap().is_empty());
+    let refs = doc(&call_tool(
+        &mut s,
+        2,
+        "riltra_code_semantic",
+        &semantic_args("demo", "main.rs", "references"),
+    ));
+    assert_eq!(
+        refs["references"].as_array().unwrap().len(),
+        2,
+        "the references answer must carry the provider's locations: {refs}"
+    );
+    assert!(refs["definitions"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn semantic_reports_a_missing_provider() {
+    let cfg = home("semantic-provider");
+    let dir = cfg.join("repo");
+    semantic_repo(&cfg, &dir, "demo");
+
+    // No provider configured at all: a classified refusal, not an answer.
+    // (The harness removes `RILTRA_LSP_SERVER` from the child's environment.)
+    let mut s = ready(&cfg);
+    let result = call_tool(
+        &mut s,
+        1,
+        "riltra_code_semantic",
+        &semantic_args("demo", "main.rs", "definition"),
+    );
+    assert!(is_error(&result), "no provider is a refusal");
+    assert_eq!(doc(&result)["kind"], json!("provider_unavailable"));
+
+    // An empty value is a configuration error too.
+    let mut s = ready_with(&cfg, |cmd| {
+        cmd.env("RILTRA_LSP_SERVER", "");
+    });
+    let result = call_tool(
+        &mut s,
+        2,
+        "riltra_code_semantic",
+        &semantic_args("demo", "main.rs", "definition"),
+    );
+    assert!(is_error(&result), "an empty provider path is a refusal");
+    assert_eq!(doc(&result)["kind"], json!("provider_unavailable"));
+
+    // A relative path is a configuration error, never a PATH lookup.
+    let mut s = ready_with(&cfg, |cmd| {
+        cmd.env("RILTRA_LSP_SERVER", "clangd");
+    });
+    let result = call_tool(
+        &mut s,
+        3,
+        "riltra_code_semantic",
+        &semantic_args("demo", "main.rs", "definition"),
+    );
+    assert!(is_error(&result), "a relative provider path is a refusal");
+    assert_eq!(doc(&result)["kind"], json!("provider_unavailable"));
+
+    // A configured but missing executable: the contract document with the
+    // reason, exactly like the CLI.
+    let missing = home("semantic-missing-server").join("no-such-server");
+    assert!(!missing.exists(), "the path must not exist: {missing:?}");
+    let mut s = ready_with(&cfg, |cmd| {
+        cmd.env("RILTRA_LSP_SERVER", &missing);
+    });
+    let result = call_tool(
+        &mut s,
+        4,
+        "riltra_code_semantic",
+        &semantic_args("demo", "main.rs", "definition"),
+    );
+    assert!(
+        !is_error(&result),
+        "a missing server is a fallback, not an error"
+    );
+    let d = doc(&result);
+    assert!(d["definitions"].as_array().unwrap().is_empty());
+    let reason = d["fallback"]["reason"].as_str().unwrap_or_default();
+    assert!(
+        reason.contains("language server not found"),
+        "the fallback must say why: {reason}"
+    );
+}
+
+#[test]
+fn semantic_empty_answer_carries_the_provider_diagnostics() {
+    let cfg = home("semantic-empty");
+    let dir = cfg.join("repo");
+    let scratch = home("semantic-empty-scratch");
+    semantic_repo(&cfg, &dir, "demo");
+    let mut s = semantic_session(&cfg, &dir, &scratch, "empty");
+    // The adapter retries an empty answer on a bounded schedule (six
+    // attempts, two seconds apart), so this call needs more than the
+    // harness default.
+    let d = doc(&call_tool_with_timeout(
+        &mut s,
+        1,
+        "riltra_code_semantic",
+        &semantic_args("demo", "main.rs", "definition"),
+        Duration::from_secs(30),
+    ));
+    assert!(d["definitions"].as_array().unwrap().is_empty());
+    assert!(d["fallback"].is_null(), "an empty answer is not a failure");
+    let diagnostics = d["server_diagnostics"].as_array().unwrap();
+    assert!(
+        !diagnostics.is_empty(),
+        "the provider's diagnostics must reach the caller: {d}"
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.as_str().unwrap_or_default().contains("file not found")),
+        "the diagnostic must explain the empty answer: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn semantic_marks_a_changed_source_stale() {
+    let cfg = home("semantic-stale");
+    let dir = cfg.join("repo");
+    let scratch = home("semantic-stale-scratch");
+    semantic_repo(&cfg, &dir, "demo");
+    let mut s = semantic_session(&cfg, &dir, &scratch, "stale-input");
+    let d = doc(&call_tool(
+        &mut s,
+        1,
+        "riltra_code_semantic",
+        &semantic_args("demo", "main.rs", "definition"),
+    ));
+    assert_eq!(d["verification"], json!("Stale"));
+    assert_eq!(d["definitions"][0]["verification"], json!("Stale"));
+}
+
+#[test]
+fn riltra_writes_nothing_to_the_repository_or_the_stores() {
+    let cfg = home("semantic-readonly");
+    let dir = cfg.join("repo");
+    let scratch = home("semantic-readonly-scratch");
+    semantic_repo(&cfg, &dir, "demo");
+    // Index it, so there is a database and a graph to compare.
+    let (code, _out, err) = run_cli(&cfg, &["index", "--repo", "demo"]);
+    assert_eq!(code, 0, "index: {err}");
+    let db = db_path(&cfg, "demo");
+    let db_before = std::fs::read(&db).unwrap();
+    let edges_before = edge_count(&db);
+    let repo_before = listing(&dir);
+    let home_before = listing(&cfg);
+
+    let mut s = semantic_session(&cfg, &dir, &scratch, "success");
+    let d = doc(&call_tool(
+        &mut s,
+        1,
+        "riltra_code_semantic",
+        &semantic_args("demo", "main.rs", "definition"),
+    ));
+    assert_eq!(d["definitions"].as_array().unwrap().len(), 1);
+
+    assert_eq!(
+        std::fs::read(&db).unwrap(),
+        db_before,
+        "the index database must be byte-identical"
+    );
+    assert_eq!(
+        edge_count(&db),
+        edges_before,
+        "the graph edges must not change"
+    );
+    assert_eq!(
+        listing(&dir),
+        repo_before,
+        "Riltra must not write into the repository"
+    );
+    assert_eq!(
+        listing(&cfg),
+        home_before,
+        "Riltra must not write into its home"
+    );
+}
+
+#[test]
+fn semantic_survives_a_provider_crash_and_a_timeout() {
+    let cfg = home("semantic-crash");
+    let dir = cfg.join("repo");
+    let scratch = home("semantic-crash-scratch");
+    semantic_repo(&cfg, &dir, "demo");
+
+    // A server that dies before it can answer: the fallback carries why.
+    let mut s = semantic_session(&cfg, &dir, &scratch, "crash");
+    let d = doc(&call_tool(
+        &mut s,
+        1,
+        "riltra_code_semantic",
+        &semantic_args("demo", "main.rs", "definition"),
+    ));
+    assert!(d["definitions"].as_array().unwrap().is_empty());
+    let reason = d["fallback"]["reason"].as_str().unwrap_or_default();
+    assert!(!reason.is_empty(), "the fallback must say why: {d}");
+
+    // A server that explains itself and then fails: its diagnostics must
+    // ride inside the fallback reason.
+    let mut s = semantic_session(&cfg, &dir, &scratch, "fail-after-diagnostics");
+    let d = doc(&call_tool(
+        &mut s,
+        3,
+        "riltra_code_semantic",
+        &semantic_args("demo", "main.rs", "definition"),
+    ));
+    let reason = d["fallback"]["reason"].as_str().unwrap_or_default();
+    assert!(
+        reason.contains("pp_file_not_found"),
+        "the provider's diagnostics must ride with the failure: {reason}"
+    );
+
+    // A server that never answers: the adapter's own deadline ends the
+    // call, and the answer is a fallback, not a hang.
+    let mut s = semantic_session(&cfg, &dir, &scratch, "hang");
+    s.send(
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {"name": "riltra_code_semantic",
+                       "arguments": semantic_args("demo", "main.rs", "definition")}
+        })
+        .to_string(),
+    );
+    let v = s.recv_with(Duration::from_secs(90));
+    let d = doc(&v["result"]);
+    assert!(d["definitions"].as_array().unwrap().is_empty());
+    assert!(
+        !d["fallback"].is_null(),
+        "a provider that never answers must end in a fallback: {d}"
+    );
+}
+
+#[test]
+fn semantic_reports_a_provider_without_the_capability() {
+    let cfg = home("semantic-norefs");
+    let dir = cfg.join("repo");
+    let scratch = home("semantic-norefs-scratch");
+    semantic_repo(&cfg, &dir, "demo");
+    let mut s = semantic_session(&cfg, &dir, &scratch, "no-refs");
+    let d = doc(&call_tool(
+        &mut s,
+        1,
+        "riltra_code_semantic",
+        &semantic_args("demo", "main.rs", "references"),
+    ));
+    let reason = d["fallback"]["reason"].as_str().unwrap_or_default();
+    assert!(
+        reason.contains("referencesProvider"),
+        "an unsupported capability must be reported, not guessed: {reason}"
+    );
+}
+
+#[test]
+fn semantic_keeps_mcp_stdout_pure_and_the_answer_bounded() {
+    let cfg = home("semantic-bounded");
+    let dir = cfg.join("repo");
+    let scratch = home("semantic-bounded-scratch");
+    semantic_repo(&cfg, &dir, "demo");
+    // An answer larger than the adapter's message cap is refused, not
+    // relayed. (Every stdout line the harness reads is asserted to be
+    // JSON-RPC by `recv`, so stdout purity is covered by construction.)
+    let mut s = semantic_session(&cfg, &dir, &scratch, "huge-answer");
+    let d = doc(&call_tool(
+        &mut s,
+        1,
+        "riltra_code_semantic",
+        &semantic_args("demo", "main.rs", "definition"),
+    ));
+    assert!(d["definitions"].as_array().unwrap().is_empty());
+    let reason = d["fallback"]["reason"].as_str().unwrap_or_default();
+    assert!(
+        reason.contains("max_msg_bytes"),
+        "an oversized answer must be refused by the adapter's cap: {reason}"
+    );
+}
+
+#[test]
+fn semantic_refuses_an_escaping_or_missing_path() {
+    let cfg = home("semantic-paths");
+    let dir = cfg.join("repo");
+    let scratch = home("semantic-paths-scratch");
+    semantic_repo(&cfg, &dir, "demo");
+    let outside = home("semantic-paths-outside");
+    std::fs::write(outside.join("secret.rs"), "fn secret() {}\n").unwrap();
+    let link = dir.join("escape.rs");
+    let made = try_file_symlink(&outside.join("secret.rs"), &link);
+
+    let mut s = semantic_session(&cfg, &dir, &scratch, "success");
+    for (bad, expected) in [
+        ("../escape.rs", "non-canonical document path"),
+        ("/etc/passwd", "not relative/portable"),
+        ("C:/evil.rs", "absolute document path"),
+        ("missing.rs", "escapes repository"),
+        ("a/../../evil.rs", "non-canonical document path"),
+    ] {
+        let result = call_tool(
+            &mut s,
+            1,
+            "riltra_code_semantic",
+            &semantic_args("demo", bad, "definition"),
+        );
+        assert!(is_error(&result), "{bad} must be refused");
+        let refused = doc(&result);
+        assert_eq!(refused["kind"], json!("invalid_input"), "{bad}");
+        let message = refused["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains(expected),
+            "{bad} must be refused with its own text ({expected}): {message}"
+        );
+    }
+    if made {
+        let result = call_tool(
+            &mut s,
+            2,
+            "riltra_code_semantic",
+            &semantic_args("demo", "escape.rs", "definition"),
+        );
+        assert!(
+            is_error(&result),
+            "a symlink out of the repo must be refused"
+        );
+        assert_eq!(doc(&result)["kind"], json!("invalid_input"));
+    } else {
+        eprintln!("skipped the symlink case: the OS refused to create the link");
+    }
+}
+
+#[test]
+fn semantic_classifies_its_own_refusals() {
+    let cfg = home("semantic-refusals");
+    let dir = cfg.join("repo");
+    semantic_repo(&cfg, &dir, "demo");
+    let mut s = ready_with(&cfg, |cmd| {
+        cmd.env("RILTRA_LSP_SERVER", mock_lsp_bin());
+    });
+
+    // Unknown repository.
+    let result = call_tool(
+        &mut s,
+        1,
+        "riltra_code_semantic",
+        &semantic_args("nope", "main.rs", "definition"),
+    );
+    assert_eq!(doc(&result)["kind"], json!("not_registered"));
+
+    // The check order: a bad path is reported before a missing provider.
+    let mut s = ready(&cfg);
+    let result = call_tool(
+        &mut s,
+        2,
+        "riltra_code_semantic",
+        &semantic_args("demo", "../escape.rs", "definition"),
+    );
+    assert_eq!(doc(&result)["kind"], json!("invalid_input"));
+
+    // Schema-level refusals never reach the tool.
+    let result = call_tool(
+        &mut s,
+        3,
+        "riltra_code_semantic",
+        &json!({"repo": "demo", "path": "main.rs", "line": "x", "col": 1, "operation": "definition"}),
+    );
+    assert!(is_error(&result), "a non-numeric line is refused");
+    assert!(
+        result["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("failed to deserialize parameters"),
+        "a schema refusal is not a domain refusal: {result}"
+    );
+    let result = call_tool(
+        &mut s,
+        4,
+        "riltra_code_semantic",
+        &json!({"repo": "demo", "path": "main.rs", "line": 1, "col": 1, "operation": "guess"}),
+    );
+    assert!(is_error(&result), "an unknown operation is refused");
+    assert!(
+        result["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("failed to deserialize parameters"),
+        "an unknown operation is refused by the schema: {result}"
+    );
+
+    // A corrupt registry is a store error, never a fabricated answer.
+    let cfg2 = home("semantic-refusals-corrupt");
+    init_repo(&cfg2, &home("semantic-refusals-corrupt-repo"), "r");
+    std::fs::write(cfg2.join("registry.json"), "{not json").unwrap();
+    let mut s2 = ready(&cfg2);
+    let result = call_tool(
+        &mut s2,
+        5,
+        "riltra_code_semantic",
+        &semantic_args("r", "main.rs", "definition"),
+    );
+    assert_eq!(doc(&result)["kind"], json!("store_error"));
+}
+
+#[test]
+fn semantic_column_unit_is_utf16() {
+    let cfg = home("semantic-utf16");
+    let dir = cfg.join("repo");
+    let scratch = home("semantic-utf16-scratch");
+    semantic_repo(&cfg, &dir, "demo");
+    let mut s = semantic_session(&cfg, &dir, &scratch, "echo-position");
+    let d = doc(&call_tool(
+        &mut s,
+        1,
+        "riltra_code_semantic",
+        &semantic_args("demo", "main.rs", "definition"),
+    ));
+    let hit = &d["definitions"][0];
+    // The client asked for the UTF-16 character 12 of line 2; the server
+    // echoed it back, so the answer's column is that character — and the
+    // byte offset of the same position is 13, because the line carries a
+    // two-byte character before it.
+    assert_eq!(hit["span"]["start_col"], json!(12));
+    assert_eq!(hit["span"]["byte_start"], json!(25));
+}
+
+#[test]
+fn semantic_survives_two_calls_in_flight() {
+    let cfg = home("semantic-concurrent");
+    let dir = cfg.join("repo");
+    let scratch = home("semantic-concurrent-scratch");
+    semantic_repo(&cfg, &dir, "demo");
+    let mut s = semantic_session(&cfg, &dir, &scratch, "barrier");
+    for id in [1, 2] {
+        s.send(
+            &json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "tools/call",
+                "params": {"name": "riltra_code_semantic",
+                           "arguments": semantic_args("demo", "main.rs", "definition")}
+            })
+            .to_string(),
+        );
+    }
+    let mut answers = Vec::new();
+    for _ in 0..2 {
+        let v = s.recv_with(Duration::from_secs(60));
+        answers.push(doc(&v["result"]));
+    }
+    for d in &answers {
+        assert_eq!(
+            d["definitions"].as_array().unwrap().len(),
+            1,
+            "both answers must arrive: {d}"
+        );
+        assert!(d["fallback"].is_null(), "no call may fall back: {d}");
+    }
+    // The barrier only lets both calls through when they really overlap;
+    // a timeout would leave a marker behind.
+    let markers = dir.join("barrier");
+    let left: Vec<String> = std::fs::read_dir(&markers)
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        !left.iter().any(|m| m.starts_with("timeout-")),
+        "the barrier timed out, so the calls did not overlap: {left:?}"
+    );
+}
+
+/// The number of rows in the code-edge table.
+fn edge_count(db: &Path) -> i64 {
+    let conn = rusqlite::Connection::open(db).unwrap();
+    conn.query_row("SELECT COUNT(*) FROM code_edges", [], |r| r.get(0))
+        .unwrap()
 }

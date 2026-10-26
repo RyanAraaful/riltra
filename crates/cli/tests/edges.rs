@@ -379,6 +379,241 @@ fn cli_same_name_no_false_link() {
 }
 
 #[test]
+fn cli_cpp_template_call_names_the_function_not_the_type_argument() {
+    let h = home("cpp-template");
+    let dir = repo_with(
+        &h,
+        "sem",
+        &[(
+            "patch.cpp",
+            "void run_patch(Options options) {\n  auto c = std::make_shared<mvs::PatchMatchController>(options);\n  make<mvs::PatchMatchController>(options);\n}\n",
+        )],
+    );
+    do_index(&h);
+    let v = query_json(&h, "callees", "patch.cpp", &[]);
+    let src = std::fs::read(dir.join("patch.cpp")).unwrap();
+    let text = |span: &serde_json::Value| {
+        let a = span[0].as_u64().unwrap() as usize;
+        let b = span[1].as_u64().unwrap() as usize;
+        String::from_utf8(src[a..b].to_vec()).unwrap()
+    };
+    let edges = v["edges"].as_array().expect("edges");
+    // Two calls, plus the labelled candidate for the factory's argument.
+    assert_eq!(edges.len(), 3, "{v}");
+    // Only the factory call yields a candidate; the generic `make<T>` yields none.
+    let candidates = edges
+        .iter()
+        .filter(|e| e["unresolved"] == "factory-template-argument")
+        .count();
+    assert_eq!(candidates, 1, "{v}");
+    // (callee as written, called name, reason): a qualified call has a
+    // receiver (`dynamic`), an unqualified one has none (`no-overlap`).
+    for (callee, terminal, reason) in [
+        (
+            "std::make_shared<mvs::PatchMatchController>",
+            "make_shared",
+            "dynamic",
+        ),
+        ("make<mvs::PatchMatchController>", "make", "no-overlap"),
+    ] {
+        let edge = edges
+            .iter()
+            .find(|e| text(&e["evidence"]["callee_span"]) == callee)
+            .unwrap_or_else(|| panic!("edge for {callee}: {v}"));
+        assert_eq!(edge["callee_name"], terminal, "{edge}");
+        assert_eq!(text(&edge["evidence"]["terminal_span"]), terminal, "{edge}");
+        // Syntax only: a candidate, never a proven call.
+        assert_eq!(edge["kind"], "POTENTIAL_CALL", "{edge}");
+        assert_eq!(edge["precision"], "Heuristic", "{edge}");
+        assert_eq!(edge["unresolved"], reason, "{edge}");
+    }
+    assert!(!v.to_string().contains("\"CALLS\""), "{v}");
+}
+
+#[test]
+fn cli_factory_template_argument_is_a_labelled_candidate() {
+    let h = home("factory-candidate");
+    let dir = repo_with(
+        &h,
+        "sem",
+        &[(
+            "patch.cpp",
+            "void caller(int options) {\n  auto cuda = std::make_unique<PatchMatchCuda>(options);\n}\nstruct PatchMatchCuda {};\n",
+        )],
+    );
+    do_index(&h);
+    let v = query_json(&h, "callees", "patch.cpp", &[]);
+    let src = std::fs::read(dir.join("patch.cpp")).unwrap();
+    let text = |span: &serde_json::Value| {
+        let a = span[0].as_u64().unwrap() as usize;
+        let b = span[1].as_u64().unwrap() as usize;
+        String::from_utf8(src[a..b].to_vec()).unwrap()
+    };
+    let edges = v["edges"].as_array().expect("edges");
+    assert_eq!(edges.len(), 2, "{v}");
+    assert!(edges.iter().all(|e| e["kind"] != "CALLS"), "{v}");
+    // The called function keeps the name it is called by.
+    let call = edges
+        .iter()
+        .find(|e| e["callee_name"] == "make_unique")
+        .unwrap_or_else(|| panic!("{v}"));
+    assert_eq!(
+        text(&call["evidence"]["callee_span"]),
+        "std::make_unique<PatchMatchCuda>",
+        "{call}"
+    );
+    assert_eq!(
+        text(&call["evidence"]["terminal_span"]),
+        "make_unique",
+        "{call}"
+    );
+    assert_eq!(call["kind"], "POTENTIAL_CALL", "{call}");
+    // The constructed type is a labelled candidate at its own span.
+    let made = edges
+        .iter()
+        .find(|e| e["callee_name"] == "PatchMatchCuda")
+        .unwrap_or_else(|| panic!("{v}"));
+    assert_eq!(made["kind"], "POTENTIAL_CALL", "{made}");
+    assert_eq!(made["precision"], "Heuristic", "{made}");
+    assert_eq!(made["verification"], "Unverified", "{made}");
+    assert_eq!(made["unresolved"], "factory-template-argument", "{made}");
+    assert!(made["callee"].is_null(), "{made}");
+    for field in ["span", "callee_span", "terminal_span"] {
+        assert_eq!(
+            text(&made["evidence"][field]),
+            "PatchMatchCuda",
+            "{field}: {made}"
+        );
+    }
+}
+
+#[test]
+fn cli_factory_template_argument_stays_a_candidate_under_scip() {
+    const CALLER: &str = "scip-test test test-pkg 1.0.0 patch.cpp/caller().";
+    const CUDA: &str = "scip-test test test-pkg 1.0.0 patch.cpp/PatchMatchCuda#";
+    let h = home("factory-scip");
+    let dir = repo_with(
+        &h,
+        "sem",
+        &[(
+            "patch.cpp",
+            "void caller(int options) {\n  auto cuda = std::make_unique<PatchMatchCuda>(options);\n}\nstruct PatchMatchCuda {};\n",
+        )],
+    );
+    do_index(&h);
+    // SCIP names the type where it is used (line 1, columns 31 to 45) and
+    // where it is defined (line 3).
+    let doc = test_document(
+        "patch.cpp",
+        &[
+            occurrence(CALLER, 0x1, 0, 5, 11),
+            occurrence(CUDA, 0x0, 1, 31, 45),
+            occurrence(CUDA, 0x1, 3, 7, 21),
+        ],
+        &[(CALLER, "caller"), (CUDA, "PatchMatchCuda")],
+    );
+    import_documents(&h, &dir, "scip-test", &[doc]);
+    let v = query_json(&h, "callees", "patch.cpp", &[]);
+    let edges = v["edges"].as_array().expect("edges");
+    // A type reference is not a call: no CALLS edge, and the candidate keeps
+    // its label.
+    assert!(edges.iter().all(|e| e["kind"] != "CALLS"), "{v}");
+    let made = edges
+        .iter()
+        .find(|e| e["callee_name"] == "PatchMatchCuda")
+        .unwrap_or_else(|| panic!("{v}"));
+    assert_eq!(made["kind"], "POTENTIAL_CALL", "{made}");
+    assert_eq!(made["unresolved"], "factory-template-argument", "{made}");
+}
+
+#[test]
+fn cli_scip_template_call_proves_the_function_not_the_type_argument() {
+    const CALLER: &str = "scip-test test test-pkg 1.0.0 patch.cpp/caller().";
+    const MAKE: &str = "scip-test test test-pkg 1.0.0 patch.cpp/make_it().";
+    const THING: &str = "scip-test test test-pkg 1.0.0 patch.cpp/Thing#";
+    let h = home("scip-template");
+    let dir = repo_with(
+        &h,
+        "sem",
+        &[(
+            "patch.cpp",
+            "void caller(int options) {\n  ns::make_it<Thing>(options);\n}\nvoid make_it(int options) {}\nstruct Thing {};\n",
+        )],
+    );
+    do_index(&h);
+    // SCIP references two names inside the one call: the function and the
+    // template type argument.
+    let doc = test_document(
+        "patch.cpp",
+        &[
+            occurrence(CALLER, 0x1, 0, 5, 11),
+            occurrence(MAKE, 0x0, 1, 6, 13),
+            occurrence(THING, 0x0, 1, 14, 19),
+            occurrence(MAKE, 0x1, 3, 5, 12),
+            occurrence(THING, 0x1, 4, 7, 12),
+        ],
+        &[(CALLER, "caller"), (MAKE, "make_it"), (THING, "Thing")],
+    );
+    import_documents(&h, &dir, "scip-test", &[doc]);
+    let v = query_json(&h, "callees", "patch.cpp", &[]);
+    let edges = v["edges"].as_array().expect("edges");
+    assert_eq!(edges.len(), 2, "{v}");
+    // The one proven call goes to the function, on SCIP evidence at the
+    // terminal.
+    let calls: Vec<_> = edges.iter().filter(|e| e["kind"] == "CALLS").collect();
+    assert_eq!(calls.len(), 1, "{v}");
+    let call = calls[0];
+    assert_eq!(call["precision"], "Exact");
+    assert_eq!(call["provider"], "scip-import");
+    assert_eq!(call["callee"]["symbol_uri"], MAKE);
+    assert_eq!(call["callee_name"], "make_it");
+    let src = std::fs::read(dir.join("patch.cpp")).unwrap();
+    for (field, expected) in [
+        ("span", "ns::make_it<Thing>(options)"),
+        ("callee_span", "ns::make_it<Thing>"),
+        ("terminal_span", "make_it"),
+        ("reference_span", "make_it"),
+    ] {
+        let span = call["evidence"][field].as_array().expect(field);
+        let a = span[0].as_u64().unwrap() as usize;
+        let b = span[1].as_u64().unwrap() as usize;
+        assert_eq!(&src[a..b], expected.as_bytes(), "{field}");
+    }
+    // The type argument stays an unresolved candidate: no target, no proof.
+    let other: Vec<_> = edges.iter().filter(|e| e["kind"] != "CALLS").collect();
+    assert_eq!(other.len(), 1, "{v}");
+    assert_eq!(other[0]["kind"], "POTENTIAL_CALL");
+    assert_eq!(other[0]["precision"], "Heuristic");
+    assert_eq!(other[0]["unresolved"], "target-mismatch");
+    assert!(other[0]["callee"].is_null(), "{v}");
+    // Callers of the type (its definition is on line 5): no proven call.
+    let (code, out, err) = run(
+        &h,
+        &[
+            "callers",
+            "--repo",
+            "sem",
+            "--path",
+            "patch.cpp",
+            "--line",
+            "5",
+            "--col",
+            "8",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    let t: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+    assert!(
+        t["edges"]
+            .as_array()
+            .expect("edges")
+            .iter()
+            .all(|e| e["kind"] != "CALLS"),
+        "{t}"
+    );
+}
+
+#[test]
 fn cli_stale_edit_reports_stale_not_current() {
     let h = home("stale");
     scip_imported(&h);
@@ -642,6 +877,133 @@ fn task4_syntax_fallback_rejects_changed_source() {
     );
     assert_eq!(code, 3, "{out} {err}");
     assert!(err.contains("source-changed"), "{err}");
+}
+
+#[test]
+fn cuda_destination_reports_its_unsupported_reason_not_source_changed() {
+    let h = home("cuda-destination");
+    let dir = edge_repo(&h);
+    std::fs::write(dir.join("kernel.cu"), "__global__ void kernel() {}\n").unwrap();
+    do_index(&h);
+    let (code, out, err) = run(
+        &h,
+        &[
+            "trace",
+            "--repo",
+            "sem",
+            "--path",
+            "lib.py",
+            "--line",
+            "1",
+            "--col",
+            "5",
+            "--to",
+            "kernel.cu:1:17",
+        ],
+    );
+    assert_eq!(code, 3, "{out} {err}");
+    assert!(err.contains("cuda-experimental"), "{err}");
+    assert!(!err.contains("source-changed"), "{err}");
+}
+
+#[test]
+fn changed_destination_still_reports_source_changed() {
+    let h = home("changed-destination");
+    let dir = edge_repo(&h);
+    do_index(&h);
+    std::fs::write(
+        dir.join("lib.py"),
+        "# changed offsets\ndef other():\n    pass\n",
+    )
+    .unwrap();
+    let (code, out, err) = run(
+        &h,
+        &[
+            "trace",
+            "--repo",
+            "sem",
+            "--path",
+            "main.py",
+            "--line",
+            "3",
+            "--col",
+            "5",
+            "--to",
+            "lib.py:2:5",
+        ],
+    );
+    assert_eq!(code, 3, "{out} {err}");
+    assert!(err.contains("source-changed"), "{err}");
+}
+
+#[test]
+fn unsupported_extension_destination_reports_its_reason_not_source_changed() {
+    let h = home("unsupported-destination");
+    let dir = edge_repo(&h);
+    std::fs::write(dir.join("notes.md"), "# notes\n").unwrap();
+    do_index(&h);
+    let (code, out, err) = run(
+        &h,
+        &[
+            "trace",
+            "--repo",
+            "sem",
+            "--path",
+            "lib.py",
+            "--line",
+            "1",
+            "--col",
+            "5",
+            "--to",
+            "notes.md:1:1",
+        ],
+    );
+    assert_eq!(code, 3, "{out} {err}");
+    assert!(err.contains("unsupported-extension"), "{err}");
+    assert!(!err.contains("source-changed"), "{err}");
+}
+
+#[test]
+fn unsupported_extension_anchor_reports_its_reason_not_source_changed() {
+    let h = home("unsupported-anchor");
+    let dir = edge_repo(&h);
+    std::fs::write(dir.join("notes.md"), "# notes\n").unwrap();
+    do_index(&h);
+    let (code, out, err) = run(
+        &h,
+        &[
+            "callers", "--repo", "sem", "--path", "notes.md", "--line", "1", "--col", "1",
+        ],
+    );
+    assert_eq!(code, 3, "{out} {err}");
+    assert!(err.contains("unsupported-extension"), "{err}");
+    assert!(!err.contains("source-changed"), "{err}");
+}
+
+#[test]
+fn missing_unsupported_destination_fails_path_validation_before_the_refusal() {
+    let h = home("missing-destination");
+    edge_repo(&h);
+    do_index(&h);
+    let (code, out, err) = run(
+        &h,
+        &[
+            "trace",
+            "--repo",
+            "sem",
+            "--path",
+            "lib.py",
+            "--line",
+            "1",
+            "--col",
+            "5",
+            "--to",
+            "absent.md:1:1",
+        ],
+    );
+    assert_eq!(code, 3, "{out} {err}");
+    assert!(err.contains("escapes repository"), "{err}");
+    assert!(!err.contains("unsupported-extension"), "{err}");
 }
 
 #[test]
@@ -1937,4 +2299,263 @@ fn task6_impact_full_json_goldens() {
         let expected: serde_json::Value = serde_json::from_str(golden).unwrap();
         assert_eq!(actual, expected);
     }
+}
+
+// --- M9 CP3: E8 - C/C++ include resolution in the candidate scope ---------
+//
+// A C/C++ include is written against an include root the repository does not
+// record, so its literal rarely equals the target's repository-relative path.
+// The conservative rule: a UNIQUE ROOTED path suffix may widen the caller
+// candidate scope, and it never proves an identity. Ambiguous, missing and
+// bare-filename includes stay unresolved.
+
+const E8_HEADER: &str = "int Thing(int x) { return x + 1; }\n";
+const E8_CALLER: &str = "#include \"proj/thing.h\"\n\nint go() { return Thing(1); }\n";
+
+fn e8_callers(h: &Path, path: &str) -> serde_json::Value {
+    let (code, out, err) = run(
+        h,
+        &[
+            "callers", "--repo", "sem", "--path", path, "--line", "1", "--col", "5",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    serde_json::from_str(&out).expect("valid JSON")
+}
+
+fn e8_edges(v: &serde_json::Value) -> &Vec<serde_json::Value> {
+    v["edges"].as_array().expect("edges array")
+}
+
+#[test]
+fn e8_rooted_include_adds_candidate_caller() {
+    let h = home("e8root");
+    repo_with(
+        &h,
+        "sem",
+        &[
+            ("src/proj/thing.h", E8_HEADER),
+            ("src/proj/main.cc", E8_CALLER),
+        ],
+    );
+    do_index(&h);
+    let v = e8_callers(&h, "src/proj/thing.h");
+    let edges = e8_edges(&v);
+    assert_eq!(edges.len(), 1, "{v}");
+    let e = &edges[0];
+    assert_eq!(e["kind"], "POTENTIAL_CALL");
+    assert_eq!(e["callee_name"], "Thing");
+    assert_eq!(e["caller_path"], "src/proj/main.cc");
+    assert_eq!(e["precision"], "Heuristic");
+    assert!(
+        e["unresolved"].is_string(),
+        "a candidate stays unresolved: {v}"
+    );
+    assert!(
+        e["callee"].is_null(),
+        "a candidate never proves identity: {v}"
+    );
+    assert!(e["evidence"]["path"].is_string(), "source provenance: {v}");
+}
+
+#[test]
+fn e8_candidate_scope_keeps_the_anchor_name_filter() {
+    let h = home("e8name");
+    repo_with(
+        &h,
+        "sem",
+        &[
+            ("src/proj/thing.h", E8_HEADER),
+            (
+                "src/proj/main.cc",
+                "#include \"proj/thing.h\"\n\nint go() { return Thing(1) + Other(1); }\n",
+            ),
+        ],
+    );
+    do_index(&h);
+    let v = e8_callers(&h, "src/proj/thing.h");
+    let edges = e8_edges(&v);
+    // The importing file IS in the candidate scope, but only the rows whose
+    // callee name is the anchor's name are selected.
+    assert_eq!(edges.len(), 1, "{v}");
+    assert_eq!(edges[0]["callee_name"], "Thing");
+    assert_eq!(edges[0]["caller_path"], "src/proj/main.cc");
+    assert!(
+        !edges.iter().any(|e| e["callee_name"] == "Other"),
+        "the anchor's name must filter the candidate scope: {v}"
+    );
+}
+
+#[test]
+fn e8_ambiguous_suffix_stays_unresolved() {
+    let h = home("e8ambig");
+    repo_with(
+        &h,
+        "sem",
+        &[
+            ("src/proj/thing.h", E8_HEADER),
+            ("src/proj/main.cc", E8_CALLER),
+            // A second file with the same suffix: the literal names two.
+            ("other/proj/thing.h", E8_HEADER),
+        ],
+    );
+    do_index(&h);
+    let v = e8_callers(&h, "src/proj/thing.h");
+    assert_eq!(e8_edges(&v).len(), 0, "ambiguity is never resolved: {v}");
+}
+
+#[test]
+fn e8_misleading_bare_filename_is_not_a_candidate() {
+    let h = home("e8bare");
+    repo_with(
+        &h,
+        "sem",
+        &[
+            ("src/util/thing.h", E8_HEADER),
+            // A bare literal is the one form a system header can shadow.
+            (
+                "src/thirdparty/lbp.c",
+                "#include \"thing.h\"\n\nint go() { return Thing(1); }\n",
+            ),
+        ],
+    );
+    do_index(&h);
+    let v = e8_callers(&h, "src/util/thing.h");
+    assert_eq!(
+        e8_edges(&v).len(),
+        0,
+        "a bare filename must not claim the repository file: {v}"
+    );
+}
+
+#[test]
+fn e8_missing_header_yields_no_candidate() {
+    let h = home("e8missing");
+    repo_with(
+        &h,
+        "sem",
+        &[
+            ("src/proj/thing.h", E8_HEADER),
+            (
+                "src/proj/main.cc",
+                "#include \"proj/absent.h\"\n\nint go() { return Thing(1); }\n",
+            ),
+        ],
+    );
+    do_index(&h);
+    let v = e8_callers(&h, "src/proj/thing.h");
+    assert_eq!(
+        e8_edges(&v).len(),
+        0,
+        "an include that names no indexed file links nothing: {v}"
+    );
+}
+
+#[test]
+fn e8_differing_include_roots_are_not_merged() {
+    let h = home("e8roots");
+    repo_with(
+        &h,
+        "sem",
+        &[
+            ("one/proj/thing.h", E8_HEADER),
+            ("two/proj/thing.h", E8_HEADER),
+            (
+                "src/proj/main.cc",
+                "#include \"two/proj/thing.h\"\n\nint go() { return Thing(1); }\n",
+            ),
+        ],
+    );
+    do_index(&h);
+    // The literal names one file, so that file's scope gains the caller.
+    let named = e8_callers(&h, "two/proj/thing.h");
+    assert_eq!(e8_edges(&named).len(), 1, "{named}");
+    assert_eq!(e8_edges(&named)[0]["caller_path"], "src/proj/main.cc");
+    // The other file under the same suffix is a different header.
+    let other = e8_callers(&h, "one/proj/thing.h");
+    assert_eq!(
+        e8_edges(&other).len(),
+        0,
+        "two roots must not merge into one identity: {other}"
+    );
+}
+
+#[test]
+fn e8_windows_and_unix_include_paths_resolve_alike() {
+    let h = home("e8win");
+    repo_with(
+        &h,
+        "sem",
+        &[
+            ("src/proj/thing.h", E8_HEADER),
+            (
+                "src/proj/main.cc",
+                "#include \"proj\\thing.h\"\n\nint go() { return Thing(1); }\n",
+            ),
+        ],
+    );
+    do_index(&h);
+    let v = e8_callers(&h, "src/proj/thing.h");
+    assert_eq!(
+        e8_edges(&v).len(),
+        1,
+        "a Windows separator must resolve like the Unix form: {v}"
+    );
+    assert_eq!(e8_edges(&v)[0]["caller_path"], "src/proj/main.cc");
+}
+
+#[test]
+fn e8_cross_repository_candidate_scopes_stay_isolated() {
+    let h = home("e8xrepo");
+    repo_with(
+        &h,
+        "sem",
+        &[
+            ("src/proj/thing.h", E8_HEADER),
+            ("src/proj/main.cc", E8_CALLER),
+        ],
+    );
+    repo_with(
+        &h,
+        "other",
+        &[
+            ("other/proj/thing.h", E8_HEADER),
+            (
+                "other/proj/main.cc",
+                "#include \"proj/thing.h\"\n\nint go() { return Thing(1); }\n",
+            ),
+        ],
+    );
+    do_index(&h);
+    let (code, _, err) = run(&h, &["index", "--repo", "other"]);
+    assert_eq!(code, 0, "{err}");
+    let mine = e8_callers(&h, "src/proj/thing.h");
+    assert_eq!(e8_edges(&mine).len(), 1, "{mine}");
+    assert_eq!(e8_edges(&mine)[0]["caller_path"], "src/proj/main.cc");
+    let (code, out, err) = run(
+        &h,
+        &[
+            "callers",
+            "--repo",
+            "other",
+            "--path",
+            "other/proj/thing.h",
+            "--line",
+            "1",
+            "--col",
+            "5",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    let theirs: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+    assert_eq!(e8_edges(&theirs).len(), 1, "{theirs}");
+    assert_eq!(
+        e8_edges(&theirs)[0]["caller_path"],
+        "other/proj/main.cc",
+        "no cross-repository candidate: {theirs}"
+    );
+    assert!(
+        !out.contains("src/proj/main.cc"),
+        "no cross-repository leakage: {out}"
+    );
 }

@@ -188,3 +188,143 @@ Notes:
 
 Used by the CI `security` job and the optional local hooks (`security/scan.sh`,
 `.githooks/`); it is not a build dependency and no code is vendored.
+
+## Pilot tooling: clangd and CMake (clangd semantic provider pilot, 2026-10-21)
+
+| Package | Version | License | Origin | Redistributable? |
+|---|---|---|---|---|
+| clangd (LLVM) | 23.1.4 | Apache-2.0 WITH LLVM-exception | https://github.com/llvm/llvm-project/releases | tool only - portable release archive, extracted into the pilot's own bench root by `docs/pilots/clangd/method/`; never compiled into or shipped with `riltra` |
+| CMake | 4.4.4 | BSD-3-Clause | https://github.com/Kitware/CMake/releases | tool only - portable release archive, extracted into the pilot's own bench root; never compiled into or shipped with `riltra` |
+
+Both are used by the M9 clangd pilot harness only (to run the language
+server and to generate a fixture compilation database). They are not build
+dependencies, not runtime dependencies, and nothing is vendored. The
+compiler that produces the pilot's ground truth is the Microsoft Visual
+Studio Build Tools already installed on the pilot host; it is not
+redistributed and not referenced by any build.
+
+
+## M9 release candidate: complete package inventory (2026-10-25)
+
+No dependency changed between `origin/master` and the release candidate
+(`Cargo.toml`, `crates/cli/Cargo.toml` and `Cargo.lock` are byte-identical to `origin/master`).
+The table lists every third-party package of the locked graph, for every platform
+(109 packages), generated from `release/sbom.cdx.json`; the licenses are audited by
+the `new_dependencies_are_audited` test and the release tool's `--check` fails when a row is
+missing or the SBOM no longer matches `Cargo.lock` (see `release/README.md`). `r-efi` is offered
+as `MIT OR Apache-2.0 OR LGPL-2.1-or-later`; the MIT alternative is the one used. Seven crates
+(`r-efi`, `rmcp`, `rmcp-macros`, `rsqlite-vfs`, `tree-sitter`, `tree-sitter-cpp`,
+`tree-sitter-typescript`) publish no license file, so the release archive carries the
+canonical text of the license each declares (`THIRD_PARTY_LICENSES.txt`).
+
+| Package | Version | License | Origin |
+|---|---|---|---|
+| aho-corasick | 1.1.5 | Unlicense OR MIT | https://github.com/BurntSushi/aho-corasick |
+| android_system_properties | 0.1.6 | MIT OR Apache-2.0 | https://github.com/nical/android_system_properties |
+| autocfg | 1.5.1 | Apache-2.0 OR MIT | https://github.com/cuviper/autocfg |
+| bitflags | 2.13.2 | MIT OR Apache-2.0 | https://github.com/bitflags/bitflags |
+| bumpalo | 3.20.3 | MIT OR Apache-2.0 | https://github.com/fitzgen/bumpalo |
+| bytes | 1.12.1 | MIT | https://github.com/tokio-rs/bytes |
+| cc | 1.8.0 | MIT OR Apache-2.0 | https://github.com/rust-lang/cc-rs |
+| cfg-if | 1.0.5 | MIT OR Apache-2.0 | https://github.com/rust-lang/cfg-if |
+| chrono | 0.4.45 | MIT OR Apache-2.0 | https://github.com/chronotope/chrono |
+| core-foundation-sys | 0.8.7 | MIT OR Apache-2.0 | https://github.com/servo/core-foundation-rs |
+| darling | 0.24.1 | MIT | https://github.com/TedDriggs/darling |
+| darling_core | 0.24.1 | MIT | https://github.com/TedDriggs/darling |
+| darling_macro | 0.24.1 | MIT | https://github.com/TedDriggs/darling |
+| dyn-clone | 1.0.20 | MIT OR Apache-2.0 | https://github.com/dtolnay/dyn-clone |
+| equivalent | 1.0.2 | Apache-2.0 OR MIT | https://github.com/indexmap-rs/equivalent |
+| fallible-iterator | 0.3.0 | MIT OR Apache-2.0 | https://github.com/sfackler/rust-fallible-iterator |
+| fallible-streaming-iterator | 0.1.9 | MIT OR Apache-2.0 | https://github.com/sfackler/fallible-streaming-iterator |
+| find-msvc-tools | 0.1.14 | MIT OR Apache-2.0 | https://github.com/rust-lang/cc-rs |
+| foldhash | 0.2.0 | Zlib | https://github.com/orlp/foldhash |
+| futures | 0.3.34 | MIT OR Apache-2.0 | https://github.com/rust-lang/futures-rs |
+| futures-channel | 0.3.34 | MIT OR Apache-2.0 | https://github.com/rust-lang/futures-rs |
+| futures-core | 0.3.34 | MIT OR Apache-2.0 | https://github.com/rust-lang/futures-rs |
+| futures-executor | 0.3.34 | MIT OR Apache-2.0 | https://github.com/rust-lang/futures-rs |
+| futures-io | 0.3.34 | MIT OR Apache-2.0 | https://github.com/rust-lang/futures-rs |
+| futures-macro | 0.3.34 | MIT OR Apache-2.0 | https://github.com/rust-lang/futures-rs |
+| futures-sink | 0.3.34 | MIT OR Apache-2.0 | https://github.com/rust-lang/futures-rs |
+| futures-task | 0.3.34 | MIT OR Apache-2.0 | https://github.com/rust-lang/futures-rs |
+| futures-util | 0.3.34 | MIT OR Apache-2.0 | https://github.com/rust-lang/futures-rs |
+| getrandom | 0.4.3 | MIT OR Apache-2.0 | https://github.com/rust-random/getrandom |
+| hashbrown | 0.16.1 | MIT OR Apache-2.0 | https://github.com/rust-lang/hashbrown |
+| hashbrown | 0.17.1 | MIT OR Apache-2.0 | https://github.com/rust-lang/hashbrown |
+| hashlink | 0.12.2 | MIT OR Apache-2.0 | https://github.com/djc/hashlink |
+| iana-time-zone | 0.1.65 | MIT OR Apache-2.0 | https://github.com/strawlab/iana-time-zone |
+| iana-time-zone-haiku | 0.1.2 | MIT OR Apache-2.0 | https://github.com/strawlab/iana-time-zone |
+| ident_case | 1.0.1 | MIT OR Apache-2.0 | https://github.com/TedDriggs/ident_case |
+| indexmap | 2.14.2 | Apache-2.0 OR MIT | https://github.com/indexmap-rs/indexmap |
+| itoa | 1.0.18 | MIT OR Apache-2.0 | https://github.com/dtolnay/itoa |
+| js-sys | 0.3.106 | MIT OR Apache-2.0 | https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/js-sys |
+| libc | 0.2.191 | MIT OR Apache-2.0 | https://github.com/rust-lang/libc |
+| libsqlite3-sys | 0.38.2 | MIT | https://github.com/rusqlite/rusqlite |
+| log | 0.4.34 | MIT OR Apache-2.0 | https://github.com/rust-lang/log |
+| memchr | 2.8.3 | Unlicense OR MIT | https://github.com/BurntSushi/memchr |
+| num-traits | 0.2.19 | MIT OR Apache-2.0 | https://github.com/rust-num/num-traits |
+| once_cell | 1.21.4 | MIT OR Apache-2.0 | https://github.com/matklad/once_cell |
+| pastey | 0.2.3 | MIT OR Apache-2.0 | https://github.com/as1100k/pastey |
+| pin-project-lite | 0.2.17 | Apache-2.0 OR MIT | https://github.com/taiki-e/pin-project-lite |
+| pkg-config | 0.3.34 | MIT OR Apache-2.0 | https://github.com/rust-lang/pkg-config-rs |
+| proc-macro2 | 1.0.107 | MIT OR Apache-2.0 | https://github.com/dtolnay/proc-macro2 |
+| protobuf | 3.7.2 | MIT | https://github.com/stepancheg/rust-protobuf/ |
+| protobuf-support | 3.7.2 | MIT | https://github.com/stepancheg/rust-protobuf/ |
+| quote | 1.0.47 | MIT OR Apache-2.0 | https://github.com/dtolnay/quote |
+| r-efi | 6.0.0 | MIT OR Apache-2.0 OR LGPL-2.1-or-later | https://github.com/r-efi/r-efi |
+| ref-cast | 1.0.27 | MIT OR Apache-2.0 | https://github.com/dtolnay/ref-cast |
+| ref-cast-impl | 1.0.27 | MIT OR Apache-2.0 | https://github.com/dtolnay/ref-cast |
+| regex | 1.13.1 | MIT OR Apache-2.0 | https://github.com/rust-lang/regex |
+| regex-automata | 0.4.18 | MIT OR Apache-2.0 | https://github.com/rust-lang/regex |
+| regex-syntax | 0.8.11 | MIT OR Apache-2.0 | https://github.com/rust-lang/regex |
+| rmcp | 3.5.1 | Apache-2.0 | https://github.com/modelcontextprotocol/rust-sdk/ |
+| rmcp-macros | 3.5.1 | Apache-2.0 | https://github.com/modelcontextprotocol/rust-sdk/ |
+| rsqlite-vfs | 0.1.1 | MIT | crates.io |
+| rusqlite | 0.40.2 | MIT | https://github.com/rusqlite/rusqlite |
+| rustversion | 1.0.23 | MIT OR Apache-2.0 | https://github.com/dtolnay/rustversion |
+| schemars | 1.2.3 | MIT | https://github.com/GREsau/schemars |
+| schemars_derive | 1.2.3 | MIT | https://github.com/GREsau/schemars |
+| serde | 1.0.229 | MIT OR Apache-2.0 | https://github.com/serde-rs/serde |
+| serde_core | 1.0.229 | MIT OR Apache-2.0 | https://github.com/serde-rs/serde |
+| serde_derive | 1.0.229 | MIT OR Apache-2.0 | https://github.com/serde-rs/serde |
+| serde_derive_internals | 0.30.0 | MIT OR Apache-2.0 | https://github.com/serde-rs/serde |
+| serde_json | 1.0.154 | MIT OR Apache-2.0 | https://github.com/serde-rs/json |
+| shlex | 2.0.1 | MIT OR Apache-2.0 | https://github.com/comex/rust-shlex |
+| slab | 0.4.12 | MIT | https://github.com/tokio-rs/slab |
+| smallvec | 1.16.3 | MIT OR Apache-2.0 | https://github.com/servo/rust-smallvec |
+| sqlite-wasm-rs | 0.5.5 | MIT | https://github.com/Spxg/sqlite-wasm-rs |
+| streaming-iterator | 0.1.9 | MIT OR Apache-2.0 | https://github.com/sfackler/streaming-iterator |
+| strsim | 0.11.1 | MIT | https://github.com/rapidfuzz/strsim-rs |
+| syn | 2.0.119 | MIT OR Apache-2.0 | https://github.com/dtolnay/syn |
+| syn | 3.0.9 | MIT OR Apache-2.0 | https://github.com/dtolnay/syn |
+| thiserror | 1.0.69 | MIT OR Apache-2.0 | https://github.com/dtolnay/thiserror |
+| thiserror | 2.0.21 | MIT OR Apache-2.0 | https://github.com/dtolnay/thiserror |
+| thiserror-impl | 1.0.69 | MIT OR Apache-2.0 | https://github.com/dtolnay/thiserror |
+| thiserror-impl | 2.0.21 | MIT OR Apache-2.0 | https://github.com/dtolnay/thiserror |
+| tokio | 1.53.3 | MIT | https://github.com/tokio-rs/tokio |
+| tokio-macros | 2.7.2 | MIT | https://github.com/tokio-rs/tokio |
+| tokio-util | 0.7.20 | MIT | https://github.com/tokio-rs/tokio |
+| tracing | 0.1.44 | MIT | https://github.com/tokio-rs/tracing |
+| tracing-attributes | 0.1.31 | MIT | https://github.com/tokio-rs/tracing |
+| tracing-core | 0.1.36 | MIT | https://github.com/tokio-rs/tracing |
+| tree-sitter | 0.25.10 | MIT | https://github.com/tree-sitter/tree-sitter |
+| tree-sitter-c | 0.24.2 | MIT | https://github.com/tree-sitter/tree-sitter-c |
+| tree-sitter-cpp | 0.23.4 | MIT | https://github.com/tree-sitter/tree-sitter-cpp |
+| tree-sitter-javascript | 0.25.0 | MIT | https://github.com/tree-sitter/tree-sitter-javascript |
+| tree-sitter-language | 0.1.9 | MIT | https://github.com/tree-sitter/tree-sitter |
+| tree-sitter-python | 0.25.0 | MIT | https://github.com/tree-sitter/tree-sitter-python |
+| tree-sitter-rust | 0.24.2 | MIT | https://github.com/tree-sitter/tree-sitter-rust |
+| tree-sitter-typescript | 0.23.2 | MIT | https://github.com/tree-sitter/tree-sitter-typescript |
+| unicode-ident | 1.0.27 | (MIT OR Apache-2.0) AND Unicode-3.0 | https://github.com/dtolnay/unicode-ident |
+| uuid | 1.28.0 | Apache-2.0 OR MIT | https://github.com/uuid-rs/uuid |
+| vcpkg | 0.2.15 | MIT OR Apache-2.0 | https://github.com/mcgoo/vcpkg-rs |
+| wasm-bindgen | 0.2.129 | MIT OR Apache-2.0 | https://github.com/wasm-bindgen/wasm-bindgen |
+| wasm-bindgen-macro | 0.2.129 | MIT OR Apache-2.0 | https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/macro |
+| wasm-bindgen-macro-support | 0.2.129 | MIT OR Apache-2.0 | https://github.com/wasm-bindgen/wasm-bindgen/tree/main/crates/macro-support |
+| wasm-bindgen-shared | 0.2.129 | MIT OR Apache-2.0 | https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/shared |
+| windows-core | 0.62.2 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
+| windows-implement | 0.60.2 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
+| windows-interface | 0.59.3 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
+| windows-link | 0.2.1 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
+| windows-result | 0.4.1 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
+| windows-strings | 0.5.1 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
+| zmij | 1.0.23 | MIT | https://github.com/dtolnay/zmij |
