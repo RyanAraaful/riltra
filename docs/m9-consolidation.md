@@ -10,8 +10,9 @@ No gate is marked PASS without evidence.
 
 - `origin/m9-multirepo-release-candidate` is at `8861246` (CI and release-candidate workflow results). CI ran green
   on three runners at `f45ddb8` (CP4 §4.1).
-- Local commits ahead of origin are not pushed. Through `b311bb6` there are 20. Later commits are this consolidation
-  and its corrections. `git log origin/m9-multirepo-release-candidate..HEAD` lists them. No push, merge, tag or release.
+- Pushed to `origin/m9-multirepo-release-candidate` at `13f083a` on 2026-10-26, with the owner's yes. CI run
+  `40257287230` (`ci`, push event) was queued at push time. A branch push does not trigger the release-candidate
+  workflow. No merge, tag or release.
 - `Cargo.toml` and `Cargo.lock` are unchanged since `f45ddb8`.
 - Local checks at `b311bb6`: `cargo test --locked` 783 passed; `cargo fmt --check` and
   `cargo clippy --all-targets -- -D warnings` exit 0; `grade.test.cjs` 56 of 56; `fact-digest.test.cjs` 16 of 16;
@@ -52,7 +53,7 @@ Riltra correctness failure.
 
 1. Replace the expired OpenCode API key, if OpenCode integration is wanted for the release. Owner action; do not
    paste the key in chat.
-2. Push the local commits to `origin/m9-multirepo-release-candidate`. Needs an explicit yes.
+2. Done 2026-10-26: the branch is pushed at `13f083a`. Any further push needs an explicit yes.
 3. G-GRF capability criteria (four C++ UNMET): block the pre-release, or record as known limitations.
 4. Unsupported extensions answer `source-changed` (for example `.md`). Proven. Fix needs an owner GO for a production
    change ([amendment §9](m9-preprelease-acceptance-amendment.md)).

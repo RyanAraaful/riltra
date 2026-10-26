@@ -222,8 +222,9 @@ In the normal pre-release order:
 1. **Close the proven correctness issue in §9** (unsupported extensions answer `source-changed`). Small change in
    `resolve_edge_anchor`, RED and GREEN tests as for `.cu`. Needs an owner GO for a production change.
 2. **Finish core evidence.** The G-SYN scan report in §8.2 is done. Decide whether G-INC is repeated on the final commit.
-3. **Regression, security and CI on the final candidate.** Owner GO to push the local commits. Then CI and the
-   release-candidate workflow on the final commit, and the SBOM drift check.
+3. **Regression, security and CI on the final candidate.** The branch is pushed at `13f083a` (owner yes, 2026-10-26).
+   Check CI run `40257287230`. Then run the release-candidate workflow on the final commit. A branch push does not
+   trigger it (only `workflow_dispatch` or a tag `v*-rc*`), so that choice is an owner decision. Also the SBOM drift check.
 4. **Audit documents, known limitations and distribution artifacts.** Rebuild the release archives on the final commit.
    The archives built at `f45ddb8` do not contain the `b53d412` and `b311bb6` changes. Carry §9 into the release
    notes. Decide the CLAUDE.md wording.
@@ -233,7 +234,8 @@ In the normal pre-release order:
 
 ## 12. Blockers toward pre-release (actual)
 
-- No push authorised. CI and the release-candidate workflow cannot run on the final commit.
+- The release-candidate workflow has not run on the final commit. A branch push does not trigger it. Owner decision
+  needed on how it runs (tag `v*-rc*`, or `workflow_dispatch`). CI for `13f083a` is queued (run `40257287230`).
 - The OpenCode API key is expired. No OpenCode session on the M9 surface, so OpenCode agent integration is
   UNAVAILABLE. This does not block core acceptance.
 - The four C++ capability criteria are UNMET. Owner decision needed on whether they block.
