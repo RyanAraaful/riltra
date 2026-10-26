@@ -10,7 +10,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use crate::git;
 use crate::scan::{self, PlanAction};
 use crate::store;
-use crate::syntax::{grammar_version, language_name, parse_source};
+use crate::syntax::{classify, grammar_version, language_name, parse_source, FileKind};
 use rusqlite::{params, OptionalExtension};
 
 pub const DEFAULT_SEARCH_LIMIT: usize = 50;
@@ -1459,6 +1459,15 @@ pub fn resolve_edge_anchor(
     }
     if symbol.is_some() {
         return Err("anchor unresolved: no semantic occurrence here".to_string());
+    }
+    // CUDA is refused before parsing, so its file never has an index row. The
+    // reason names that refusal; a missing row here is not a changed source.
+    let kind = classify(Path::new(validated));
+    if kind == FileKind::CudaExperimental {
+        return Err(format!(
+            "anchor unresolved: {}; CUDA sources are never parsed or indexed",
+            scan::unsupported_reason(&kind)
+        ));
     }
     // Syntax fallback: nearest enclosing definition by byte containment.
     let source = source.ok_or("anchor unresolved: source unavailable")?;

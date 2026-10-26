@@ -880,6 +880,63 @@ fn task4_syntax_fallback_rejects_changed_source() {
 }
 
 #[test]
+fn cuda_destination_reports_its_unsupported_reason_not_source_changed() {
+    let h = home("cuda-destination");
+    let dir = edge_repo(&h);
+    std::fs::write(dir.join("kernel.cu"), "__global__ void kernel() {}\n").unwrap();
+    do_index(&h);
+    let (code, out, err) = run(
+        &h,
+        &[
+            "trace",
+            "--repo",
+            "sem",
+            "--path",
+            "lib.py",
+            "--line",
+            "1",
+            "--col",
+            "5",
+            "--to",
+            "kernel.cu:1:17",
+        ],
+    );
+    assert_eq!(code, 3, "{out} {err}");
+    assert!(err.contains("cuda-experimental"), "{err}");
+    assert!(!err.contains("source-changed"), "{err}");
+}
+
+#[test]
+fn changed_destination_still_reports_source_changed() {
+    let h = home("changed-destination");
+    let dir = edge_repo(&h);
+    do_index(&h);
+    std::fs::write(
+        dir.join("lib.py"),
+        "# changed offsets\ndef other():\n    pass\n",
+    )
+    .unwrap();
+    let (code, out, err) = run(
+        &h,
+        &[
+            "trace",
+            "--repo",
+            "sem",
+            "--path",
+            "main.py",
+            "--line",
+            "3",
+            "--col",
+            "5",
+            "--to",
+            "lib.py:2:5",
+        ],
+    );
+    assert_eq!(code, 3, "{out} {err}");
+    assert!(err.contains("source-changed"), "{err}");
+}
+
+#[test]
 fn task4_rejects_zero_positions_and_limit() {
     let h = home("bad-args");
     scip_imported(&h);

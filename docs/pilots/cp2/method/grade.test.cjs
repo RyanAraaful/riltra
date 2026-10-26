@@ -51,6 +51,7 @@ test("a parse error is classified by its actual reason", () => {
   assert.strictEqual(classifyError("error: anchor unresolved: source-changed; reindex before syntax fallback"), "source-changed");
   assert.strictEqual(classifyError('{"kind":"not_registered","message":"unknown repository"}'), "domain-error:not_registered");
   assert.strictEqual(classifyError("error: unsupported file type"), "unsupported");
+  assert.strictEqual(classifyError("error: anchor unresolved: cuda-experimental; CUDA sources are never parsed or indexed"), "cuda-experimental");
   assert.strictEqual(classifyError("something went wrong"), "unclassified-error");
 });
 
@@ -194,6 +195,60 @@ test("a source-changed error on a non-CUDA target keeps its own reason", () => {
   // not reclassified.
   assert.strictEqual(evidence.reason, "source-changed");
   assert.strictEqual(evidence.evidence.actual_cause, "source-changed");
+});
+
+test("a CUDA destination refused before indexing is classified as CUDA, not as a changed source", () => {
+  const dir = writeQueries({
+    "d3-2-trace-to-cuda": "error: anchor unresolved: cuda-experimental; CUDA sources are never parsed or indexed\n",
+  });
+  const checks = grade(dir).checks;
+  const honesty = find(checks, "D3-H4");
+  assert.strictEqual(honesty.verdict, V.PASS);
+  assert.strictEqual(honesty.evidence.observed_reason, "cuda-experimental");
+  assert.strictEqual(honesty.evidence.actual_cause, "cuda-unsupported");
+  assert.strictEqual(find(checks, "D3-E1").reason, "cuda-unsupported");
+});
+
+// --- the device-side claim (D3-H3) ----------------------------------------
+
+const CUDA_TERMINUS = "colmap/src/colmap/mvs/patch_match_cuda.cu";
+const RUN_CALL_SITE = {
+  kind: "POTENTIAL_CALL",
+  precision: "Heuristic",
+  caller: { type: "syntax_def", path: "colmap/src/colmap/mvs/patch_match.cc" },
+  callee: null,
+  callee_name: "Run",
+  caller_path: "colmap/src/colmap/mvs/patch_match.cc",
+};
+
+function traceWith(edges, extra) {
+  return JSON.stringify(Object.assign({ disclaimer: "plausible-path-not-execution", paths: [{ edges }] }, extra));
+}
+
+test("D3-H3 passes when the CUDA terminus is labelled unsupported", () => {
+  const terminus = Object.assign({}, RUN_CALL_SITE, { callee: { type: "unsupported", path: CUDA_TERMINUS } });
+  const dir = writeQueries({ "d3-1-trace-depth4": traceWith([terminus]) });
+  const check = find(grade(dir).checks, "D3-H3");
+  assert.strictEqual(check.verdict, V.PASS);
+  assert.strictEqual(check.evidence.cuda_definition_claims, 0);
+});
+
+test("D3-H3 passes when a CUDA file name appears only in text", () => {
+  const dir = writeQueries({
+    "d3-1-trace-depth4": traceWith([RUN_CALL_SITE], { anchor_uncertainty: "the .cu source is unsupported and not parsed" }),
+  });
+  const check = find(grade(dir).checks, "D3-H3");
+  assert.strictEqual(check.verdict, V.PASS);
+  assert.strictEqual(check.evidence.cuda_definition_claims, 0);
+});
+
+test("D3-H3 fails when an unproven CUDA definition is a path endpoint", () => {
+  const claim = Object.assign({}, RUN_CALL_SITE, { callee: { type: "syntax_def", path: CUDA_TERMINUS } });
+  const dir = writeQueries({ "d3-1-trace-depth4": traceWith([claim]) });
+  const check = find(grade(dir).checks, "D3-H3");
+  assert.strictEqual(check.verdict, V.FAIL);
+  assert.strictEqual(check.reason, "device-side-definition-claimed");
+  assert.strictEqual(check.evidence.cuda_definition_claims, 1);
 });
 
 // --- the capability gates ------------------------------------------------

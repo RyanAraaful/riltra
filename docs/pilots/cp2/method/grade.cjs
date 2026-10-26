@@ -62,6 +62,7 @@ function classifyError(raw) {
   const kind = /"kind"\s*:\s*"([a-z_]+)"/.exec(t);
   if (kind) return "domain-error:" + kind[1];
   if (/anchor unresolved: source-changed/.test(t)) return "source-changed";
+  if (/anchor unresolved: cuda-experimental/.test(t)) return "cuda-experimental";
   if (/unsupported/i.test(t)) return "unsupported";
   if (/cuda/i.test(t)) return "cuda-unsupported";
   if (/^error:/m.test(t)) return "cli-error";
@@ -105,6 +106,20 @@ function isCandidate(edge) {
 function isProven(edge) {
   return !!edge && (edge.kind === "CALLS" || edge.kind === "REFERENCES") &&
     edge.precision === "Exact" && edge.unresolved == null;
+}
+
+// The CUDA sources Riltra refuses to parse (.cu and .cuh, see syntax.rs classify).
+const CUDA_SOURCE = /\.cuh?$/i;
+
+// Endpoints that place a definition in a CUDA source. The frozen spec (B.3) has
+// the path end at the CUDA boundary with that terminus labelled unsupported, so
+// an endpoint typed "unsupported" is the label, not a claim. Text fields are
+// not endpoints: a .cu name there is a mention, never a device-side claim.
+function cudaDefinitionClaims(doc) {
+  return pathsOf(doc)
+    .flatMap((p) => (Array.isArray(p.edges) ? p.edges : []))
+    .flatMap((e) => (e ? [e.caller, e.callee] : []))
+    .filter((ep) => ep && ep.type !== "unsupported" && CUDA_SOURCE.test(String(ep.path || "")));
 }
 
 // Two endpoints name one definition: the same SCIP symbol, or the same
@@ -178,7 +193,7 @@ function isObservedError(reason) {
   if (!reason) return false;
   return reason === "source-changed" || reason === "cli-error" ||
     reason === "unsupported" || reason === "cuda-unsupported" ||
-    reason.startsWith("domain-error:");
+    reason === "cuda-experimental" || reason.startsWith("domain-error:");
 }
 
 // ------------------------------------------------------------------ checks
@@ -493,10 +508,10 @@ function gradeChecks(ctx) {
       tr.doc.disclaimer === "plausible-path-not-execution" ? V.PASS : V.FAIL,
       tr.doc.disclaimer === "plausible-path-not-execution" ? null : "disclaimer-missing-or-different",
       { disclaimer: tr.doc.disclaimer });
-    const mentionsCu = JSON.stringify(tr.doc).includes(".cu");
+    const claims = cudaDefinitionClaims(tr.doc).length;
     add("D3-H3", "honesty", "the path does not claim a device-side definition",
-      mentionsCu ? V.FAIL : V.PASS, mentionsCu ? "device-side-definition-claimed" : null,
-      { mentions_cuda_source: mentionsCu, paths: pathsOf(tr.doc).length });
+      claims ? V.FAIL : V.PASS, claims ? "device-side-definition-claimed" : null,
+      { cuda_definition_claims: claims, paths: pathsOf(tr.doc).length });
     const paths = pathsOf(tr.doc);
     const maxHops = paths.reduce((m, p) => Math.max(m, Array.isArray(p.edges) ? p.edges.length : 0), 0);
     const d3Criterion = "the path spans the full frozen chain (4 nodes, 3 edges, including the indirect dispatch)";
@@ -534,9 +549,10 @@ function gradeChecks(ctx) {
 
   // The CUDA terminus: the tool must fail cleanly, and the reason must be
   // the real one. Riltra does not index CUDA sources, so the anchor can
-  // never resolve; the tool's own message ("source-changed") is recorded
-  // next to the actual cause. The queries whose target is a CUDA file are
-  // listed in ctx.cudaTargets.
+  // never resolve. Current tool output names cuda-experimental; the archived
+  // Task 6 output said source-changed, and that is recorded next to the
+  // actual cause. The queries whose target is a CUDA file are listed in
+  // ctx.cudaTargets.
   const trCu = ctx.docs["d3-2-trace-to-cuda"];
   const cudaTargets = ctx.cudaTargets || [];
   const isCudaTarget = cudaTargets.indexOf("d3-2-trace-to-cuda") >= 0;
