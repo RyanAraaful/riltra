@@ -8,7 +8,7 @@ checksums and notices only).
 ## What the workflow does
 
 `.github/workflows/release-candidate.yml` runs by hand (`workflow_dispatch`) or
-for a `v*-rc*` tag, on Windows, Linux and macOS x64, and for each of them:
+for a `v*-rc*` tag, only from `master`, on Windows, Linux and macOS x64, and for each of them:
 
 1. builds the release-profile binary with `cargo build --release --locked`;
 2. checks the release documents against the locked dependency graph
@@ -22,12 +22,12 @@ for a `v*-rc*` tag, on Windows, Linux and macOS x64, and for each of them:
 The macOS runner is the x64 pool (see the comment in `ci.yml`); macOS ARM64 is
 not covered.
 
-`workflow_dispatch` works only for a workflow file that exists on `master`; until
-this file is merged there, dispatching it returns HTTP 404. Run it before then
-from a throwaway branch whose single extra commit adds
-`push: branches: ['rc-run/**']`, and delete the branch afterwards (run
-40185383581 on 2026-10-25 did exactly that and is recorded in
-`docs/m9-cp4-evidence.md` §4.1). Never merge that extra commit.
+Only `master` may start the workflow. A `guard` job (2026-10-26) refuses a
+`workflow_dispatch` from any other branch, and a `v*-rc*` tag whose commit is not
+an ancestor of `master`. `workflow_dispatch` also needs the workflow file on
+`master`; until the file is merged there, dispatching it returns HTTP 404. The
+throwaway `rc-run/**` branch used for run 40185383581 (2026-10-25, recorded in
+`docs/m9-cp4-evidence.md` §4.1) no longer works, by design.
 
 ## Reproduce locally
 
