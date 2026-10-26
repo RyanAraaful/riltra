@@ -937,6 +937,76 @@ fn changed_destination_still_reports_source_changed() {
 }
 
 #[test]
+fn unsupported_extension_destination_reports_its_reason_not_source_changed() {
+    let h = home("unsupported-destination");
+    let dir = edge_repo(&h);
+    std::fs::write(dir.join("notes.md"), "# notes\n").unwrap();
+    do_index(&h);
+    let (code, out, err) = run(
+        &h,
+        &[
+            "trace",
+            "--repo",
+            "sem",
+            "--path",
+            "lib.py",
+            "--line",
+            "1",
+            "--col",
+            "5",
+            "--to",
+            "notes.md:1:1",
+        ],
+    );
+    assert_eq!(code, 3, "{out} {err}");
+    assert!(err.contains("unsupported-extension"), "{err}");
+    assert!(!err.contains("source-changed"), "{err}");
+}
+
+#[test]
+fn unsupported_extension_anchor_reports_its_reason_not_source_changed() {
+    let h = home("unsupported-anchor");
+    let dir = edge_repo(&h);
+    std::fs::write(dir.join("notes.md"), "# notes\n").unwrap();
+    do_index(&h);
+    let (code, out, err) = run(
+        &h,
+        &[
+            "callers", "--repo", "sem", "--path", "notes.md", "--line", "1", "--col", "1",
+        ],
+    );
+    assert_eq!(code, 3, "{out} {err}");
+    assert!(err.contains("unsupported-extension"), "{err}");
+    assert!(!err.contains("source-changed"), "{err}");
+}
+
+#[test]
+fn missing_unsupported_destination_fails_path_validation_before_the_refusal() {
+    let h = home("missing-destination");
+    edge_repo(&h);
+    do_index(&h);
+    let (code, out, err) = run(
+        &h,
+        &[
+            "trace",
+            "--repo",
+            "sem",
+            "--path",
+            "lib.py",
+            "--line",
+            "1",
+            "--col",
+            "5",
+            "--to",
+            "absent.md:1:1",
+        ],
+    );
+    assert_eq!(code, 3, "{out} {err}");
+    assert!(err.contains("escapes repository"), "{err}");
+    assert!(!err.contains("unsupported-extension"), "{err}");
+}
+
+#[test]
 fn task4_rejects_zero_positions_and_limit() {
     let h = home("bad-args");
     scip_imported(&h);

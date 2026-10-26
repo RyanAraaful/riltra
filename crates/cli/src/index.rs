@@ -1460,17 +1460,22 @@ pub fn resolve_edge_anchor(
     if symbol.is_some() {
         return Err("anchor unresolved: no semantic occurrence here".to_string());
     }
-    // CUDA is refused before parsing, so its file never has an index row. The
-    // reason names that refusal; a missing row here is not a changed source.
+    // Syntax fallback: nearest enclosing definition by byte containment.
+    let source = source.ok_or("anchor unresolved: source unavailable")?;
+    // Unsupported files are refused before parsing, so they never have an index
+    // row. The reason names that refusal instead of a changed source.
     let kind = classify(Path::new(validated));
-    if kind == FileKind::CudaExperimental {
+    let refusal = match &kind {
+        FileKind::Supported(_) => None,
+        FileKind::CudaExperimental => Some("CUDA sources are never parsed or indexed"),
+        FileKind::UnsupportedExtension => Some("files of this type are never parsed or indexed"),
+    };
+    if let Some(detail) = refusal {
         return Err(format!(
-            "anchor unresolved: {}; CUDA sources are never parsed or indexed",
+            "anchor unresolved: {}; {detail}",
             scan::unsupported_reason(&kind)
         ));
     }
-    // Syntax fallback: nearest enclosing definition by byte containment.
-    let source = source.ok_or("anchor unresolved: source unavailable")?;
     if !files
         .get(validated)
         .is_some_and(|(_, digest)| *digest == store::content_digest(&source))
