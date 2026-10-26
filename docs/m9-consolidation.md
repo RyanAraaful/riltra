@@ -9,22 +9,22 @@ unchanged. No gate is marked PASS here without evidence.
 
 - `origin/m9-multirepo-release-candidate` is at `8861246`, which records the CI and release-candidate workflow
   results. CI ran green on three runners at `f45ddb8` (CP4 §4.1).
-- 20 local commits are ahead of origin and not pushed (`git log origin/m9-multirepo-release-candidate..HEAD`).
+- 21 local commits are ahead of origin and not pushed, counting this record (`git log origin/m9-multirepo-release-candidate..HEAD`).
   No push, merge, tag or release was made.
 - `Cargo.toml` and `Cargo.lock` are unchanged since `f45ddb8`, so the SBOM and licence record still apply.
 - Local checks at `b311bb6`:
   - `cargo test --locked`: 783 passed, 0 failed.
   - `cargo fmt --all -- --check` and `cargo clippy --all-targets -- -D warnings`: exit 0.
   - `node --test`: `grade.test.cjs` 56 of 56, `fact-digest.test.cjs` 16 of 16.
-  - `security/scan.sh range 8861246..HEAD` (20 commits) and `security/scan.sh tree`: no leaks.
-- CI has not run on the 20 local commits.
+  - `security/scan.sh range 8861246..b311bb6` (20 commits) and `security/scan.sh tree`: no leaks.
+- CI has not run on the local commits.
 
 ## Gate status
 
 | Gate | Status | Basis | Change since CP4 |
 |---|---|---|---|
 | G-LIC | PASS (candidate, this host) | SBOM, notices, licence audit (CP4 §5) | none |
-| G-NAT | PASS (acceptance test; macOS x64 only) | native archives and clean-install smoke on three CI runners at `f45ddb8` (CP4 §4.1) | not rerun on the 20 local commits; macOS ARM64 not covered |
+| G-NAT | PASS (acceptance test; macOS x64 only) | native archives and clean-install smoke on three CI runners at `f45ddb8` (CP4 §4.1) | not rerun on the local commits; macOS ARM64 not covered |
 | G-CLI | PASS (candidate) | suite green; pilot commands repeat byte for byte (CP4 §5) | 783 tests; 88 M6 golden files changed by the `cfg=` token only (`b53d412`) |
 | G-MCP | NOT YET VERIFIED, blocked | real OpenCode run impossible: the API key is expired | preflight 2026-10-26, see [G-TOK](#g-tok-this-step) |
 | G-SYN | NOT YET VERIFIED (formal) | checks pass after `b53d412`: 17 import `end_line` values corrected, 0 import position mismatches, no other fact change ([m9-gsyn-import-span-amendment.md](m9-gsyn-import-span-amendment.md)); `.inl` closed for the syntax layer ([m9-inl-amendment.md](m9-inl-amendment.md)) | open: archived release-candidate scan report (CP3 §11) not produced |
@@ -65,7 +65,7 @@ release round trip. The v0.1.0 merge, tag and publish stay a separate owner GO.
 ## Owner decisions
 
 1. Replace the expired OpenCode API key. This unblocks G-TOK and the G-MCP agent side. Owner action.
-2. Push the 20 local commits to `origin/m9-multirepo-release-candidate`. Needs an explicit yes.
+2. Push the local commits (21 at this record) to `origin/m9-multirepo-release-candidate`. Needs an explicit yes.
 3. G-GRF transparency (b): name the CUDA boundary in the path. This needs a graph or output change with its own RED
    tests. Owner decides whether it blocks G-GRF.
 4. G-GRF transparency (a): indirect dispatch. Either accept "absent and not claimed", or require a labelled
