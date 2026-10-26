@@ -30,7 +30,7 @@ No gate is marked PASS without evidence.
 | G-SYN | PASS (candidate, `b311bb6`): source-grounded checks, deterministic repeats, exact unsupported counts, first-party errors recorded. Scan report in [amendment §8.2](m9-preprelease-acceptance-amendment.md). | none for the gate's acceptance checks |
 | G-SEM | PASS (2026-10-25 amendment) | none |
 | G-GRF, correctness and safety | PASS (Task 6; grader honesty PASS) | none |
-| G-GRF, capability | UNMET (D1-C6, D2-C6, D3-C5, D4-C5), kept | owner decision: block or record as known limitation |
+| G-GRF, capability | UNMET (D1-C6, D2-C6, D3-C5, D4-C5), kept | none: accepted as pre-release known limitations (owner, 2026-10-26) |
 | G-FSH | PASS (pilot, CP4 §2) | not repeated on the final commit |
 | G-INC | PASS (pilot, CP4 §3) | owner decides whether to repeat after the `PARSER_VERSION` 7 change |
 | G-KNW | PASS, release-level isolated round trip at `b311bb6` (73 checks, 0 failed) | none in core |
@@ -54,9 +54,8 @@ Riltra correctness failure.
 1. Replace the expired OpenCode API key, if OpenCode integration is wanted for the release. Owner action; do not
    paste the key in chat.
 2. Done 2026-10-26: the branch is pushed at `13f083a`. Any further push needs an explicit yes.
-3. G-GRF capability criteria (four C++ UNMET): block the pre-release, or record as known limitations.
-4. Unsupported extensions answer `source-changed` (for example `.md`). Proven. Fix needs an owner GO for a production
-   change ([amendment §9](m9-preprelease-acceptance-amendment.md)).
+3. G-GRF capability criteria (four C++ UNMET): accepted as pre-release known limitations (owner, 2026-10-26). Status stays UNMET; no development now.
+4. Unsupported extensions answered `source-changed` (for example `.md`). Fixed 2026-10-26: they answer `unsupported-extension` ([amendment §15](m9-preprelease-acceptance-amendment.md)).
 5. G-GRF transparency (a) and (b): indirect dispatch absent and not claimed; the path does not name the CUDA boundary.
    Each needs a graph or output change if the owner wants it.
 6. Claude Code token measurement and any further agent integration: owner GO.

@@ -216,6 +216,8 @@ of a throwaway branch, `rc-run/m9` (M9 plus one commit, `e8ec1d3`, that adds a
 branch was deleted from the remote and locally. That commit is not part of M9
 and must not be merged; the built sources are those of `f45ddb8`.
 
+**Dated revision 2026-10-26.** The release-candidate workflow now has a `guard` job, and only a start from `master` passes it: a `workflow_dispatch` from any other branch, and a `v*-rc*` tag whose commit is not on `master`. The `rc-run/**` method above no longer works. The record of run 40185383581 is unchanged. See [m9-preprelease-acceptance-amendment.md](m9-preprelease-acceptance-amendment.md) §15.
+
 [Run 40185383581](https://github.com/RyanAraaful/riltra/actions/runs/40185383581): **three jobs, all steps green**
 (release build, `release_docs --check` printing `no drift`, package, clean-install
 smoke of the unpacked archive with every check `ok` including twelve tools, a

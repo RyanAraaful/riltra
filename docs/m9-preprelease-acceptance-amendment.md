@@ -103,7 +103,11 @@ measurement.
 | `docs/m9-design-gate.md` | Dated revision notes under the §4 matrix, G-MCP and G-TOK. Each restates the requirement neutrally. | yes, the requirement text is unchanged |
 | `docs/m9-cp4-evidence.md` | Dated revision notes in §3.2 and §8. | yes |
 | `docs/m9-preprelease-acceptance-amendment.md` | New, this file. | not applicable |
-| `docs/pilots/m9-preprelease/` | New evidence: core checks, Claude Code smoke. | not applicable |
+| `docs/pilots/m9-preprelease/` | New evidence: core checks, candidate checks, Claude Code smoke, unsupported-extension probe (§15). | not applicable |
+| `README.md` | Known limitations: four C++ capability criteria listed as UNMET pre-release limitations (§15). | the rest of the section is unchanged |
+| `release/README.md` | Describes the master-only workflow and the guard. The throwaway-branch method is marked as no longer working. | the 2026-10-25 run is still recorded in CP4 §4.1 |
+| `.github/workflows/release-candidate.yml` | `guard` job added; `package` needs it (§15). | not applicable |
+| `docs/m9-cp4-evidence.md` | Dated revision note in §4.1 about the master-only guard. | yes |
 
 Not changed, on purpose:
 
@@ -131,7 +135,7 @@ Status per §3. The "Still needed" column lists what remains for the pre-release
 | G-SYN | PASS (candidate, `b311bb6`) | §8.1 and §8.2: source-grounded checks, deterministic repeats, exact unsupported counts, first-party errors recorded | none for the gate's acceptance checks. The §2.6 anchors were hand-verified in earlier milestones; two were re-read here. |
 | G-SEM | PASS | [m9-gsem-amendment.md](m9-gsem-amendment.md), 2026-10-25 | none in core |
 | G-GRF, correctness and safety | PASS | Task 6 record ([m9-task6-final-verification.md](m9-task6-final-verification.md)); candidate grading (§8.1): honesty 19 PASS | none in core |
-| G-GRF, capability | UNMET (D1-C6, D2-C6, D3-C5, D4-C5) | kept UNMET (D-5) | owner decision: block the pre-release or record as known limitation |
+| G-GRF, capability | UNMET (D1-C6, D2-C6, D3-C5, D4-C5) | kept UNMET (D-5) | none. Accepted as pre-release known limitations (owner, 2026-10-26). |
 | G-FSH | PASS (pilot) | CP4 §2 | not repeated on the final commit |
 | G-INC | PASS (pilot) | CP4 §3 | not repeated after the parser version change (`PARSER_VERSION` 7). Owner decides whether to repeat on the final commit. |
 | G-KNW | PASS (release-level isolated round trip, `b311bb6`: 73 checks, 0 failed) | [raw/core/g-knw-round-trip.txt](pilots/m9-preprelease/raw/core/g-knw-round-trip.txt); isolated-home acceptance at `f9eed48` ([m9-gknw-amendment.md](m9-gknw-amendment.md)) | host only, as recorded |
@@ -185,10 +189,9 @@ candidate index and the pinned snapshot, and is archived under [raw/core/candida
 
 ## 9. Known limitations to carry into the pre-release notes
 
-- A `--to` or anchor target with an unsupported extension (for example `.md`) answers
-  `anchor unresolved: source-changed` when it has no index row. Proven on the candidate index: `trace --to README.md:1:1`
-  exits 3 with that message. This is the misclassification fixed for `.cu` and `.cuh` in `b311bb6`, but not yet for other
-  extensions. Fix not done here, because it changes production code (§11, step 1).
+- Fixed on 2026-10-26 (§15): a `--to` or anchor target with an unsupported extension (for example `.md`) answers
+  `anchor unresolved: unsupported-extension; files of this type are never parsed or indexed`. It used to answer
+  `source-changed`, because it has no index row.
 - `riltra_health` reports `capabilities.network: true` and `read_only: false`. `status.networking` is `disabled`. The
   flags describe the server as a whole, which can start a subprocess through `riltra_code_semantic`. The README
   explains this. Not a change in this task.
@@ -204,7 +207,7 @@ candidate index and the pinned snapshot, and is archived under [raw/core/candida
 
 | Item | Decision | Source |
 |---|---|---|
-| Four C++ capability gates (D1-C6, D2-C6, D3-C5, D4-C5) | stay UNMET; no further development in M9 (D-5) | this amendment; [m9-task5-capability-gap-evaluation.md](m9-task5-capability-gap-evaluation.md) |
+| Four C++ capability gates (D1-C6, D2-C6, D3-C5, D4-C5) | accepted as pre-release known limitations by the owner on 2026-10-26; status stays UNMET; no development in this milestone (D-5). Listed in the README under Known limitations. | §15; [m9-task5-capability-gap-evaluation.md](m9-task5-capability-gap-evaluation.md) |
 | C++ semantic provider and clangd on MMSP | D-M9-2 deferred; C++ index spike postponed by the owner on 2026-10-25 | [m9-cpp-semantic-index-decision-2026-10-25.md](m9-cpp-semantic-index-decision-2026-10-25.md) |
 | CUDA (`.cu`, `.cuh`) | unsupported by policy; no CUDA coverage claim | [m9-inl-amendment.md](m9-inl-amendment.md), G-SYN gate |
 | Dataflow, graph expansion | outside M9 (D-5) | this amendment |
@@ -219,8 +222,7 @@ candidate index and the pinned snapshot, and is archived under [raw/core/candida
 
 In the normal pre-release order:
 
-1. **Close the proven correctness issue in §9** (unsupported extensions answer `source-changed`). Small change in
-   `resolve_edge_anchor`, RED and GREEN tests as for `.cu`. Needs an owner GO for a production change.
+1. **Proven correctness issue in §9.** Done on 2026-10-26 (§15): unsupported extensions answer `unsupported-extension`.
 2. **Finish core evidence.** The G-SYN scan report in §8.2 is done. Decide whether G-INC is repeated on the final commit.
 3. **Regression, security and CI on the final candidate.** The branch is pushed at `13f083a` (owner yes, 2026-10-26).
    Check CI run `40257287230`. Then run the release-candidate workflow on the final commit. A branch push does not
@@ -228,18 +230,19 @@ In the normal pre-release order:
 4. **Audit documents, known limitations and distribution artifacts.** Rebuild the release archives on the final commit.
    The archives built at `f45ddb8` do not contain the `b53d412` and `b311bb6` changes. Carry §9 into the release
    notes. Decide the CLAUDE.md wording.
-5. **Owner decisions.** Whether the four C++ UNMET criteria block the pre-release, or are recorded as known limitations.
-   macOS ARM64 coverage. Agent integration for the release: OpenCode needs a new key for a session on the M9 surface,
-   Claude Code has a smoke only, Codex is not tested. History rewrite. The v0.1.0 GO.
+5. **Owner decisions.** The four C++ UNMET criteria are accepted as pre-release known limitations (2026-10-26). Still
+   open: macOS ARM64 coverage. Agent integration for the release: OpenCode needs a new key for a session on the M9
+   surface, Claude Code has a smoke only, Codex is not tested. History rewrite. The v0.1.0 GO.
 
 ## 12. Blockers toward pre-release (actual)
 
-- The release-candidate workflow has not run on the final commit. A branch push does not trigger it. Owner decision
-  needed on how it runs (tag `v*-rc*`, or `workflow_dispatch`). CI for `13f083a` is queued (run `40257287230`).
+- The release-candidate workflow runs only from `master` (guard job, 2026-10-26). The final candidate can be built by it
+  only after the M9 branch is merged to `master` (owner decision), or from a `v*-rc*` tag on a commit already on
+  `master`. CI for `13f083a` is queued (run `40257287230`).
 - The OpenCode API key is expired. No OpenCode session on the M9 surface, so OpenCode agent integration is
   UNAVAILABLE. This does not block core acceptance.
-- The four C++ capability criteria are UNMET. Owner decision needed on whether they block.
-- The §9 correctness issue needs an owner GO for a production change.
+- The four C++ capability criteria are UNMET. The owner accepted them as pre-release known limitations (2026-10-26).
+- No other proven correctness issue is open in the records reviewed for this amendment.
 - The archives built at `f45ddb8` are stale for the code changes after it.
 
 ## 13. Traceability of earlier statuses
@@ -258,3 +261,36 @@ In the normal pre-release order:
   replaced with placeholders (`<BENCH>`, `<RILTRA_ROOT>`, `<DEV_ROOT>`).
 - Related records: [m9-consolidation.md](m9-consolidation.md), [m9-grf-transparency-amendment.md](m9-grf-transparency-amendment.md),
   [m9-gsyn-import-span-amendment.md](m9-gsyn-import-span-amendment.md), [m9-task6-final-verification.md](m9-task6-final-verification.md).
+
+## 15. Changes of 2026-10-26, second part
+
+Owner instruction of 2026-10-26: fix the `source-changed` misreport for unsupported extensions, restrict the release
+workflow to `master`, record the four C++ gaps as pre-release limitations (status stays UNMET), commit and push to
+the M9 branch.
+
+- **Bug fixed.** `resolve_edge_anchor` (`crates/cli/src/index.rs`) refuses an unsupported-extension target after the
+  source is read and before the digest check. It answers `anchor unresolved: unsupported-extension; files of this type
+  are never parsed or indexed`. The `.cu` and `.cuh` text is unchanged. A missing file still fails path validation
+  first (`escapes repository`). An unreadable or oversize source still answers `source unavailable`. Supported sources
+  keep the `source-changed` check.
+- **Tests.** RED: the two unsupported-extension tests failed with `source-changed`, and their controls passed. The
+  first version of the missing-file control expected `source unavailable`; the real behaviour is path validation, so the
+  test was corrected to pin that. GREEN: 6 targeted tests pass. `cargo test --locked`: 786 passed, 0 failed (783 before,
+  plus 3). `cargo fmt --all -- --check` and `cargo clippy --all-targets -- -D warnings`: exit 0. Grader tests 56 of 56;
+  fact-digest tests 16 of 16.
+- **Probe on the candidate index (§8.1).** `trace --to README.md:1:1`. Before: `error: anchor unresolved:
+  source-changed; reindex before syntax fallback`, exit 3. After: `error: anchor unresolved: unsupported-extension; files
+  of this type are never parsed or indexed`, exit 3. The 22 frozen queries rerun on the new binary: 22 of 22 identical to
+  the previous candidate outputs. The CUDA refusal (`d3-2`) is unchanged. Evidence:
+  [raw/fix-unsupported/](pilots/m9-preprelease/raw/fix-unsupported/).
+- **Release workflow limited to `master`.** `release-candidate.yml` has a `guard` job, and `package` needs it. A
+  `workflow_dispatch` passes only when `GITHUB_REF` is `refs/heads/master`. A `v*-rc*` tag passes only when its commit
+  is an ancestor of `origin/master`. Any other case exits 1 before a build starts. The guard was exercised with
+  simulated event variables: dispatch from master passes; dispatch from the M9 branch fails; a tag on a master commit
+  passes; a tag on an M9-only commit fails. The YAML was parsed. Reason: run 40185383581 (2026-10-25) used a throwaway
+  `rc-run/**` branch ([release/README.md](../release/README.md), [CP4 §4.1](m9-cp4-evidence.md)).
+- **C++ gaps.** The four capability criteria stay UNMET. The owner accepts them as pre-release known limitations. The
+  README Known limitations section lists them. No C++ development is planned in M9.
+- **Consequence.** The release-candidate workflow can build the final candidate only from `master`. Either the M9
+  branch is merged to `master` first, or the final commit is tagged `v*-rc*` while already on `master`. Both are owner
+  decisions.

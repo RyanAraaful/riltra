@@ -187,6 +187,10 @@ C++.
   list is not proof that a name is unused.
 - macOS continuous integration covers the x64 pool only; macOS ARM64 is not
   covered.
+- Four C++ capability criteria are not met (status UNMET): C++ method identity for references (`D1-C6`), attribution
+  of the external construction sites to the class (`D2-C6`), the full call chain including the indirect dispatch
+  (`D3-C5`), and the affected set of an impact query (`D4-C5`). They are accepted pre-release limitations, and C++
+  answers stay candidates.
 - The repository history still carries machine-local paths from early commits
   (a history rewrite is a separate, owner-gated decision).
 
