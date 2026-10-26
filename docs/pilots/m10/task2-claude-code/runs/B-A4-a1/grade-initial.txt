@@ -1,0 +1,4 @@
+PASS reviewer-exit-0-and-4-passed
+FAIL only-json.rs-changed (*./crates/cli/src/json.rs)
+PASS test-code-unchanged
+STATUS FAIL
