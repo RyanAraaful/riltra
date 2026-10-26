@@ -9,7 +9,7 @@ unchanged. No gate is marked PASS here without evidence.
 
 - `origin/m9-multirepo-release-candidate` is at `8861246`, which records the CI and release-candidate workflow
   results. CI ran green on three runners at `f45ddb8` (CP4 §4.1).
-- Local commits ahead of origin are not pushed. Through `b311bb6` there are 20. This record and its correction add two more. `git log origin/m9-multirepo-release-candidate..HEAD` lists them all.
+- Local commits ahead of origin are not pushed. Through `b311bb6` there are 20. Commits after it are this consolidation record and its corrections. `git log origin/m9-multirepo-release-candidate..HEAD` lists them all.
   No push, merge, tag or release was made.
 - `Cargo.toml` and `Cargo.lock` are unchanged since `f45ddb8`, so the SBOM and licence record still apply.
 - Local checks at `b311bb6`:
