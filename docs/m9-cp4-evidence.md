@@ -180,6 +180,12 @@ correction of the frozen spec (the `value` count is 9, not 27) are in
   not touch credentials. The agent-side evidence of the candidate is therefore
   **UNAVAILABLE**, and G-MCP is not marked passed on it (§5).
 
+**Dated revision 2026-10-26.** The two MCP checks above are core acceptance and need no agent or API key. They
+were re-run on the shipped binary at `b311bb6`: [pilots/m9-preprelease/raw/core/mcp/](pilots/m9-preprelease/raw/core/mcp/).
+The OpenCode session stays an agent-integration item with its own status (amendment §4,
+[m9-preprelease-acceptance-amendment.md](m9-preprelease-acceptance-amendment.md)). The text above is the
+historical record and is unchanged.
+
 ## 4. The release candidate artifacts
 
 Built and checked on this Windows host, then built and checked again on the three CI runners (§4.1).
@@ -308,6 +314,11 @@ catalogue itself grew. **Verdict: the CP7-A figure cannot be relied on for the
 release candidate.** G-TOK stays **NOT YET VERIFIED**. A new measurement, run
 under frozen rules and labelled separately (it never replaces CP7-A), needs the
 owner's GO; it is proposed, not run.
+
+**Dated revision 2026-10-26.** The verdict above is the CP4 record. Under the acceptance amendment (§5) token
+measurement is a per-agent evaluation and is not a core gate. The OpenCode M9 re-measure stays UNAVAILABLE
+(expired API key; preflight of 2026-10-26, no session run). Claude Code and Codex were not measured in this
+milestone. Recorded in [m9-preprelease-acceptance-amendment.md](m9-preprelease-acceptance-amendment.md) §5.
 
 ## 9. Evidence index
 

@@ -457,6 +457,8 @@ Matrix summary (release-gate status at M9 entry; details per gate below):
 | G-SEC | filesystem, isolation, recovery | M1/M7/M8 + WAL audit + fix | NOT YET VERIFIED (release) |
 | G-PAR | competitive validity (≥3 of 5 pre-registered dimensions) | — (M10 target) | not an M9 gate |
 
+**Dated revision 2026-10-26 (acceptance alignment).** The matrix above is the M9 entry record and is unchanged. [m9-preprelease-acceptance-amendment.md](m9-preprelease-acceptance-amendment.md) separates core acceptance from agent integration (§2), defines the status legend (§3), and records the scope change for G-MCP and G-TOK (§4–5). No gate becomes PASS through documentation alone.
+
 ### G-LIC — License inventory, SBOM, notices
 
 - **Requirement.** Every distributed v0.1.0 artifact has a complete audited
@@ -561,6 +563,12 @@ Matrix summary (release-gate status at M9 entry; details per gate below):
   carries only JSON-RPC.
 - **STOP.** Transport crash, stdout pollution, or a read tool creating /
   migrating a store.
+- **Dated revision 2026-10-26 (acceptance alignment).** The text above stays as the historical record. Its
+  criteria are split (amendment §4). *Core MCP acceptance* covers protocol and contract on the shipped binary,
+  checked with a deterministic client, with no agent and no API key. It is repository validation. *Agent
+  integration* is one real session per supported AI coding agent, judged on that agent's own evidence. The
+  OpenCode session above is OpenCode's integration criterion only. Claude Code and Codex are reported with their
+  own evidence status (amendment §4) and do not change this gate.
 
 ### G-SYN — Source-verified syntax
 
@@ -727,6 +735,10 @@ Matrix summary (release-gate status at M9 entry; details per gate below):
   limitations restated.
 - **STOP.** Metric substitution, recomputation of frozen results, declaring
   release PASS from milestone history, or extrapolated claims.
+- **Dated revision 2026-10-26 (acceptance alignment).** Token measurement is evaluated per agent (amendment §5)
+  and is not a core acceptance criterion. The CP7-A figures stay as recorded historical evidence for OpenCode on
+  the M8 surface. The OpenCode preflight of 2026-10-26 failed on authentication before any session ran. That is
+  UNAVAILABLE evidence, not a Riltra correctness result. No Claude Code or Codex measurement was run.
 
 ### G-SEC — Filesystem, repository isolation, recovery
 

@@ -1,0 +1,1 @@
+two scans of the candidate home with the HEAD binary; outputs byte-identical: yes
