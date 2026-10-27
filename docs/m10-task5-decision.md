@@ -129,8 +129,27 @@ Each job builds with `cargo build --release --locked`, runs
 platform test above. The required `check (windows-latest)`,
 `check (ubuntu-latest)` and `check (macos-15)` contexts are unchanged.
 
-Hosted run evidence is added by a follow-up DCO commit once the run exists.
-Until that evidence is recorded, the hosted result is **pending**, not PASS.
+Hosted Phase A, run
+[40511229393](https://github.com/RyanAraaful/riltra/actions/runs/40511229393)
+on commit `60f17e7a4fcb2571ae3f8f3fc8c7e29dac85a8ac`, completed successfully:
+
+| Job | Result | Duration |
+|---|---|---|
+| `installer (windows-2025)` | PASS, `test-install: all checks passed` | 4m 8s |
+| `installer (ubuntu-24.04)` | PASS, `test-install: all checks passed` | 1m 57s |
+| `installer (macos-15-intel)` | PASS, `test-install: all checks passed` | 5m 26s |
+| `check (windows-latest)` | PASS | 5m 42s |
+| `check (ubuntu-latest)` | PASS | 2m 36s |
+| `check (macos-15)` | PASS | 5m 25s |
+| `security` | PASS | 21s |
+
+Each installer job built the archive from the same commit, ran
+`release_docs --check`, packaged it with `release/package.sh`, and passed the
+positive install, reinstall, checksum, unsupported-platform, conflict, archive
+security and installed CLI/MCP smoke checks. The job logs record them line by
+line; the macOS job also created and exercised the `~/.local/bin/riltra`
+symlink and the user-owned payload. Windows exercised the Windows PowerShell
+5.1 positive install and the PowerShell 7 reinstall and negative cases.
 
 ## 7. Limitations
 
@@ -153,7 +172,6 @@ Until that evidence is recorded, the hosted result is **pending**, not PASS.
 
 - Option B implementation: PASS on the local Windows and Linux x64 Phase A
   runs listed in §6.
-- Hosted Windows, Ubuntu and macOS Phase A: pending the CI run recorded after
-  the first push.
+- Hosted Windows, Ubuntu and macOS Phase A: PASS in run 40511229393.
 - Owner audit readiness: ready for review of the decision, installers, tests
   and CI job. Merge, tag, release and Phase B remain separate owner decisions.
