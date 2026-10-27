@@ -2,9 +2,8 @@
 
 **Date:** 2026-10-27
 **Branch:** `m10-evidence-distribution`
-**HEAD:** `e4cba6a891aed5ce7a77e508f6ef6c1184a9f657`
-**Remote:** `origin/m10-evidence-distribution` at the same SHA
-**Status:** DRAFT for owner audit. Uncommitted. No new benchmark, no source/API/schema change, no frozen-evidence edit. No merge, tag, release, or Phase B.
+**Audit snapshot:** `e4cba6a891aed5ce7a77e508f6ef6c1184a9f657` — the branch state examined before this consolidation was committed; it is not the current branch HEAD.
+**Status:** archival consolidation after owner audit and CI verification. This document was committed and pushed to `origin/m10-evidence-distribution` after the audit snapshot. No new benchmark, no source/API/schema change, no frozen-evidence edit. No merge, tag, release, or Phase B.
 **Scope:** `docs/m10-design-gate.md` section 10; read-only consolidation over M10 Tasks 2 to 5.
 
 ## 1. Method and boundaries
@@ -33,12 +32,12 @@
 | M10 base | `7f86891c0942cc1d7efd6ec29c6c0b6b1606e727` (`origin/master`) |
 | Freeze commit | `6b800fba6625e89cbd9428f988c6e9a1877b893a` |
 | Branch | `m10-evidence-distribution` |
-| Local HEAD | `e4cba6a891aed5ce7a77e508f6ef6c1184a9f657` |
-| Remote branch | `origin/m10-evidence-distribution` at `e4cba6a891aed5ce7a77e508f6ef6c1184a9f657` |
+| Audit snapshot (pre-Task 6) | `e4cba6a891aed5ce7a77e508f6ef6c1184a9f657` |
+| Remote at audit snapshot | `origin/m10-evidence-distribution` at the same SHA |
 | `origin/master` | `7f86891c0942cc1d7efd6ec29c6c0b6b1606e727`, unchanged |
 | Worktree | only `?? CLAUDE.md`; the six governance documents are ignored |
 | Tags / GitHub Releases | none |
-| Merge state | branch is not merged; only `origin/m10-evidence-distribution` contains HEAD |
+| Merge state | branch is not merged; only `origin/m10-evidence-distribution` contains this branch history |
 
 Task commits reviewed:
 
@@ -49,7 +48,7 @@ Task commits reviewed:
 | 4 | `aa348ec` | OpenCode pilot evidence |
 | 5 | `60f17e7` | Option B installers and Phase A CI |
 | 5 | `e4cba6a` | hosted Phase A evidence in the decision record |
-| 6 | this file | draft consolidation, not committed |
+| 6 | this document | consolidation committed after the audit snapshot; see branch history |
 
 ### 2.2 Local governance protection
 
@@ -83,7 +82,7 @@ The frozen M10 inputs are unchanged since the freeze commit. The M9 frozen
 evidence under `docs/pilots/m9-rc-ee7482d/` and `docs/pilots/cp7a/` is unchanged
 from the M10 base. No `crates/`, `Cargo.toml`, `Cargo.lock`, or
 `.github/workflows/release-candidate.yml` change exists between `7f86891` and
-HEAD.
+the audit snapshot.
 
 The five Task 2 to 5 commits contain only `docs/`, `release/`, and
 `.github/workflows/ci.yml` paths. No product source, public contract, schema,
@@ -511,7 +510,7 @@ If the owner later authorizes public reporting:
 
 ## 12. Conclusion
 
-This draft satisfies the Task 6 consolidation scope: it separates engine,
+This document satisfies the Task 6 consolidation scope: it separates engine,
 agent benchmark, installer Phase A, and release readiness; preserves every
 historical FAIL, UNMET, UNAVAILABLE, and the unassessed G-PAR state; includes
 the Task 5 decision record and the hosted Phase A evidence; and lists every
@@ -521,6 +520,6 @@ the M9 component gates PASS in their tested scopes, and Phase B follows the
 first pre-release rather than blocking it.
 
 It adds no measurement and changes no source, API, schema, or frozen evidence.
-It is ready for owner audit, not for a final/stable release. Nothing has been
-committed or pushed; merge, tag, pre-release, release, and Phase B remain
-separate owner decisions.
+It is ready for owner audit, not for a final/stable release. The document is
+committed on `m10-evidence-distribution`; merge, tag, pre-release, release, and
+Phase B remain separate owner decisions.
