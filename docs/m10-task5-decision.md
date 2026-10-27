@@ -173,5 +173,20 @@ symlink and the user-owned payload. Windows exercised the Windows PowerShell
 - Option B implementation: PASS on the local Windows and Linux x64 Phase A
   runs listed in §6.
 - Hosted Windows, Ubuntu and macOS Phase A: PASS in run 40511229393.
-- Owner audit readiness: ready for review of the decision, installers, tests
-  and CI job. Merge, tag, release and Phase B remain separate owner decisions.
+- Owner decision: O-15 and O-7 approved on 2026-10-27 (§9). Merge, tag, release
+  and Phase B remain separate owner decisions.
+
+## 9. Owner decision record (2026-10-27)
+
+The owner approved, on 2026-10-27:
+
+- **O-15 APPROVED:** distribution uses Option B, the M9 packaging plus the
+  PowerShell and shell installers, including the tested Windows and POSIX
+  install layouts in §3.
+- **O-7 APPROVED:** the Phase A installer matrix uses `windows-2025`,
+  `ubuntu-24.04`, and `macos-15-intel`.
+
+These approvals accept this decision record and the runner labels. They do not
+authorize a merge, tag, GitHub Release, public publication, Phase B execution,
+or any change to the recorded evidence. Phase B remains NOT TESTED (§7) and
+requires O-12 after a published pre-release (O-13).

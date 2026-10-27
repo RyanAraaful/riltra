@@ -3,7 +3,7 @@
 **Date:** 2026-10-27
 **Branch:** `m10-evidence-distribution`
 **Audit snapshot:** `e4cba6a891aed5ce7a77e508f6ef6c1184a9f657` — the branch state examined before this consolidation was committed; it is not the current branch HEAD.
-**Status:** archival consolidation after owner audit and CI verification. This document was committed and pushed to `origin/m10-evidence-distribution` after the audit snapshot. No new benchmark, no source/API/schema change, no frozen-evidence edit. No merge, tag, release, or Phase B.
+**Status:** archival consolidation after owner audit and CI verification. This document was committed and pushed to `origin/m10-evidence-distribution` after the audit snapshot. O-15 and O-7 were approved by the owner on 2026-10-27. No new benchmark, no source/API/schema change, no frozen-evidence edit. No merge, tag, release, or Phase B.
 **Scope:** `docs/m10-design-gate.md` section 10; read-only consolidation over M10 Tasks 2 to 5.
 
 ## 1. Method and boundaries
@@ -354,14 +354,13 @@ the static no-elevation scan, and the installed CLI/MCP smoke.
   or claimed.
 - No code signing, notarization, package manager, GUI installer, auto-update,
   or PATH modification is provided.
-- **O-15 remains an owner review item.** The decision record states Option B was
-  selected; the local governance document still marks formal acceptance of the
-  decision record and POSIX layout as pending. This consolidation records that
-  ambiguity rather than declaring it resolved.
+- **O-15: APPROVED 2026-10-27.** The owner accepted the Option B decision
+  record and the Windows/POSIX install layout. Formal acceptance is recorded in
+  the Task 5 decision record (§9).
 
-**Review outcome:** hosted Phase A is PASS and the decision record is ready for
-owner audit. The owner review of the decision record and layout (O-15) is
-pending; no reviewer has approved release.
+**Review outcome:** hosted Phase A is PASS and the owner approved the decision
+record and layout (O-15) on 2026-10-27. That approval does not authorize any
+release.
 
 ## 6. Release readiness
 
@@ -371,7 +370,7 @@ authorization state, and the untested Phase B step.
 | Area | Technical status | Authorization status | Separate owner decision |
 |---|---|---|---|
 | Engine core | PASS within the M9 D-1 to D-6 scope; four C++ criteria UNMET | no new release authorization | accept carried limitations |
-| Installer Phase A | PASS (run 40511229393) | committed on the branch only; not merged | O-15 acceptance |
+| Installer Phase A | PASS (run 40511229393; runners `windows-2025`, `ubuntu-24.04`, `macos-15-intel`) | committed on the branch only; not merged | O-15 and O-7 approved 2026-10-27 |
 | Merge to master | NOT DONE | NOT AUTHORIZED | owner GO |
 | Tag and GitHub pre-release | NONE | NOT AUTHORIZED | O-13 |
 | Phase B release-asset download | NOT TESTED; requires a published pre-release | NOT AUTHORIZED | O-12, after O-13 |
@@ -453,15 +452,25 @@ The four UNMET capabilities are not relabeled by M10 or by this consolidation.
   result.
 - **M10 confirmatory 120-run phase:** NOT RUN; requires owner GO.
 
-## 9. Owner decision queue
+## 9. Owner decisions
+
+**Decided on 2026-10-27:**
+
+- **O-15 APPROVED:** distribution uses Option B (M9 packaging plus the
+  PowerShell and shell installers), including the tested Windows and POSIX
+  install layouts.
+- **O-7 APPROVED:** the Phase A installer matrix uses `windows-2025`,
+  `ubuntu-24.04`, and `macos-15-intel`.
+
+Record: [Task 5 decision record](m10-task5-decision.md) §9.
+
+**Pending:**
 
 | ID | Decision needed | Why it matters | Blocks |
 |---|---|---|---|
-| O-15 | Accept the Option B decision record and the POSIX payload/symlink layout | Formalizes what is already implemented and tested | Task 5 adoption record |
 | O-9 | Authorize the confirmatory 120-run phase, or accept the pilot limitation | G-PAR cannot be assessed without it | G-PAR, superiority claims |
 | O-12 | Authorize Phase B Release-asset download | Phase A used local archives only | Phase B |
 | O-13 | Authorize a pre-release tag and public pre-release | No tag or GitHub Release exists | Phase B and publication |
-| O-7 | Confirm the pinned runner labels are an acceptable M9-equivalent change | Phase A used `windows-2025`, `ubuntu-24.04`, `macos-15-intel` | Reproducibility record |
 | Task 2 review | Keep or amend the strict-format rule and accept grader v2 | Four strict FAILs and the A4 initial FAIL are owner-visible | Confirmatory design |
 | Task 3 review | Accept the contaminated pilot or authorize a clean rerun | A4 read operator files outside the snapshots | Any clean Codex claim |
 | Section 10 | Approve public wording and any release text | G-PAR is not assessed and no external comparator exists | Publication |
@@ -489,10 +498,10 @@ If the owner later authorizes public reporting:
 
 ## 11. Audit notes and non-blocking discrepancies
 
-1. **O-15 wording differs between records.** `docs/m10-task5-decision.md`
-   states Option B was selected and Option A rejected; the local governance
-   document still marks O-15 acceptance pending. Treat formal acceptance as an
-   owner action, not as proven by this consolidation.
+1. **O-15 is resolved.** `docs/m10-task5-decision.md` §9 records the owner
+   approval of Option B and the Windows/POSIX install layout on 2026-10-27.
+   This consolidation records the same decision; the approval does not
+   authorize a release.
 2. **Task 4 manifest name.** The Task 4 README refers to
    `MANIFEST-SHA256.txt`; the committed file is `SHA256SUMS.txt`, and its 197
    entries pass. This is a documentation-only naming mismatch in frozen
@@ -520,6 +529,7 @@ the M9 component gates PASS in their tested scopes, and Phase B follows the
 first pre-release rather than blocking it.
 
 It adds no measurement and changes no source, API, schema, or frozen evidence.
-It is ready for owner audit, not for a final/stable release. The document is
-committed on `m10-evidence-distribution`; merge, tag, pre-release, release, and
-Phase B remain separate owner decisions.
+Owner decisions O-15 and O-7 are recorded as approved on 2026-10-27. The
+document is committed on `m10-evidence-distribution`; merge, tag, pre-release,
+release, and Phase B remain separate owner decisions, and the project is not
+approved for a final/stable release.
