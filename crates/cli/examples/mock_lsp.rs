@@ -156,15 +156,19 @@ fn publish_diagnostics_for(uri: &str, outside: &str) {
             "{{\"uri\":\"{uri}\",\"diagnostics\":[{{\"range\":{{\"start\":{{\"line\":3,\"character\":9}},\"end\":{{\"line\":3,\"character\":23}}}},\"severity\":1,\"code\":\"pp_file_not_found\",\"source\":\"clang\",\"message\":\"'geom/point.h' file not found in {root}/include\"}},{{\"range\":{{\"start\":{{\"line\":1,\"character\":4}},\"end\":{{\"line\":1,\"character\":9}}}},\"severity\":2,\"code\":\"unused-variable\",\"source\":\"clang\",\"message\":\"unused variable 'x'\"}},{{\"range\":{{\"start\":{{\"line\":0,\"character\":0}},\"end\":{{\"line\":0,\"character\":1}}}},\"severity\":1,\"code\":\"long-message\",\"message\":\"{long}\"}}]}}"
         ),
     );
+    publish_outside(outside);
+    notify(
+        "textDocument/publishDiagnostics",
+        &format!("{{\"uri\":\"{uri}\",\"diagnostics\":[{batch}]}}"),
+    );
+}
+
+fn publish_outside(outside: &str) {
     notify(
         "textDocument/publishDiagnostics",
         &format!(
             "{{\"uri\":\"{outside}\",\"diagnostics\":[{{\"range\":{{\"start\":{{\"line\":0,\"character\":0}},\"end\":{{\"line\":0,\"character\":1}}}},\"severity\":1,\"code\":\"outside-the-repository\",\"message\":\"this file is outside the repository\"}}]}}"
         ),
-    );
-    notify(
-        "textDocument/publishDiagnostics",
-        &format!("{{\"uri\":\"{uri}\",\"diagnostics\":[{batch}]}}"),
     );
 }
 
@@ -257,8 +261,11 @@ fn main() {
         }
         if body.contains("\"method\":\"textDocument/didOpen\"") {
             opened = opened_uri(&body);
-            if mode == "diagnostics" {
+            if mode == "diagnostics" || mode == "diagnostics-ready" {
                 publish_diagnostics(&opened);
+            }
+            if mode == "diagnostics-outside" {
+                publish_outside(&outside_file());
             }
             continue;
         }
@@ -316,6 +323,13 @@ fn main() {
                     respond(
                         &id,
                         "{\"capabilities\":{},\"serverInfo\":{\"version\":\"0.0-mock\"}}",
+                    );
+                    continue;
+                }
+                "diagnostics-ready" | "diagnostics-outside" => {
+                    respond(
+                        &id,
+                        "{\"capabilities\":{\"referencesProvider\":true,\"positionEncodingKind\":\"utf-16\",\"diagnosticProvider\":{\"interFileDependencies\":false,\"workspaceDiagnostics\":false}},\"serverInfo\":{\"version\":\"0.0-mock\"}}",
                     );
                     continue;
                 }

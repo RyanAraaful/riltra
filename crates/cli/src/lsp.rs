@@ -696,8 +696,13 @@ impl Session {
     /// The path of a URI relative to the repository root, or `None` when the
     /// URI points outside it. Only relative paths ever leave this function.
     fn relative_repo_path(&self, uri: &str) -> Option<String> {
-        let path = semantic::uri_path(uri).ok()?;
-        if !crate::paths::contains(&self.canonical_root, &path) {
+        self.relative_to_root(&semantic::uri_path(uri).ok()?)
+    }
+
+    /// The path's location relative to the repository root, or `None` when it
+    /// is outside it or cannot be resolved. Only relative paths leave here.
+    fn relative_to_root(&self, path: &Path) -> Option<String> {
+        if !crate::paths::contains(&self.canonical_root, path) {
             return None;
         }
         let canonical = path.canonicalize().ok()?;
@@ -832,15 +837,17 @@ impl Session {
         Some(crate::store::content_digest(&bytes))
     }
 
-    /// Warmup: when the server advertises push diagnostics, wait (bounded)
-    /// for the first `publishDiagnostics` of the opened file before any
-    /// position query. Pull-model servers never push: callers additionally
-    /// retry empty answers (see `definition`). Servers without the
-    /// capability skip the wait entirely.
+    /// Warmup: when the server advertises `diagnosticProvider` (pull
+    /// diagnostics), wait (bounded) for the first PUSHED
+    /// `publishDiagnostics` of the opened file before any position query.
+    /// Pull-only servers may never push: callers additionally retry empty
+    /// answers (see `definition`). Servers without the capability skip the
+    /// wait entirely. This sends no pull request.
     fn await_analysis(&mut self, rel: &str) -> Result<(), String> {
         if !self.diagnostic_provider {
             return Ok(());
         }
+        let expected = self.relative_to_root(&self.root.join(rel));
         let deadline = std::time::Instant::now() + self.timeout.min(Duration::from_secs(15));
         loop {
             let left = deadline.saturating_duration_since(std::time::Instant::now());
@@ -854,14 +861,10 @@ impl Session {
                     if method == "textDocument/publishDiagnostics" {
                         self.note_notification(&method, &params);
                         let uri = params.get("uri").and_then(Value::as_str).unwrap_or("");
-                        if let Ok(path) = uri_to_path(&self.root, uri) {
-                            let mut check = self.root.clone();
-                            for part in rel.split('/') {
-                                check.push(part);
-                            }
-                            if path == check {
-                                return Ok(());
-                            }
+                        if expected.as_deref().is_some_and(|expected| {
+                            self.relative_repo_path(uri).as_deref() == Some(expected)
+                        }) {
+                            return Ok(());
                         }
                     } else {
                         self.note_notification(&method, &params);
@@ -1526,6 +1529,15 @@ mod tests {
         spawn(mock_spec("diagnostics", root, &root.join("mock.log"))).unwrap()
     }
 
+    /// The production shape: the session root is canonical, while the mock
+    /// speaks the plain path. On Windows the canonical form carries `\\?\`.
+    fn canonical_mock_spec(mode: &str, dir: &std::path::Path, log: &std::path::Path) -> ServerSpec {
+        let mut spec = mock_spec(mode, dir, log);
+        spec.root = dir.canonicalize().unwrap();
+        spec.timeout = std::time::Duration::from_millis(750);
+        spec
+    }
+
     #[test]
     fn a_path_with_a_space_leaves_nothing_sensitive() {
         // A path with a space in it has no certain end: the redaction must
@@ -1839,6 +1851,104 @@ mod tests {
                 .iter()
                 .any(|d| d.contains("pp_file_not_found")),
             "a diagnostic published after the answer is still delivered: {:?}",
+            def.diagnostics
+        );
+    }
+
+    #[test]
+    fn a_canonical_repository_root_matches_the_readiness_notification() {
+        let (dir, log) = mock_repo();
+        let mut session = spawn(canonical_mock_spec("diagnostics-ready", &dir, &log)).unwrap();
+        let start = std::time::Instant::now();
+        let def = session.definition("main.rs", 1, 5).unwrap();
+        assert_eq!(def.facts.len(), 1, "the server answered: {def:?}");
+        assert!(
+            !def.diagnostics
+                .iter()
+                .any(|d| d.contains("analysis wait timed out")),
+            "the published diagnostic ended the wait: {:?}",
+            def.diagnostics
+        );
+        assert!(
+            start.elapsed() < std::time::Duration::from_millis(600),
+            "readiness must not wait for the timeout: {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_expected_path_is_canonicalized_like_the_published_uri() {
+        // Windows is case-insensitive: the read succeeds under a different
+        // spelling, but the server's canonical URI differs from `rel`.
+        let (dir, log) = mock_repo();
+        let mut session = spawn(canonical_mock_spec("diagnostics-ready", &dir, &log)).unwrap();
+        let start = std::time::Instant::now();
+        let def = session.definition("MAIN.RS", 1, 5).unwrap();
+        assert_eq!(def.facts.len(), 1, "the server answered: {def:?}");
+        assert!(
+            !def.diagnostics
+                .iter()
+                .any(|d| d.contains("analysis wait timed out")),
+            "both sides of the comparison are canonical: {:?}",
+            def.diagnostics
+        );
+        assert!(
+            start.elapsed() < std::time::Duration::from_millis(600),
+            "readiness must not wait for the timeout: {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    fn an_outside_notification_does_not_end_the_wait_for_a_percent_name() {
+        // The old URI round-trip decoded `%20` to a space and produced a
+        // `None` expected path; an outside notification was also `None`.
+        // This pins that a literal '%' cannot shorten the wait that way.
+        let (dir, log) = mock_repo();
+        std::fs::write(dir.join("a%20b.rs"), MOCK_MAIN).unwrap();
+        let mut session = spawn(canonical_mock_spec("diagnostics-outside", &dir, &log)).unwrap();
+        let start = std::time::Instant::now();
+        let def = session.definition("a%20b.rs", 1, 5).unwrap();
+        assert_eq!(def.facts.len(), 1, "the server answered: {def:?}");
+        assert!(
+            def.diagnostics
+                .iter()
+                .any(|d| d.contains("analysis wait timed out")),
+            "an outside notification is not readiness: {:?}",
+            def.diagnostics
+        );
+        assert!(
+            start.elapsed() >= std::time::Duration::from_millis(600),
+            "the wait ran to its deadline: {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    fn a_diagnostic_outside_the_repository_is_not_a_readiness_signal() {
+        let (dir, log) = mock_repo();
+        let mut session = spawn(canonical_mock_spec("diagnostics-outside", &dir, &log)).unwrap();
+        let start = std::time::Instant::now();
+        let def = session.definition("main.rs", 1, 5).unwrap();
+        assert_eq!(def.facts.len(), 1, "the server answered: {def:?}");
+        assert!(
+            def.diagnostics
+                .iter()
+                .any(|d| d.contains("analysis wait timed out")),
+            "the outside notification must not end the wait: {:?}",
+            def.diagnostics
+        );
+        assert!(
+            start.elapsed() >= std::time::Duration::from_millis(600),
+            "the wait ran to its deadline: {:?}",
+            start.elapsed()
+        );
+        assert!(
+            !def.diagnostics
+                .join("\n")
+                .contains("outside-the-repository"),
+            "an outside diagnostic is not reported: {:?}",
             def.diagnostics
         );
     }
