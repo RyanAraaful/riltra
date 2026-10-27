@@ -1,13 +1,63 @@
-# Installing a Riltra release-candidate archive
+# Installing Riltra
 
-Riltra ships as one native executable. There is no installer, no service and
-no background process, and the binary makes no network call.
+Riltra ships as one native executable. There is no service and no background
+process, and the binary makes no network call. The installer runs at user level:
+no administrative rights, no PATH change.
 
-1. Extract the archive anywhere. Check it first against the `.sha256` file that
-   comes with it (`sha256sum -c`, `shasum -a 256 -c`, or `Get-FileHash` on
-   Windows).
-2. Put the directory on your `PATH`, or call the binary by its full path.
-3. Run `riltra --version`, `riltra --help` and `riltra status`.
+## Install from a release
+
+Windows PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+Linux or macOS:
+
+```sh
+sh install.sh
+```
+
+The scripts download the archive for this platform and its `.sha256` file from
+the GitHub release, verify the checksum, and then install. To use a local
+archive instead, pass it explicitly:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -ArchivePath .\riltra-0.1.0-windows-x64.zip
+```
+
+```sh
+sh install.sh --archive ./riltra-0.1.0-linux-x64.tar.gz
+```
+
+The archive and its `.sha256` must sit together. A missing, malformed, or
+mismatched checksum stops the install before anything is extracted. Unsupported
+platforms and ARM64 are refused with a non-zero exit.
+
+## Install locations
+
+| Platform | Command | Payload and documents |
+|---|---|---|
+| Windows x64 | `%LOCALAPPDATA%\Programs\Riltra\bin\riltra.exe` | Same directory |
+| Linux x64 | `$HOME/.local/bin/riltra` (symlink) | `$HOME/.local/share/riltra/` |
+| macOS Intel x64 | `$HOME/.local/bin/riltra` (symlink) | `$HOME/.local/share/riltra/` |
+
+The installer prints the directory to add to `PATH`; it does not edit a shell
+profile, the registry, or a system-wide path. On Linux and macOS the shared
+`~/.local/bin` directory receives only the `riltra` symlink; the notices stay in
+the private payload directory.
+
+## Reinstall and removal
+
+Run the same installer again. It replaces only files recorded in the Riltra
+manifest and refuses to overwrite an unrelated `riltra` file or symlink.
+
+Removal is manual:
+
+- Windows: delete `%LOCALAPPDATA%\Programs\Riltra`.
+- Linux and macOS: delete the `riltra` symlink in `~/.local/bin` (only after
+  checking that it points into `~/.local/share/riltra`) and delete
+  `~/.local/share/riltra`.
 
 ## First use
 

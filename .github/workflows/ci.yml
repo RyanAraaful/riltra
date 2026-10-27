@@ -47,6 +47,46 @@ jobs:
       - run: cargo run -q -p riltra -- --version
       - run: cargo run -q -p riltra -- status
 
+  # Phase A of M10 Task 5: a native archive from this commit, installed and
+  # checked on each native x64 runner. It complements the `check` matrix and
+  # does not replace release-candidate.yml or create a release. The job names
+  # are deliberately new: the required `check (...)` contexts stay unchanged.
+  installer-phase-a:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: windows-2025, runner: windows-2025, platform: windows-x64, ext: zip }
+          - { name: ubuntu-24.04, runner: ubuntu-24.04, platform: linux-x64, ext: tar.gz }
+          - { name: macos-15-intel, runner: macos-15-intel, platform: macos-x64, ext: tar.gz }
+    name: installer (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Release build
+        run: cargo build --release --locked -p riltra
+      - name: Release documents match the locked dependency graph
+        run: cargo run --locked -q --example release_docs -- --check
+      - name: Package
+        shell: bash
+        run: bash release/package.sh "${{ matrix.platform }}" "${{ matrix.ext }}"
+      - name: Installer Phase A (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $archive = (Get-ChildItem -LiteralPath dist -Filter *.zip | Select-Object -First 1).FullName
+          pwsh -NoProfile -File release/test-install.ps1 -ArchivePath $archive
+      - name: Installer Phase A (Linux and macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          archive=
+          for candidate in dist/riltra-*.tar.gz; do archive=$candidate; break; done
+          bash release/test-install.sh --archive "$archive"
+
   security:
     runs-on: ubuntu-latest
     permissions:
