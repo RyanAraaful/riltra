@@ -447,6 +447,17 @@ impl Session {
         Ok(())
     }
 
+    /// Answer a server→client request with MethodNotFound. Riltra implements
+    /// no server-initiated requests, but silence is a protocol violation: a
+    /// server may wait for the reply before it publishes diagnostics.
+    fn answer_server_request(&mut self, params: &Value) {
+        let rid = params.get("id").cloned().unwrap_or(Value::Null);
+        let _ = self.send_value(&serde_json::json!({
+            "jsonrpc": "2.0", "id": rid,
+            "error": {"code": -32601, "message": "not implemented"}
+        }));
+    }
+
     /// Send a request and wait for the matching id. Server→client requests
     /// get a protocol-correct MethodNotFound; known notifications are
     /// consumed into diagnostics; unknown `$/` notifications are recorded
@@ -487,13 +498,8 @@ impl Session {
                     method: m,
                     params: p,
                 }) => {
-                    if let Some(req) = m.strip_prefix("request:") {
-                        let _ = req;
-                        let rid = p.get("id").cloned().unwrap_or(Value::Null);
-                        let _ = self.send_value(&serde_json::json!({
-                            "jsonrpc": "2.0", "id": rid,
-                            "error": {"code": -32601, "message": "not implemented"}
-                        }));
+                    if m.strip_prefix("request:").is_some() {
+                        self.answer_server_request(&p);
                     } else {
                         self.note_notification(&m, &p);
                     }
@@ -658,12 +664,8 @@ impl Session {
                 Ok(Incoming::Notify { method, params }) => {
                     // A server request still has to be answered, or a server
                     // that waits for it would stall the shutdown.
-                    if let Some(_req) = method.strip_prefix("request:") {
-                        let rid = params.get("id").cloned().unwrap_or(Value::Null);
-                        let _ = self.send_value(&serde_json::json!({
-                            "jsonrpc": "2.0", "id": rid,
-                            "error": {"code": -32601, "message": "not implemented"}
-                        }));
+                    if method.strip_prefix("request:").is_some() {
+                        self.answer_server_request(&params);
                     } else {
                         self.note_notification(&method, &params);
                     }
@@ -858,7 +860,9 @@ impl Session {
             }
             match self.inbox.recv_timeout(left.min(Duration::from_secs(2))) {
                 Ok(Incoming::Notify { method, params }) => {
-                    if method == "textDocument/publishDiagnostics" {
+                    if method.strip_prefix("request:").is_some() {
+                        self.answer_server_request(&params);
+                    } else if method == "textDocument/publishDiagnostics" {
                         self.note_notification(&method, &params);
                         let uri = params.get("uri").and_then(Value::as_str).unwrap_or("");
                         if expected.as_deref().is_some_and(|expected| {
@@ -1678,6 +1682,71 @@ mod tests {
         assert!(
             logged.contains("client-request-answered"),
             "the client answered the server's request: {logged}"
+        );
+    }
+
+    #[test]
+    fn a_server_request_during_warmup_is_answered() {
+        // The server waits for the reply before it publishes diagnostics. A
+        // client that treats the request as an ordinary notification never
+        // answers, so readiness can only end at the deadline.
+        let (dir, log) = mock_repo();
+        let mut session = spawn(canonical_mock_spec("diagnostics-request", &dir, &log)).unwrap();
+        let start = std::time::Instant::now();
+        let def = session.definition("main.rs", 1, 5).unwrap();
+        assert_eq!(def.facts.len(), 1, "the server answered: {def:?}");
+        let logged = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(
+            logged.contains("client-request-answered"),
+            "the client answered during warmup: {logged}"
+        );
+        assert!(
+            !def.diagnostics
+                .iter()
+                .any(|d| d.contains("analysis wait timed out")),
+            "the answer ended the wait: {:?}",
+            def.diagnostics
+        );
+        assert!(
+            !def.diagnostics
+                .iter()
+                .any(|d| d.contains("request:workspace/configuration")),
+            "a server request is not a notification: {:?}",
+            def.diagnostics
+        );
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "readiness must not wait for the deadline: {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    fn a_provider_that_never_pushes_stays_bounded() {
+        // An advertised pull-diagnostic provider that never pushes must not
+        // make the client wait forever, and the wait must not turn an empty
+        // answer into evidence.
+        let (dir, log) = mock_repo();
+        let mut session = spawn(canonical_mock_spec("diagnostics-silent", &dir, &log)).unwrap();
+        let start = std::time::Instant::now();
+        let def = session.definition("main.rs", 1, 5).unwrap();
+        assert_eq!(def.facts.len(), 1, "the server answered: {def:?}");
+        assert!(
+            def.diagnostics
+                .iter()
+                .any(|d| d.contains("analysis wait timed out")),
+            "the deadline is reported: {:?}",
+            def.diagnostics
+        );
+        assert!(
+            start.elapsed() >= std::time::Duration::from_millis(600),
+            "the wait reached the session deadline: {:?}",
+            start.elapsed()
+        );
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "the wait is bounded: {:?}",
+            start.elapsed()
         );
     }
 

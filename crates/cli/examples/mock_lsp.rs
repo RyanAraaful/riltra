@@ -247,6 +247,7 @@ fn main() {
     let mut hang = false;
     let mut opened = String::new();
     let mut retryable_sent = false;
+    let mut awaiting_answer = false;
     while let Some(body) = read_message(&mut lock) {
         if body.contains("\"method\":\"initialized\"") {
             initialized = true;
@@ -264,6 +265,12 @@ fn main() {
             if mode == "diagnostics" || mode == "diagnostics-ready" {
                 publish_diagnostics(&opened);
             }
+            if mode == "diagnostics-request" {
+                // The server asks before it publishes: a client that ignores
+                // the request never receives the readiness notification.
+                ask_the_client("client-request-1");
+                awaiting_answer = true;
+            }
             if mode == "diagnostics-outside" {
                 publish_outside(&outside_file());
             }
@@ -276,6 +283,10 @@ fn main() {
         if body.contains("client-request-1") {
             // The client's reply to the server's own request.
             log_event("client-request-answered");
+            if awaiting_answer {
+                publish_diagnostics(&opened);
+                awaiting_answer = false;
+            }
             continue;
         }
         if body.contains("\"method\":\"shutdown\"") {
@@ -326,7 +337,10 @@ fn main() {
                     );
                     continue;
                 }
-                "diagnostics-ready" | "diagnostics-outside" => {
+                "diagnostics-ready"
+                | "diagnostics-outside"
+                | "diagnostics-request"
+                | "diagnostics-silent" => {
                     respond(
                         &id,
                         "{\"capabilities\":{\"referencesProvider\":true,\"positionEncodingKind\":\"utf-16\",\"diagnosticProvider\":{\"interFileDependencies\":false,\"workspaceDiagnostics\":false}},\"serverInfo\":{\"version\":\"0.0-mock\"}}",
