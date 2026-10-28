@@ -4536,3 +4536,349 @@ fn kjson01_search_output_is_valid_json() {
     assert_eq!(ids(&v), ["d1", "d2", "d3", "d4", "e1"]);
     assert_eq!(v["pagination"]["total"], json!(5));
 }
+
+// --- Evidence path reverse lookup ------------------------------------------
+
+fn create_evidence(home: &Path, repo: &str, id: &str, title: &str, body: &str, paths: &[&str]) {
+    write_record_with_evidence(home, repo, id, None, title, body, "active", paths);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn update_evidence(
+    home: &Path,
+    repo: &str,
+    id: &str,
+    expected: u64,
+    title: &str,
+    body: &str,
+    status: &str,
+    paths: &[&str],
+) {
+    write_record_with_evidence(home, repo, id, Some(expected), title, body, status, paths);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_record_with_evidence(
+    home: &Path,
+    repo: &str,
+    id: &str,
+    expected: Option<u64>,
+    title: &str,
+    body: &str,
+    status: &str,
+    paths: &[&str],
+) {
+    let evidence: Vec<String> = paths
+        .iter()
+        .map(|p| format!("{{\"path\":\"{p}\"}}"))
+        .collect();
+    let identity = if expected.is_some() {
+        String::new()
+    } else {
+        format!("\"id\":\"{id}\",\"kind\":\"decision\",")
+    };
+    let input = format!(
+        "{{{identity}\"title\":\"{title}\",\"body\":\"{body}\",\"status\":\"{status}\",\"author\":\"a\",\"evidence\":[{}]}}",
+        evidence.join(",")
+    );
+    let expected = expected.map(|n| n.to_string());
+    let mut args = vec!["knowledge"];
+    match &expected {
+        None => args.extend(["create", "--repo", repo, "--input", "-"]),
+        Some(n) => args.extend([
+            "update",
+            "--repo",
+            repo,
+            "--id",
+            id,
+            "--expected-revision",
+            n.as_str(),
+            "--input",
+            "-",
+        ]),
+    }
+    let (code, _out, err) = run_stdin(home, &args, input.as_bytes());
+    assert_eq!(code, 0, "write {id} with evidence: {err}");
+}
+
+fn search_doc(home: &Path, args: &[&str]) -> Value {
+    let mut full = vec!["knowledge", "search", "--repo", "krepo"];
+    full.extend_from_slice(args);
+    let (code, out, err) = run(home, &full);
+    assert_eq!(code, 0, "search {args:?}: {err}");
+    serde_json::from_str(&out)
+        .unwrap_or_else(|e| panic!("search {args:?} emitted invalid JSON: {e}\n{out}"))
+}
+
+fn hit_ids(v: &Value) -> Vec<String> {
+    v["result"]["hits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|hit| hit["id"].as_str().unwrap().to_string())
+        .collect()
+}
+
+fn write_repo_files(dir: &Path, paths: &[&str]) {
+    for path in paths {
+        let full = dir.join(path);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(&full, format!("fn {}\n", path.replace(['/', '.'], "_"))).unwrap();
+    }
+}
+
+#[test]
+fn search_by_evidence_path_only_intersection_exactness_and_paging() {
+    let h = home("pathsearch");
+    let dir = mkrepo(&h, "krepo");
+    init(&h, &dir, "krepo");
+    write_repo_files(
+        &dir,
+        &[
+            "src/id_policy.rs",
+            "src/main.rs",
+            "src/old.rs",
+            "src/new.rs",
+            "src/lifecycle.rs",
+        ],
+    );
+
+    create_evidence(
+        &h,
+        "krepo",
+        "d1",
+        "First",
+        "alpha sharedterm",
+        &["src/id_policy.rs"],
+    );
+    create_evidence(
+        &h,
+        "krepo",
+        "d2",
+        "Second",
+        "beta sharedterm",
+        &["src/main.rs"],
+    );
+    // The duplicate path must not duplicate the hit.
+    create_evidence(
+        &h,
+        "krepo",
+        "d3",
+        "Third",
+        "alpha sharedterm",
+        &["src/id_policy.rs", "src/main.rs", "src/id_policy.rs"],
+    );
+    create_evidence(
+        &h,
+        "krepo",
+        "d5",
+        "Fifth",
+        "gamma sharedterm",
+        &["src/old.rs"],
+    );
+    update_evidence(
+        &h,
+        "krepo",
+        "d5",
+        1,
+        "Fifth",
+        "gamma sharedterm",
+        "active",
+        &["src/new.rs"],
+    );
+    create_evidence(
+        &h,
+        "krepo",
+        "d6",
+        "Sixth",
+        "delta sharedterm",
+        &["src/lifecycle.rs"],
+    );
+    update_evidence(
+        &h,
+        "krepo",
+        "d6",
+        1,
+        "Sixth",
+        "delta sharedterm",
+        "archived",
+        &["src/lifecycle.rs"],
+    );
+
+    // Path-only: no text query, path echoed, query explicitly null.
+    let v = search_doc(&h, &["--path", "src/id_policy.rs"]);
+    assert_eq!(v["result"]["query"], Value::Null, "{v}");
+    assert_eq!(v["result"]["path"], json!("src/id_policy.rs"), "{v}");
+    assert_eq!(hit_ids(&v), ["d1", "d3"], "{v}");
+    assert_eq!(v["pagination"]["total"], json!(2), "{v}");
+    assert_eq!(v["pagination"]["truncated"], json!(false), "{v}");
+
+    // Text + path intersects; the same path set with both terms.
+    let v = search_doc(&h, &["--query", "alpha", "--path", "src/id_policy.rs"]);
+    assert_eq!(v["result"]["query"], json!("alpha"), "{v}");
+    assert_eq!(v["result"]["path"], json!("src/id_policy.rs"), "{v}");
+    assert_eq!(hit_ids(&v), ["d1", "d3"], "{v}");
+    let v = search_doc(&h, &["--query", "beta", "--path", "src/id_policy.rs"]);
+    assert_eq!(v["pagination"]["total"], json!(0), "{v}");
+    assert!(hit_ids(&v).is_empty(), "{v}");
+
+    // Whitespace query plus path is path-only and still answers null.
+    let v = search_doc(&h, &["--query", "   ", "--path", "src/main.rs"]);
+    assert_eq!(v["result"]["query"], Value::Null, "{v}");
+    assert_eq!(hit_ids(&v), ["d2", "d3"], "{v}");
+
+    // Exact stored string only: no normalization, case folding, or SQL syntax.
+    for path in [
+        "src/id_policy",
+        "SRC/ID_POLICY.RS",
+        "src\\id_policy.rs",
+        "' OR 1=1 --",
+    ] {
+        let v = search_doc(&h, &["--path", path]);
+        assert_eq!(v["pagination"]["total"], json!(0), "path {path:?}: {v}");
+    }
+
+    // Legacy requests without --path keep the exact old result object.
+    let v = search_doc(&h, &["--query", "alpha"]);
+    assert_eq!(v["result"]["query"], json!("alpha"), "{v}");
+    assert!(v["result"].get("path").is_none(), "{v}");
+    assert_eq!(hit_ids(&v), ["d1", "d3"], "{v}");
+    let v = search_doc(&h, &["--query", ""]);
+    assert_eq!(v["result"]["query"], json!(""), "{v}");
+    assert_eq!(v["pagination"]["total"], json!(0), "{v}");
+    // Whitespace-only without a path is also the legacy empty page, echoed
+    // exactly as authored, and must not grow a `path` member.
+    let v = search_doc(&h, &["--query", "   "]);
+    assert_eq!(v["result"]["query"], json!("   "), "{v}");
+    assert!(v["result"].get("path").is_none(), "{v}");
+    assert_eq!(v["pagination"]["total"], json!(0), "{v}");
+
+    // Only the current head revision participates.
+    assert_eq!(
+        search_doc(&h, &["--path", "src/old.rs"])["pagination"]["total"],
+        json!(0)
+    );
+    assert_eq!(hit_ids(&search_doc(&h, &["--path", "src/new.rs"])), ["d5"]);
+
+    // Visibility is unchanged: archived is hidden unless requested.
+    assert_eq!(
+        search_doc(&h, &["--path", "src/lifecycle.rs"])["pagination"]["total"],
+        json!(0)
+    );
+    assert_eq!(
+        hit_ids(&search_doc(
+            &h,
+            &["--path", "src/lifecycle.rs", "--include-archived"]
+        )),
+        ["d6"]
+    );
+
+    // Paging and generation guard still apply to path-filtered sets.
+    let v = search_doc(
+        &h,
+        &[
+            "--query",
+            "alpha",
+            "--path",
+            "src/id_policy.rs",
+            "--limit",
+            "1",
+        ],
+    );
+    assert_eq!(hit_ids(&v), ["d1"], "{v}");
+    assert_eq!(
+        v["pagination"],
+        json!({"limit": 1, "offset": 0, "total": 2, "truncated": true, "next_offset": 1}),
+        "{v}"
+    );
+    let generation = v["generation"].as_u64().unwrap().to_string();
+    let v = search_doc(
+        &h,
+        &[
+            "--query",
+            "alpha",
+            "--path",
+            "src/id_policy.rs",
+            "--limit",
+            "1",
+            "--offset",
+            "1",
+            "--generation",
+            &generation,
+        ],
+    );
+    assert_eq!(hit_ids(&v), ["d3"], "{v}");
+    assert_eq!(v["pagination"]["truncated"], json!(false), "{v}");
+}
+
+#[test]
+fn search_path_validation_missing_store_and_stale_freshness() {
+    let h = home("pathvalidation");
+    let dir = mkrepo(&h, "krepo");
+    init(&h, &dir, "krepo");
+    let db = db_path(&h, "krepo");
+
+    // A path request needs at least one of query or path.
+    let (code, out, err) = run(&h, &["knowledge", "search", "--repo", "krepo"]);
+    assert_eq!(code, 2, "{err}");
+    assert!(out.is_empty(), "{out}");
+    assert!(
+        err.contains("search requires a text query or an evidence path"),
+        "{err}"
+    );
+
+    // Empty path input is refused, never treated as "no path".
+    let (code, out, err) = run(
+        &h,
+        &["knowledge", "search", "--repo", "krepo", "--path", ""],
+    );
+    assert_eq!(code, 2, "{err}");
+    assert!(out.is_empty(), "{out}");
+    assert!(err.contains("search path must not be empty"), "{err}");
+
+    // Path input is bounded in bytes.
+    let big = "a".repeat(4097);
+    let (code, out, err) = run(
+        &h,
+        &["knowledge", "search", "--repo", "krepo", "--path", &big],
+    );
+    assert_eq!(code, 2, "{err}");
+    assert!(out.is_empty(), "{out}");
+    assert!(
+        err.contains("search path is 4097 bytes, at most 4096 allowed"),
+        "{err}"
+    );
+
+    // Missing store: a path search is an empty success and creates nothing.
+    assert!(!db.exists(), "validation created a store");
+    let v = search_doc(&h, &["--path", "src/main.rs"]);
+    assert_eq!(v["generation"], json!(0), "{v}");
+    assert_eq!(v["result"]["query"], Value::Null, "{v}");
+    assert_eq!(v["result"]["path"], json!("src/main.rs"), "{v}");
+    assert_eq!(v["result"]["hits"], json!([]), "{v}");
+    assert!(!db.exists(), "path search created a store");
+
+    // A stale binding is still found by its stored path and reports stale.
+    write_repo_files(&dir, &["src/stale.rs"]);
+    create_evidence(
+        &h,
+        "krepo",
+        "d1",
+        "First",
+        "alpha stalebody",
+        &["src/stale.rs"],
+    );
+    std::fs::write(dir.join("src/stale.rs"), b"changed after capture\n").unwrap();
+    let v = search_doc(&h, &["--path", "src/stale.rs"]);
+    assert_eq!(hit_ids(&v), ["d1"], "{v}");
+    assert_eq!(
+        v["result"]["hits"][0]["evidence"][0]["freshness"]["status"],
+        json!("stale"),
+        "{v}"
+    );
+    assert_eq!(
+        v["result"]["hits"][0]["verification"],
+        json!("Unverified"),
+        "{v}"
+    );
+}
