@@ -284,13 +284,43 @@ pub fn confined_read(root: &Path, rel: &str, cap_bytes: u64) -> Result<Vec<u8>, 
     let canonical_root = root
         .canonicalize()
         .map_err(|e| format!("repository root unavailable: {e}"))?;
-    if !crate::paths::contains(&canonical_root, &candidate) {
+    let mut contained = crate::paths::contains(&canonical_root, &candidate);
+    let mut was_missing = false;
+    // `contains` is false when canonicalize fails, which includes a missing
+    // path. Only a NotFound leaf gets the ancestor walk, which must remain
+    // inside the root; an existing symlink is still an escape.
+    if !contained {
+        match candidate.symlink_metadata() {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                was_missing = true;
+                let mut probe = candidate.parent();
+                loop {
+                    match probe {
+                        Some(p) if p.canonicalize().is_ok() => {
+                            contained = crate::paths::contains(&canonical_root, p);
+                            break;
+                        }
+                        Some(p) => probe = p.parent(),
+                        None => break,
+                    }
+                }
+            }
+            // Any other stat failure is not evidence of absence.
+            Err(e) => return Err(format!("cannot stat '{rel}': {e}")),
+            Ok(_) => {}
+        }
+    }
+    if !contained {
         return Err(format!("document path escapes repository: '{rel}'"));
     }
-    let len = candidate
+    let meta = candidate
         .metadata()
-        .map_err(|e| format!("cannot stat '{rel}': {e}"))?
-        .len();
+        .map_err(|e| format!("cannot stat '{rel}': {e}"))?;
+    // A path that appeared after the missing check must still resolve inside.
+    if was_missing && !crate::paths::contains(&canonical_root, &candidate) {
+        return Err(format!("document path escapes repository: '{rel}'"));
+    }
+    let len = meta.len();
     if len > cap_bytes {
         return Err(format!("'{rel}' too large ({len} bytes > {cap_bytes})"));
     }
@@ -598,6 +628,60 @@ mod tests {
         assert!(a.symbol.is_none() && b.symbol.is_none());
     }
 
+    // Not every stat failure means "absent": a non-NotFound error must be
+    // reported as itself, never retried as if the file were merely missing.
+    #[cfg(windows)]
+    #[test]
+    fn confined_read_reports_non_not_found_stat_errors() {
+        let dir = tmpdir("sem-confined-badname");
+        let outside = tmpdir("sem-confined-badname-out");
+        let link = dir.join("linked");
+        // A plain in-root invalid name looks the same whether or not it took
+        // the missing path, so it cannot prove the branch. A junction keeps
+        // the document path relative while making its nearest existing
+        // ancestor resolve outside: the broad `is_err()` path would report an
+        // escape, while the NotFound-only path must report the stat error.
+        // mklink /J needs no elevation, so failure here is a real failure.
+        let made = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(&outside)
+            .output()
+            .expect("run mklink");
+        assert!(
+            made.status.success(),
+            "mklink /J failed: {}",
+            String::from_utf8_lossy(&made.stderr)
+        );
+        let rel = "linked/bad<name.txt";
+        let os_err = std::fs::symlink_metadata(dir.join(rel)).unwrap_err();
+        assert_ne!(
+            os_err.kind(),
+            std::io::ErrorKind::NotFound,
+            "test input must not be a missing path"
+        );
+        // Control: a genuinely missing leaf under the same escaped ancestor
+        // still takes the missing path and is reported as an escape.
+        let missing = "linked/missing.txt";
+        assert_eq!(
+            std::fs::symlink_metadata(dir.join(missing))
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::NotFound
+        );
+        let escape = confined_read(&dir, missing, 1024).unwrap_err();
+        assert!(
+            escape.contains("escapes repository"),
+            "a missing leaf under the same escaped ancestor stays an escape: {escape}"
+        );
+        let err = confined_read(&dir, rel, 1024).unwrap_err();
+        assert_eq!(
+            err,
+            format!("cannot stat '{rel}': {os_err}"),
+            "non-NotFound stat error must be reported as-is, not as an escape"
+        );
+    }
+
     #[test]
     fn confined_read_guards_size_and_containment() {
         let dir = tmpdir("sem-confined");
@@ -605,8 +689,24 @@ mod tests {
         // Oversize content without a gigabyte fixture: cap below file size.
         std::fs::write(dir.join("big.txt"), vec![b'x'; 100]).unwrap();
         assert_eq!(confined_read(&dir, "ok.txt", 1024).unwrap(), b"hello");
-        assert!(confined_read(&dir, "missing.txt", 1024).is_err());
+        let missing = confined_read(&dir, "missing.txt", 1024).unwrap_err();
+        assert!(
+            missing.contains("cannot stat 'missing.txt'"),
+            "missing file must not read as an escape: {missing}"
+        );
         assert!(confined_read(&dir, "big.txt", 64).is_err());
         assert!(confined_read(&dir, "../escape.txt", 1024).is_err());
+        // An existing symlink out of the tree stays an escape.
+        let outside = tmpdir("sem-confined-out");
+        std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        let link = dir.join("escape.txt");
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink(outside.join("secret.txt"), &link).is_ok();
+        #[cfg(windows)]
+        let made = std::os::windows::fs::symlink_file(outside.join("secret.txt"), &link).is_ok();
+        if made {
+            let escape = confined_read(&dir, "escape.txt", 1024).unwrap_err();
+            assert!(escape.contains("escapes repository"), "{escape}");
+        }
     }
 }
