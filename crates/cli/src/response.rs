@@ -513,20 +513,25 @@ pub(crate) fn knowledge_envelope(
     }
 }
 
-/// Search result assembly: the echoed query, the visibility flags and the
-/// hits form one object. KJSON-01: until CP5 this closed the query object
-/// before `,"hits"`, so every successful search emitted invalid JSON.
+/// Search result assembly: the echoed query, optional exact evidence path,
+/// visibility flag and hits form one object. KJSON-01: until CP5 this closed
+/// the query object before `,"hits"`, so every successful search emitted
+/// invalid JSON. Omitting `path` keeps the pre-path bytes unchanged.
 pub(crate) fn knowledge_search_result_json(
-    query: &str,
+    query: Option<&str>,
+    path: Option<&str>,
     kind: Option<&str>,
     include_archived: bool,
     hits: &[knowledge::RecordVersion],
     root: &Path,
 ) -> String {
     let hits: Vec<String> = hits.iter().map(|r| record_json(r, root)).collect();
+    let path = path
+        .map(|p| format!(",\"path\":\"{}\"", json::escape(p)))
+        .unwrap_or_default();
     format!(
-        "{{\"query\":\"{}\",\"kind\":{},\"include_archived\":{},\"hits\":[{}]}}",
-        json::escape(query),
+        "{{\"query\":{}{path},\"kind\":{},\"include_archived\":{},\"hits\":[{}]}}",
+        opt_str(&query.map(str::to_string)),
         opt_str(&kind.map(str::to_string)),
         include_archived,
         hits.join(",")
@@ -1174,8 +1179,30 @@ mod tests {
         // CP5 correction the query object was closed before `,"hits"`, which
         // made every successful search output invalid JSON.
         assert_eq!(
-            knowledge_search_result_json("alpha", None, false, &[], Path::new(".")),
+            knowledge_search_result_json(Some("alpha"), None, None, false, &[], Path::new(".")),
             r#"{"query":"alpha","kind":null,"include_archived":false,"hits":[]}"#
+        );
+        assert_eq!(
+            knowledge_search_result_json(
+                Some("alpha"),
+                Some("src/main.rs"),
+                None,
+                false,
+                &[],
+                Path::new(".")
+            ),
+            r#"{"query":"alpha","path":"src/main.rs","kind":null,"include_archived":false,"hits":[]}"#
+        );
+        assert_eq!(
+            knowledge_search_result_json(
+                None,
+                Some("src/main.rs"),
+                None,
+                false,
+                &[],
+                Path::new(".")
+            ),
+            r#"{"query":null,"path":"src/main.rs","kind":null,"include_archived":false,"hits":[]}"#
         );
         let record = knowledge::RecordVersion {
             id: "d1".to_string(),
@@ -1195,7 +1222,8 @@ mod tests {
         };
         assert_eq!(
             knowledge_search_result_json(
-                "alpha",
+                Some("alpha"),
+                None,
                 Some("benchmark"),
                 true,
                 &[record],

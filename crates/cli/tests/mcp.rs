@@ -386,9 +386,9 @@ fn mcp_tools_list_advertises_the_twelve_tools() {
         assert_eq!(keys, expected, "{tool}: properties: {schema}");
         assert_eq!(schema["additionalProperties"], false, "{tool}: {schema}");
     }
-    // CP5 knowledge tools: search requires repo+query, show/related require
-    // repo+id; show takes no generation, related defaults direction to
-    // outbound; unknown parameters are rejected everywhere.
+    // CP5 knowledge tools: search requires only repo (text and/or evidence
+    // path), show/related require repo+id; show takes no generation, related
+    // defaults direction to outbound; unknown parameters are rejected.
     let search_schema = &find("riltra_knowledge_search")["inputSchema"];
     let mut required: Vec<&str> = search_schema["required"]
         .as_array()
@@ -397,7 +397,7 @@ fn mcp_tools_list_advertises_the_twelve_tools() {
         .map(|v| v.as_str().unwrap())
         .collect();
     required.sort_unstable();
-    assert_eq!(required, ["query", "repo"], "{search_schema}");
+    assert_eq!(required, ["repo"], "{search_schema}");
     let mut keys: Vec<&str> = search_schema["properties"]
         .as_object()
         .unwrap()
@@ -415,6 +415,7 @@ fn mcp_tools_list_advertises_the_twelve_tools() {
             "kind",
             "limit",
             "offset",
+            "path",
             "query",
             "repo"
         ],
@@ -4953,4 +4954,162 @@ fn edge_count(db: &Path) -> i64 {
     let conn = rusqlite::Connection::open(db).unwrap();
     conn.query_row("SELECT COUNT(*) FROM code_edges", [], |r| r.get(0))
         .unwrap()
+}
+
+/// Evidence path reverse lookup: missing/empty/populated stores, path-only,
+/// text intersection, exact matching, and refusals all match the CLI byte for
+/// byte at the document level.
+#[test]
+fn t2_knowledge_search_by_path_matches_cli() {
+    let h = home("cp5-search-path");
+    let r = home("cp5-search-path-repo");
+    init_repo(&h, &r, "krepo");
+    std::fs::create_dir_all(r.join("src")).unwrap();
+    std::fs::write(r.join("src/id_policy.rs"), b"policy\n").unwrap();
+    std::fs::write(r.join("src/main.rs"), b"main\n").unwrap();
+    let mut s = ready(&h);
+    let mut id = 2;
+
+    // Missing store: a path request is an empty generation-0 success, echoes
+    // the path, and creates nothing.
+    let got = kjson(
+        &mut s,
+        id,
+        "riltra_knowledge_search",
+        &json!({"repo": "krepo", "path": "src/id_policy.rs"}),
+    );
+    assert_eq!(got["generation"], json!(0), "{got}");
+    assert_eq!(got["result"]["query"], Value::Null, "{got}");
+    assert_eq!(got["result"]["path"], json!("src/id_policy.rs"), "{got}");
+    assert_eq!(got["result"]["hits"], json!([]), "{got}");
+    kparity(
+        &h,
+        &got,
+        &[
+            "knowledge",
+            "search",
+            "--repo",
+            "krepo",
+            "--path",
+            "src/id_policy.rs",
+        ],
+    );
+    assert!(
+        !knowledge_db(&h, "krepo").exists(),
+        "path search created a store"
+    );
+    id += 1;
+
+    kcreate(
+        &h,
+        "krepo",
+        r#"{"id":"d1","kind":"decision","title":"First","body":"kjson alpha shared","status":"active","author":"a","evidence":[{"path":"src/id_policy.rs"}]}"#,
+    );
+    kcreate(
+        &h,
+        "krepo",
+        r#"{"id":"d2","kind":"decision","title":"Second","body":"kjson beta shared","status":"active","author":"a","evidence":[{"path":"src/main.rs"}]}"#,
+    );
+    kcreate(
+        &h,
+        "krepo",
+        r#"{"id":"d3","kind":"decision","title":"Third","body":"kjson alpha shared","status":"active","author":"a","evidence":[{"path":"src/id_policy.rs"},{"path":"src/main.rs"},{"path":"src/id_policy.rs"}]}"#,
+    );
+    kcreate(
+        &h,
+        "krepo",
+        r#"{"id":"d4","kind":"decision","title":"Fourth","body":"kjson alpha shared","status":"active","author":"a","evidence":[]}"#,
+    );
+
+    for (mcp, cli) in [
+        (
+            json!({"repo": "krepo", "path": "src/id_policy.rs"}),
+            vec!["--path", "src/id_policy.rs"],
+        ),
+        (
+            json!({"repo": "krepo", "query": "alpha", "path": "src/id_policy.rs"}),
+            vec!["--query", "alpha", "--path", "src/id_policy.rs"],
+        ),
+        (
+            json!({"repo": "krepo", "query": "   ", "path": "src/main.rs"}),
+            vec!["--query", "   ", "--path", "src/main.rs"],
+        ),
+        (
+            json!({"repo": "krepo", "path": "src/id_policy"}),
+            vec!["--path", "src/id_policy"],
+        ),
+        (
+            json!({"repo": "krepo", "query": "alpha"}),
+            vec!["--query", "alpha"],
+        ),
+        (json!({"repo": "krepo", "query": ""}), vec!["--query", ""]),
+        (
+            json!({"repo": "krepo", "query": "   "}),
+            vec!["--query", "   "],
+        ),
+        (
+            json!({"repo": "krepo", "query": "", "path": "src/id_policy.rs"}),
+            vec!["--query", "", "--path", "src/id_policy.rs"],
+        ),
+    ] {
+        let got = kjson(&mut s, id, "riltra_knowledge_search", &mcp);
+        let mut args = vec!["knowledge", "search", "--repo", "krepo"];
+        args.extend(cli);
+        kparity(&h, &got, &args);
+        id += 1;
+    }
+
+    // Refusals carry the CLI's exact text.
+    kerr(
+        &h,
+        &mut s,
+        id,
+        "riltra_knowledge_search",
+        &json!({"repo": "krepo"}),
+        &["knowledge", "search", "--repo", "krepo"],
+    );
+    id += 1;
+    kerr(
+        &h,
+        &mut s,
+        id,
+        "riltra_knowledge_search",
+        &json!({"repo": "krepo", "path": ""}),
+        &["knowledge", "search", "--repo", "krepo", "--path", ""],
+    );
+    id += 1;
+    let big = "a".repeat(4097);
+    kerr(
+        &h,
+        &mut s,
+        id,
+        "riltra_knowledge_search",
+        &json!({"repo": "krepo", "path": big}),
+        &["knowledge", "search", "--repo", "krepo", "--path", &big],
+    );
+    id += 1;
+
+    // Exactness: a near miss is an empty page, not an error.
+    let got = kjson(
+        &mut s,
+        id,
+        "riltra_knowledge_search",
+        &json!({"repo": "krepo", "path": "SRC/ID_POLICY.RS"}),
+    );
+    assert_eq!(got["result"]["hits"], json!([]), "{got}");
+    kparity(
+        &h,
+        &got,
+        &[
+            "knowledge",
+            "search",
+            "--repo",
+            "krepo",
+            "--path",
+            "SRC/ID_POLICY.RS",
+        ],
+    );
+
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
 }

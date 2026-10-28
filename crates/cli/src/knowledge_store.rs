@@ -1861,6 +1861,7 @@ fn contains_all_terms(record: &RecordVersion, tokens: &[String]) -> bool {
 pub fn search(
     conn: &Connection,
     query: &str,
+    path: Option<&str>,
     kind: Option<&str>,
     include_archived: bool,
     include_superseded: bool,
@@ -1869,6 +1870,9 @@ pub fn search(
     offset: usize,
     generation: Option<u64>,
 ) -> Result<SearchPage, String> {
+    if let Some(p) = path {
+        crate::knowledge::validate_search_path(p)?;
+    }
     if let Some(k) = kind {
         crate::knowledge::validate_kind(k)?;
     }
@@ -1899,21 +1903,42 @@ pub fn search(
                 ));
             }
         }
-        let Some(match_expr) = matcher else {
-            return Ok(SearchPage {
-                hits: Vec::new(),
-                total: 0,
-                truncated: false,
-                next_offset: None,
-                generation: current,
-            });
+        // Text uses FTS as the driver; a path-only request streams current
+        // heads directly. Every value below is bound, including the
+        // pre-quoted MATCH expression, kind, and evidence path.
+        let (mut sql, mut args) = match matcher {
+            Some(match_expr) => (
+                String::from(
+                    "SELECT r.id, r.revision, r.kind, r.title, r.body, r.status, r.author, r.created_unix
+                     FROM knowledge_fts
+                     JOIN heads h ON h.id = knowledge_fts.id
+                     JOIN records r ON r.id = knowledge_fts.id
+                       AND r.revision = h.current_revision
+                     WHERE knowledge_fts MATCH ?1",
+                ),
+                vec![rusqlite::types::Value::Text(match_expr)],
+            ),
+            None if path.is_some() => (
+                String::from(
+                    "SELECT r.id, r.revision, r.kind, r.title, r.body, r.status, r.author, r.created_unix
+                     FROM records r
+                     JOIN heads h ON h.id = r.id AND r.revision = h.current_revision
+                     WHERE 1",
+                ),
+                Vec::new(),
+            ),
+            None => {
+                return Ok(SearchPage {
+                    hits: Vec::new(),
+                    total: 0,
+                    truncated: false,
+                    next_offset: None,
+                    generation: current,
+                });
+            }
         };
-        // Structural clauses only; every value below is bound, including the
-        // pre-quoted MATCH expression and the validated kind.
-        let mut filters = String::from("knowledge_fts MATCH ?1");
-        let mut args: Vec<rusqlite::types::Value> = vec![rusqlite::types::Value::Text(match_expr)];
         if let Some(k) = kind {
-            filters.push_str(&format!(" AND r.kind = ?{}", args.len() + 1));
+            sql.push_str(&format!(" AND r.kind = ?{}", args.len() + 1));
             args.push(rusqlite::types::Value::Text(k.to_string()));
         }
         // Visibility is explicit: active always, each historical status only
@@ -1929,22 +1954,26 @@ pub fn search(
         if include_retracted {
             visible.push_str(", 'retracted'");
         }
-        filters.push_str(&format!(" AND r.status IN ({visible})"));
+        sql.push_str(&format!(" AND r.status IN ({visible})"));
+        if let Some(p) = path {
+            // The correlated probe is restricted to this record revision and
+            // uses the evidence primary-key prefix. EXISTS yields one row no
+            // matter how many captured refs name the same path.
+            sql.push_str(&format!(
+                " AND EXISTS (SELECT 1 FROM evidence e WHERE e.id = r.id
+                   AND e.revision = r.revision AND e.path = ?{})",
+                args.len() + 1
+            ));
+            args.push(rusqlite::types::Value::Text(p.to_string()));
+        }
         // FTS is a coarse pre-filter: stream candidates in ID order, keep
         // the literal-term check in Rust, count every verified row, and
         // retain only the requested page — memory stays bounded by the page
         // (at most 1000 rows), never by the corpus. Measurement and evidence
         // load afterwards, only for returned rows.
+        sql.push_str(" ORDER BY r.id COLLATE BINARY ASC");
         let mut stmt = conn
-            .prepare(&format!(
-                "SELECT r.id, r.revision, r.kind, r.title, r.body, r.status, r.author, r.created_unix
-                 FROM knowledge_fts
-                 JOIN heads h ON h.id = knowledge_fts.id
-                 JOIN records r ON r.id = knowledge_fts.id
-                   AND r.revision = h.current_revision
-                 WHERE {filters}
-                 ORDER BY r.id COLLATE BINARY ASC"
-            ))
+            .prepare(&sql)
             .map_err(|e| format!("cannot search knowledge: {e}"))?;
         let mut streamed = stmt
             .query(rusqlite::params_from_iter(args.iter()))
@@ -4921,7 +4950,7 @@ mod tests {
         create_record(&mut conn, &new_record("d1", "zqxv1 stays v1")).unwrap();
         conn.close().unwrap();
         let conn = open_knowledge_at(&home, &repo, false).unwrap();
-        let _ = search(&conn, "zqxv1", None, false, false, false, 10, 0, None).unwrap();
+        let _ = search(&conn, "zqxv1", None, None, false, false, false, 10, 0, None).unwrap();
         let _ = history(&conn, "d1", 10, 0, None).unwrap();
         let _ = show_record(&conn, "d1", None).unwrap();
         conn.close().unwrap();
@@ -6608,7 +6637,7 @@ mod tests {
     }
 
     fn search_default(conn: &Connection, query: &str) -> Result<SearchPage, String> {
-        search(conn, query, None, false, false, false, 50, 0, None)
+        search(conn, query, None, None, false, false, false, 50, 0, None)
     }
 
     #[test]
@@ -6680,7 +6709,10 @@ mod tests {
             )
             .unwrap();
         }
-        let full = search(&conn, "common", None, false, false, false, 50, 0, None).unwrap();
+        let full = search(
+            &conn, "common", None, None, false, false, false, 50, 0, None,
+        )
+        .unwrap();
         assert_eq!(full.total, 3);
         assert_eq!(
             full.hits.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(),
@@ -6689,7 +6721,7 @@ mod tests {
         assert!(!full.truncated);
         assert_eq!(full.next_offset, None);
         // Paginated reads return the same order in slices.
-        let p1 = search(&conn, "common", None, false, false, false, 2, 0, None).unwrap();
+        let p1 = search(&conn, "common", None, None, false, false, false, 2, 0, None).unwrap();
         assert_eq!(p1.total, 3);
         assert!(p1.truncated);
         assert_eq!(p1.next_offset, Some(2));
@@ -6700,6 +6732,7 @@ mod tests {
         let p2 = search(
             &conn,
             "common",
+            None,
             None,
             false,
             false,
@@ -6751,12 +6784,13 @@ mod tests {
         let hidden = search_default(&conn, "filter").unwrap();
         assert_eq!(hidden.total, 1);
         assert_eq!(hidden.hits[0].id, "d1");
-        let shown = search(&conn, "filter", None, true, false, false, 50, 0, None).unwrap();
+        let shown = search(&conn, "filter", None, None, true, false, false, 50, 0, None).unwrap();
         assert_eq!(shown.total, 2);
         // Kind narrows before counting: archived constraint still filtered.
         let kinds = search(
             &conn,
             "filter",
+            None,
             Some("constraint"),
             false,
             false,
@@ -6770,6 +6804,7 @@ mod tests {
         let kinds = search(
             &conn,
             "filter",
+            None,
             Some("constraint"),
             true,
             false,
@@ -6785,6 +6820,7 @@ mod tests {
         assert!(search(
             &conn,
             "filter",
+            None,
             Some("note"),
             false,
             false,
@@ -6809,6 +6845,7 @@ mod tests {
             &conn,
             "guarded",
             None,
+            None,
             false,
             false,
             false,
@@ -6819,7 +6856,7 @@ mod tests {
         .unwrap_err();
         assert!(err.contains("generation"), "unexpected: {err}");
         // Bounds: over-limit pages and over-long queries fail before reading.
-        assert!(search(&conn, "guarded", None, false, false, false, 1001, 0, None).is_err());
+        assert!(search(&conn, "guarded", None, None, false, false, false, 1001, 0, None).is_err());
         let long = "q".repeat(4096 + 1);
         assert!(search_default(&conn, &long).is_err());
         // Exactly 4096 bytes is accepted.
@@ -6832,6 +6869,7 @@ mod tests {
         let after = search(
             &conn,
             "guarded",
+            None,
             None,
             false,
             false,
@@ -7199,7 +7237,7 @@ mod tests {
         create_record(&mut conn, &new_record("d1", "zero zqxlimit")).unwrap();
         // A zero limit can never advance next_offset: reject it instead of
         // returning a page that points at itself.
-        let err = search(&conn, "zero", None, false, false, false, 0, 0, None).unwrap_err();
+        let err = search(&conn, "zero", None, None, false, false, false, 0, 0, None).unwrap_err();
         assert!(err.contains("limit"), "unexpected: {err}");
         let err = related(
             &conn,
@@ -7239,7 +7277,10 @@ mod tests {
         let mut offset = 0;
         let mut pages = 0;
         loop {
-            let page = search(&conn, "walk", None, false, false, false, 2, offset, None).unwrap();
+            let page = search(
+                &conn, "walk", None, None, false, false, false, 2, offset, None,
+            )
+            .unwrap();
             assert!(page.truncated || page.next_offset.is_none());
             collected.extend(page.hits.iter().map(|h| h.id.clone()));
             pages += 1;
@@ -7255,10 +7296,10 @@ mod tests {
         assert_eq!(pages, 3);
         assert_eq!(collected, vec!["w01", "w02", "w03", "w04", "w05"]);
         // Final and empty pages carry no next offset.
-        let last = search(&conn, "walk", None, false, false, false, 2, 4, None).unwrap();
+        let last = search(&conn, "walk", None, None, false, false, false, 2, 4, None).unwrap();
         assert!(!last.truncated);
         assert_eq!(last.next_offset, None);
-        let past_end = search(&conn, "walk", None, false, false, false, 2, 99, None).unwrap();
+        let past_end = search(&conn, "walk", None, None, false, false, false, 2, 99, None).unwrap();
         assert_eq!(past_end.total, 5);
         assert!(past_end.hits.is_empty());
         assert!(!past_end.truncated);
@@ -7303,7 +7344,10 @@ mod tests {
                    \"evidence\":[{\"path\":\"ev.rs\"}]}";
         create_validated(&mut conn, &validate_create_json(raw.as_bytes()).unwrap()).unwrap();
         // Default view: 11 visible decisions + kev + 2 constraints = 14.
-        let p1 = search(&conn, "bounded", None, false, false, false, 5, 0, None).unwrap();
+        let p1 = search(
+            &conn, "bounded", None, None, false, false, false, 5, 0, None,
+        )
+        .unwrap();
         assert_eq!(p1.total, 14);
         assert!(p1.truncated);
         assert_eq!(p1.next_offset, Some(5));
@@ -7315,6 +7359,7 @@ mod tests {
         let kinds = search(
             &conn,
             "bounded",
+            None,
             Some("decision"),
             false,
             false,
@@ -7334,6 +7379,7 @@ mod tests {
         let all = search(
             &conn,
             "bounded",
+            None,
             Some("decision"),
             true,
             false,
@@ -7801,23 +7847,26 @@ mod tests {
         .unwrap();
         let ids = |page: &SearchPage| page.hits.iter().map(|h| h.id.clone()).collect::<Vec<_>>();
         // Default view: active only.
-        let page = search(&conn, "zqxvis", None, false, false, false, 50, 0, None).unwrap();
+        let page = search(
+            &conn, "zqxvis", None, None, false, false, false, 50, 0, None,
+        )
+        .unwrap();
         assert_eq!(ids(&page), vec!["a1"]);
         // Each historical visibility is opt-in and independent.
-        let page = search(&conn, "zqxvis", None, true, false, false, 50, 0, None).unwrap();
+        let page = search(&conn, "zqxvis", None, None, true, false, false, 50, 0, None).unwrap();
         assert_eq!(ids(&page), vec!["a1", "a2"]);
-        let page = search(&conn, "zqxvis", None, false, true, false, 50, 0, None).unwrap();
+        let page = search(&conn, "zqxvis", None, None, false, true, false, 50, 0, None).unwrap();
         assert_eq!(ids(&page), vec!["a1", "a3"]);
-        let page = search(&conn, "zqxvis", None, false, false, true, 50, 0, None).unwrap();
+        let page = search(&conn, "zqxvis", None, None, false, false, true, 50, 0, None).unwrap();
         assert_eq!(ids(&page), vec!["a1", "a4"]);
         // --include-retracted alone must not surface archived records.
-        let page = search(&conn, "zqxvis", None, false, false, true, 50, 0, None).unwrap();
+        let page = search(&conn, "zqxvis", None, None, false, false, true, 50, 0, None).unwrap();
         assert!(!ids(&page).contains(&"a2".to_string()));
         // Everything on request.
-        let page = search(&conn, "zqxvis", None, true, true, true, 50, 0, None).unwrap();
+        let page = search(&conn, "zqxvis", None, None, true, true, true, 50, 0, None).unwrap();
         assert_eq!(ids(&page), vec!["a1", "a2", "a3", "a4"]);
         // Historical hits carry their full lifecycle payload.
-        let page = search(&conn, "zqxvis", None, false, true, true, 50, 0, None).unwrap();
+        let page = search(&conn, "zqxvis", None, None, false, true, true, 50, 0, None).unwrap();
         let superseded = page.hits.iter().find(|h| h.id == "a3").unwrap();
         assert_eq!(
             superseded.superseded_by,

@@ -125,8 +125,12 @@ struct KnowledgeSearchInput {
     /// Registered repository name.
     repo: String,
     /// Literal text searched in titles and bodies (CLI
-    /// `knowledge search --query`).
-    query: String,
+    /// `knowledge search --query`). Text or path is required.
+    query: Option<String>,
+    /// Exact stored evidence path (CLI `knowledge search --path`). It is
+    /// matched byte for byte, never normalized, and may be paired with a
+    /// query to intersect text and path.
+    path: Option<String>,
     /// Optional record kind filter (CLI `--kind`).
     kind: Option<String>,
     /// Include archived records (CLI `--include-archived`; default false).
@@ -336,7 +340,7 @@ impl RiltraMcp {
 
     #[tool(
         name = "riltra_knowledge_search",
-        description = "Search knowledge records by literal text (same document as CLI `knowledge search`). A missing store answers with an empty result and creates nothing.",
+        description = "Search knowledge records by literal text and/or an exact stored evidence path (same document as CLI `knowledge search`). A missing store answers with an empty result and creates nothing.",
         annotations(
             title = "Search knowledge records",
             read_only_hint = true,
@@ -1166,21 +1170,42 @@ fn knowledge_entry(repo: &str, root: &str) -> registry::RepoEntry {
 
 fn knowledge_search_doc(input: &KnowledgeSearchInput) -> CallToolResult {
     // Validation order and texts mirror `main.rs::knowledge_search`.
+    if input.query.is_none() && input.path.is_none() {
+        return tool_error(
+            "invalid_input",
+            "search requires a text query or an evidence path",
+        );
+    }
+    if let Some(path) = input.path.as_deref() {
+        if let Err(e) = knowledge::validate_search_path(path) {
+            return tool_error("invalid_input", &e);
+        }
+    }
     if let Some(kind) = input.kind.as_deref() {
         if let Err(e) = knowledge::validate_kind(kind) {
             return tool_error("invalid_input", &e);
         }
     }
-    if input.query.len() > knowledge::MAX_QUERY_TEXT_BYTES {
-        return tool_error(
-            "invalid_input",
-            &format!(
-                "search query is {} bytes, at most {} allowed",
-                input.query.len(),
-                knowledge::MAX_QUERY_TEXT_BYTES
-            ),
-        );
+    if let Some(query) = input.query.as_deref() {
+        if query.len() > knowledge::MAX_QUERY_TEXT_BYTES {
+            return tool_error(
+                "invalid_input",
+                &format!(
+                    "search query is {} bytes, at most {} allowed",
+                    query.len(),
+                    knowledge::MAX_QUERY_TEXT_BYTES
+                ),
+            );
+        }
     }
+    // An empty or whitespace query beside a path is path-only: the result
+    // echoes `query: null` instead of pretending text was searched.
+    let query = input.query.as_deref().unwrap_or("");
+    let echoed_query = if input.path.is_some() && query.trim().is_empty() {
+        None
+    } else {
+        Some(query)
+    };
     let (limit, offset) = match knowledge_page(input.limit, input.offset) {
         Ok(v) => v,
         Err(e) => return e,
@@ -1203,7 +1228,8 @@ fn knowledge_search_doc(input: &KnowledgeSearchInput) -> CallToolResult {
                 0,
                 "search",
                 &response::knowledge_search_result_json(
-                    &input.query,
+                    echoed_query,
+                    input.path.as_deref(),
                     input.kind.as_deref(),
                     input.include_archived.unwrap_or(false),
                     &[],
@@ -1222,7 +1248,8 @@ fn knowledge_search_doc(input: &KnowledgeSearchInput) -> CallToolResult {
     };
     let page = match knowledge_store::search(
         &conn,
-        &input.query,
+        query,
+        input.path.as_deref(),
         input.kind.as_deref(),
         input.include_archived.unwrap_or(false),
         input.include_superseded.unwrap_or(false),
@@ -1239,7 +1266,8 @@ fn knowledge_search_doc(input: &KnowledgeSearchInput) -> CallToolResult {
         page.generation,
         "search",
         &response::knowledge_search_result_json(
-            &input.query,
+            echoed_query,
+            input.path.as_deref(),
             input.kind.as_deref(),
             input.include_archived.unwrap_or(false),
             &page.hits,

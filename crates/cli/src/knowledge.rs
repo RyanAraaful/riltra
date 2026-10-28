@@ -103,6 +103,22 @@ pub fn validate_id(id: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// A search path is matched exactly against the stored evidence string. It is
+/// never normalized: separators, case, and `.`/`..` stay authored text.
+pub fn validate_search_path(path: &str) -> Result<(), String> {
+    if path.is_empty() {
+        return Err("search path must not be empty".to_string());
+    }
+    if path.len() > MAX_SEARCH_PATH_BYTES {
+        return Err(format!(
+            "search path is {} bytes, at most {} allowed",
+            path.len(),
+            MAX_SEARCH_PATH_BYTES
+        ));
+    }
+    Ok(())
+}
+
 /// Foundation kinds: `decision`, `constraint`, `benchmark`.
 pub fn validate_kind(kind: &str) -> Result<(), String> {
     match kind {
@@ -259,6 +275,9 @@ pub const MAX_AUTHOR_BYTES: usize = 256;
 pub const MAX_EVIDENCE_REFS: usize = 64;
 /// Pinned for the Task 5 search path; mutation inputs carry no query field.
 pub const MAX_QUERY_TEXT_BYTES: usize = 4096;
+/// Search accepts one exact stored evidence path. The bound mirrors
+/// [`MAX_QUERY_TEXT_BYTES`] so no unbounded input is bound into SQL.
+pub const MAX_SEARCH_PATH_BYTES: usize = 4096;
 /// Search paging: Task 7 applies the default; the store enforces the cap.
 pub const SEARCH_LIMIT_DEFAULT: usize = 50;
 pub const SEARCH_LIMIT_MAX: usize = 1000;

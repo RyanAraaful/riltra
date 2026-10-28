@@ -136,7 +136,8 @@ pub enum KnowledgeOp {
     },
     Search {
         repo: String,
-        query: String,
+        query: Option<String>,
+        path: Option<String>,
         kind: Option<String>,
         include_archived: bool,
         include_superseded: bool,
@@ -618,6 +619,7 @@ fn parse_knowledge_op(sub: &str, args: &[String]) -> Result<KnowledgeOp, String>
                 &[
                     "--repo",
                     "--query",
+                    "--path",
                     "--kind",
                     "--limit",
                     "--offset",
@@ -631,7 +633,8 @@ fn parse_knowledge_op(sub: &str, args: &[String]) -> Result<KnowledgeOp, String>
             )?;
             Ok(KnowledgeOp::Search {
                 repo: knowledge_value(&v, "--repo")?,
-                query: knowledge_value(&v, "--query")?,
+                query: v.get("--query").cloned(),
+                path: v.get("--path").cloned(),
                 kind: v.get("--kind").cloned(),
                 include_archived: flags.contains("--include-archived"),
                 include_superseded: flags.contains("--include-superseded"),
@@ -1016,7 +1019,23 @@ mod tests {
             "-"
         ])
         .is_err());
-        assert!(p(&["knowledge", "search", "--repo", "r"]).is_err());
+        // Search parses with no query: text-or-path is enforced at runtime so
+        // the refusal carries a specific message, not generic usage.
+        assert!(matches!(
+            p(&["knowledge", "search", "--repo", "r"]),
+            Ok(Command::Knowledge { .. })
+        ));
+        assert!(matches!(
+            p(&[
+                "knowledge",
+                "search",
+                "--repo",
+                "r",
+                "--path",
+                "src/main.rs"
+            ]),
+            Ok(Command::Knowledge { .. })
+        ));
         assert!(p(&["knowledge", "frobnicate", "--repo", "r"]).is_err());
         assert!(p(&["knowledge"]).is_err());
     }

@@ -51,7 +51,7 @@ pub(crate) fn usage() -> String {
   {NAME} semantic query --repo <name> --path <rel> --line <n> --col <n> [--refs] [--lsp-server <abs-path>]
   {NAME} callers --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--limit <n>] [--offset <n>]
   {NAME} callees --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--limit <n>] [--offset <n>]
-  {NAME} trace --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--to <path:line:col>] [--depth <n>] [--limit <n>] [--offset <n>]\n  {NAME} impact --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--depth <n>] [--limit <n>] [--offset <n>]\n  {NAME} knowledge create --repo <name> --input -\n  {NAME} knowledge show --repo <name> --id <id> [--revision <n>]\n  {NAME} knowledge update --repo <name> --id <id> --expected-revision <n> --input -\n  {NAME} knowledge history --repo <name> --id <id> [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge search --repo <name> --query <text> [--kind <kind>] [--include-archived] [--include-superseded] [--include-retracted] [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge link --repo <name> --input -\n  {NAME} knowledge unlink --repo <name> --relation <id> --input -\n  {NAME} knowledge related --repo <name> --id <id> [--revision <n>] [--direction inbound|outbound] [--include-retracted] [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge export --repo <name> [--format jsonl|md] [--out <path>]\n  {NAME} knowledge import --repo <name> --file <path>\n  {NAME} knowledge backup --repo <name> --out <path>\n  {NAME} knowledge restore --repo <name> --file <path> [--overwrite]\n  {NAME} knowledge verify --repo <name>\n  {NAME} mcp\n\nCommands:\n  status       Print deterministic bootstrap status as JSON\n  init         Register a local repository root\n  repo list    List registered repositories as JSON\n  repo status  Git/worktree fingerprint of a registered repository\n  doctor       Path-security and repository health checks as JSON\n  scan         Syntax facts (definitions/imports/calls) as JSON\n  index        Build the durable code index for a repository\n  index status Report index freshness (fresh/stale/unknown) as JSON\n  search       Search indexed symbols as JSON\n  semantic import Import a SCIP index against the live snapshot as JSON\n  semantic status Per-provider binding verification as JSON\n  semantic query Single-hop definition/reference lookup as JSON\n  callers Direct callers of the anchored identity as JSON\n  callees Direct callees of the anchored identity as JSON\n  trace Bounded plausible static paths with per-hop evidence\n  impact Conservative inbound impact with evidence and UNKNOWN default\n  mcp Serve the MCP stdio interface\n"
+  {NAME} trace --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--to <path:line:col>] [--depth <n>] [--limit <n>] [--offset <n>]\n  {NAME} impact --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--depth <n>] [--limit <n>] [--offset <n>]\n  {NAME} knowledge create --repo <name> --input -\n  {NAME} knowledge show --repo <name> --id <id> [--revision <n>]\n  {NAME} knowledge update --repo <name> --id <id> --expected-revision <n> --input -\n  {NAME} knowledge history --repo <name> --id <id> [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge search --repo <name> [--query <text>] [--path <rel>] [--kind <kind>] [--include-archived] [--include-superseded] [--include-retracted] [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge link --repo <name> --input -\n  {NAME} knowledge unlink --repo <name> --relation <id> --input -\n  {NAME} knowledge related --repo <name> --id <id> [--revision <n>] [--direction inbound|outbound] [--include-retracted] [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge export --repo <name> [--format jsonl|md] [--out <path>]\n  {NAME} knowledge import --repo <name> --file <path>\n  {NAME} knowledge backup --repo <name> --out <path>\n  {NAME} knowledge restore --repo <name> --file <path> [--overwrite]\n  {NAME} knowledge verify --repo <name>\n  {NAME} mcp\n\nCommands:\n  status       Print deterministic bootstrap status as JSON\n  init         Register a local repository root\n  repo list    List registered repositories as JSON\n  repo status  Git/worktree fingerprint of a registered repository\n  doctor       Path-security and repository health checks as JSON\n  scan         Syntax facts (definitions/imports/calls) as JSON\n  index        Build the durable code index for a repository\n  index status Report index freshness (fresh/stale/unknown) as JSON\n  search       Search indexed symbols as JSON\n  semantic import Import a SCIP index against the live snapshot as JSON\n  semantic status Per-provider binding verification as JSON\n  semantic query Single-hop definition/reference lookup as JSON\n  callers Direct callers of the anchored identity as JSON\n  callees Direct callees of the anchored identity as JSON\n  trace Bounded plausible static paths with per-hop evidence\n  impact Conservative inbound impact with evidence and UNKNOWN default\n  mcp Serve the MCP stdio interface\n"
     )
 }
 
@@ -1012,6 +1012,7 @@ fn cmd_knowledge(op: args::KnowledgeOp, out: &mut String, err: &mut String) -> i
         args::KnowledgeOp::Search {
             repo,
             query,
+            path,
             kind,
             include_archived,
             include_superseded,
@@ -1021,7 +1022,8 @@ fn cmd_knowledge(op: args::KnowledgeOp, out: &mut String, err: &mut String) -> i
             generation,
         } => knowledge_search(
             &repo,
-            &query,
+            query.as_deref(),
+            path.as_deref(),
             kind.as_deref(),
             include_archived,
             include_superseded,
@@ -1902,7 +1904,8 @@ fn knowledge_history(
 #[allow(clippy::too_many_arguments)]
 fn knowledge_search(
     repo: &str,
-    query: &str,
+    query: Option<&str>,
+    path: Option<&str>,
     kind: Option<&str>,
     include_archived: bool,
     include_superseded: bool,
@@ -1913,20 +1916,40 @@ fn knowledge_search(
     out: &mut String,
     err: &mut String,
 ) -> i32 {
+    if query.is_none() && path.is_none() {
+        err.push_str("error: search requires a text query or an evidence path\n");
+        return 2;
+    }
+    if let Some(p) = path {
+        if let Err(e) = knowledge::validate_search_path(p) {
+            err.push_str(&format!("error: {e}\n"));
+            return 2;
+        }
+    }
     if let Some(k) = kind {
         if let Err(e) = knowledge::validate_kind(k) {
             err.push_str(&format!("error: {e}\n"));
             return 2;
         }
     }
-    if query.len() > knowledge::MAX_QUERY_TEXT_BYTES {
-        err.push_str(&format!(
-            "error: search query is {} bytes, at most {} allowed\n",
-            query.len(),
-            knowledge::MAX_QUERY_TEXT_BYTES
-        ));
-        return 2;
+    if let Some(q) = query {
+        if q.len() > knowledge::MAX_QUERY_TEXT_BYTES {
+            err.push_str(&format!(
+                "error: search query is {} bytes, at most {} allowed\n",
+                q.len(),
+                knowledge::MAX_QUERY_TEXT_BYTES
+            ));
+            return 2;
+        }
     }
+    // An empty or whitespace query beside a path is path-only: the result
+    // echoes `query: null` instead of pretending text was searched.
+    let query = query.unwrap_or("");
+    let echoed_query = if path.is_some() && query.trim().is_empty() {
+        None
+    } else {
+        Some(query)
+    };
     let (limit, offset, generation) = match knowledge_page_args(limit, offset, generation, err) {
         Ok(v) => v,
         Err(code) => return code,
@@ -1948,7 +1971,8 @@ fn knowledge_search(
                 return 3;
             }
             let result = response::knowledge_search_result_json(
-                query,
+                echoed_query,
+                path,
                 kind,
                 include_archived,
                 &[],
@@ -1979,6 +2003,7 @@ fn knowledge_search(
     let page = match knowledge_store::search(
         &conn,
         query,
+        path,
         kind,
         include_archived,
         include_superseded,
@@ -1994,7 +2019,8 @@ fn knowledge_search(
         }
     };
     let result = response::knowledge_search_result_json(
-        query,
+        echoed_query,
+        path,
         kind,
         include_archived,
         &page.hits,
