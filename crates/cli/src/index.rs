@@ -1543,6 +1543,19 @@ pub fn resolve_edge_anchor(
     })
 }
 
+/// Rust `crate::` paths are relative to the importer's crate source root, not
+/// the repository root. Conventional Cargo layouts put that root at the last
+/// `src` component, so a workspace crate resolves from `crates/<crate>/src`.
+/// Only the enclosing conventional root is used: custom target paths and
+/// `src/bin` are not resolved as separate crate roots. A path with no `src`
+/// component yields no candidate rather than a repo-root guess.
+fn rust_crate_src_root(importer: &str) -> Option<&str> {
+    if let Some((head, _)) = importer.rsplit_once("/src/") {
+        return Some(&importer[..head.len() + "/src".len()]);
+    }
+    importer.strip_prefix("src/").map(|_| "src")
+}
+
 /// Direct import candidates are deliberately conservative, never identity proof.
 /// Unrecognized bindings remain missing coverage rather than a name-based link.
 fn import_mentions_path(importer: &str, language: &str, text: &str, target: &str) -> bool {
@@ -1606,9 +1619,13 @@ fn import_mentions_path(importer: &str, language: &str, text: &str, target: &str
                 .unwrap_or("")
                 .trim_end_matches(':');
             let parts: Vec<&str> = module.split("::").collect();
+            let Some(src_root) = rust_crate_src_root(importer) else {
+                return false;
+            };
             return (1..=parts.len()).any(|n| {
                 let path = parts[..n].join("/");
-                target == format!("src/{path}.rs") || target == format!("src/{path}/mod.rs")
+                target == format!("{src_root}/{path}.rs")
+                    || target == format!("{src_root}/{path}/mod.rs")
             });
         }
     }
@@ -2955,8 +2972,9 @@ pub fn evaluate_snapshot(
 mod tests {
     use super::{
         build, build_full, config_fingerprint, cpp_include_literal, diff_files, evaluate,
-        evaluate_tx, input_fingerprint, lsp_answer_verification, lsp_fallback_reason,
-        lsp_hit_from_fact, suffix_anchors, unique_suffix_match,
+        evaluate_tx, import_mentions_path, input_fingerprint, lsp_answer_verification,
+        lsp_fallback_reason, lsp_hit_from_fact, rust_crate_src_root, suffix_anchors,
+        unique_suffix_match,
     };
     use crate::store;
     use crate::testutil::{git_repo, tmpdir};
@@ -4142,6 +4160,79 @@ mod tests {
         )
         .unwrap();
         (conn, snap, dir)
+    }
+
+    #[test]
+    fn rust_crate_src_root_is_the_last_src_component() {
+        assert_eq!(
+            rust_crate_src_root("crates/cli/src/knowledge_store.rs"),
+            Some("crates/cli/src")
+        );
+        assert_eq!(rust_crate_src_root("src/main.rs"), Some("src"));
+        // A path with no crate source root is not guessed from the repo root.
+        assert_eq!(rust_crate_src_root("tests/integration.rs"), None);
+    }
+
+    #[test]
+    fn rust_crate_use_matches_the_importers_crate_source_root() {
+        let import = "use crate::knowledge::{NewRecord, RecordVersion};";
+        assert!(import_mentions_path(
+            "crates/cli/src/knowledge_store.rs",
+            "rust",
+            import,
+            "crates/cli/src/knowledge.rs"
+        ));
+        assert!(!import_mentions_path(
+            "crates/cli/src/knowledge_store.rs",
+            "rust",
+            import,
+            "src/knowledge.rs"
+        ));
+        // The pre-existing root-crate layout keeps its meaning.
+        assert!(import_mentions_path(
+            "src/main.rs",
+            "rust",
+            "use crate::knowledge;",
+            "src/knowledge.rs"
+        ));
+        // A different crate with the same module name is not a candidate.
+        assert!(!import_mentions_path(
+            "crates/a/src/main.rs",
+            "rust",
+            "use crate::helper;",
+            "crates/b/src/helper.rs"
+        ));
+        assert!(import_mentions_path(
+            "crates/a/src/main.rs",
+            "rust",
+            "use crate::helper;",
+            "crates/a/src/helper.rs"
+        ));
+    }
+
+    #[test]
+    fn rust_grouped_use_never_becomes_a_repo_root_candidate() {
+        // Nested list after the module is recognised.
+        assert!(import_mentions_path(
+            "crates/a/src/grouped.rs",
+            "rust",
+            "use crate::helper::{self};",
+            "crates/a/src/helper.rs"
+        ));
+        // The unsupported top-level list stays unsupported, not mis-resolved.
+        assert!(!import_mentions_path(
+            "crates/a/src/grouped.rs",
+            "rust",
+            "use crate::{helper};",
+            "crates/a/src/helper.rs"
+        ));
+        // An external crate path is not a local file.
+        assert!(!import_mentions_path(
+            "crates/a/tests/integration.rs",
+            "rust",
+            "use a::helper;",
+            "crates/a/src/helper.rs"
+        ));
     }
 
     #[test]

@@ -403,6 +403,80 @@ fn callers_of_a_data_member_never_list_a_same_named_call() {
 }
 
 #[test]
+fn rust_workspace_imports_link_from_the_crate_source_root() {
+    // `use crate::helper` is relative to the importing crate, not the repo
+    // root. A same-named file in another crate and an external `use b::helper`
+    // must not become callers of this crate's definition.
+    let h = home("rust-workspace-import");
+    let repo = mkrepo(&h, "work");
+    std::fs::create_dir_all(repo.join("crates/a/src")).unwrap();
+    std::fs::create_dir_all(repo.join("crates/a/tests")).unwrap();
+    std::fs::create_dir_all(repo.join("crates/b/src")).unwrap();
+    std::fs::write(
+        repo.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"crates/a\", \"crates/b\"]\nresolver = \"2\"\n",
+    )
+    .unwrap();
+    for (name, dir) in [("a", "crates/a"), ("b", "crates/b")] {
+        std::fs::write(
+            repo.join(dir).join("Cargo.toml"),
+            format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"),
+        )
+        .unwrap();
+    }
+    std::fs::write(repo.join("crates/a/src/helper.rs"), "pub fn target() {}\n").unwrap();
+    std::fs::write(repo.join("crates/a/src/other.rs"), "pub fn target() {}\n").unwrap();
+    std::fs::write(
+        repo.join("crates/a/src/main.rs"),
+        "mod helper;\nuse crate::helper;\nfn main() {\n    helper::target();\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("crates/a/src/grouped.rs"),
+        "use crate::helper::{self};\n\npub fn run() {\n    helper::target();\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("crates/a/tests/helper.rs"),
+        "pub fn target() {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("crates/a/tests/integration.rs"),
+        "use b::helper;\n#[test]\nfn check() {\n    helper::target();\n}\n",
+    )
+    .unwrap();
+    std::fs::write(repo.join("crates/b/src/helper.rs"), "pub fn target() {}\n").unwrap();
+    init_and_index(&h, &repo, "r");
+
+    let doc = edge_doc(&h, "callers", "crates/a/src/helper.rs", "1", "8");
+    let edges = doc["edges"].as_array().unwrap();
+    let mut callers: Vec<&str> = edges
+        .iter()
+        .map(|e| e["caller_path"].as_str().unwrap())
+        .collect();
+    callers.sort_unstable();
+    assert_eq!(
+        callers,
+        vec!["crates/a/src/grouped.rs", "crates/a/src/main.rs"],
+        "{doc}"
+    );
+    for edge in edges {
+        assert_eq!(edge["kind"], "POTENTIAL_CALL", "{edge}");
+        assert_eq!(edge["precision"], "Heuristic", "{edge}");
+        assert_eq!(edge["verification"], "Unverified", "{edge}");
+    }
+
+    // The other crate's same-named definition has no proven caller here.
+    let other = edge_doc(&h, "callers", "crates/b/src/helper.rs", "1", "8");
+    assert_eq!(other["edges"], serde_json::json!([]), "{other}");
+
+    // A same-named file that nothing imports stays unrelated.
+    let unrelated = edge_doc(&h, "callers", "crates/a/tests/helper.rs", "1", "8");
+    assert_eq!(unrelated["edges"], serde_json::json!([]), "{unrelated}");
+}
+
+#[test]
 fn an_index_from_the_previous_parser_version_is_rebuilt() {
     let h = home("field-parser");
     let repo = mkrepo(&h, "work");
