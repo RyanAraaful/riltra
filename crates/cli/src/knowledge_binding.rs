@@ -1343,6 +1343,12 @@ pub(crate) fn create_cli(
             return 3;
         }
     };
+    // Captured by `resolve_code_anchor` for every write; checked before any
+    // write so a missing digest can never leave a half-reported binding.
+    let Some(snapshot_digest) = anchor.snapshot_digest.clone() else {
+        err.push_str("error: snapshot digest was not captured for this anchor\n");
+        return 3;
+    };
     let mut conn = match knowledge_store::open_knowledge(&entry, true) {
         Ok(conn) => conn,
         Err(e) => {
@@ -1366,7 +1372,7 @@ pub(crate) fn create_cli(
                 optional_string(anchor.symbol_uri.as_deref()), optional_string(anchor.display_name.as_deref()),
                 crate::json::escape(&anchor.anchor_kind), crate::json::escape(&anchor.precision),
                 anchor.snapshot_id, crate::json::escape(&anchor.snapshot_nonce),
-                crate::json::escape(anchor.snapshot_digest.as_deref().expect("stored binding has a snapshot digest")), crate::json::escape(&anchor.source_digest),
+                crate::json::escape(&snapshot_digest), crate::json::escape(&anchor.source_digest),
                 crate::json::escape(&input.relation), crate::json::escape(&input.record_id),
                 input.record_revision, crate::json::escape(&input.author), crate::json::escape(&input.rationale),
                 crate::json::escape(&input.provenance)
