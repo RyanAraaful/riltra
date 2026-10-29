@@ -107,7 +107,7 @@ These runs were made to locate the miss. They are reported separately and do not
 - Secret and local-path scan with the pinned gitleaks 8.30.1, run through `security/scan.sh` (`GITLEAKS_BIN` set in the user's Claude Code settings):
   - `dir` on the evidence folder: no leaks (348.48 KB scanned).
   - `dir` on this document: no leaks.
-  - `tree` on the committed HEAD: no leaks (24.10 MB scanned).
+  - `tree` on the committed HEAD: no leaks (24.46 MB scanned at 7ff92e1).
   - Scanner regression suite (`security/scan-tests.sh`): 32 passed, 0 failed.
 - The evidence and this document are added in one commit on this branch. No tracked source file was changed.
-- **Revision (2026-10-29).** A follow-up commit removes `raw/report-stderr.txt`, a 0-byte file left by a shell redirect during the run. It recorded no riltra output. Its line is removed from `MANIFEST.sha256`. `results/redaction-accounting.json` still lists the file with 0 replacements, because it records the redaction pass as it ran. The evidence-folder scan line is rerun on the folder after this change: 348.48 KB, its current byte total. The earlier 350.42 KB did not match the committed folder (348,571 bytes at 8a5f457). No other evidence file changed.
+- **Revision (2026-10-29).** A follow-up commit removes `raw/report-stderr.txt`, a 0-byte file left by a shell redirect during the run. It recorded no riltra output. Its line is removed from `MANIFEST.sha256`. `results/redaction-accounting.json` still lists the file with 0 replacements, because it records the redaction pass as it ran. The scan lines are rerun at 7ff92e1: the evidence folder is 348.48 KB, and the committed tree is 24.46 MB. The earlier figures, 350.42 KB and 24.10 MB, do not match the committed state. No other evidence file changed.
