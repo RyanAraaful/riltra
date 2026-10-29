@@ -5072,6 +5072,86 @@ fn code_binding_cli_links_an_explicit_anchor_and_marks_changed_source_stale() {
 }
 
 #[test]
+fn code_binding_symbol_anchor_links_the_scip_definition() {
+    let h = home("binding-symbol");
+    let dir = mkrepo(&h, "krepo");
+    init(&h, &dir, "krepo");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src").join("a.ts"), "export function foo() {}\n").unwrap();
+    let (code, _, err) = run(&h, &["index", "--repo", "krepo", "--full"]);
+    assert_eq!(code, 0, "index: {err}");
+    let symbol = "scip-kt test pkg 1.0.0 src/a.ts/foo().";
+    let scip = dir.join("index.scip");
+    std::fs::write(&scip, scip_index(&dir, "src/a.ts", symbol)).unwrap();
+    let (code, _, err) = run(
+        &h,
+        &[
+            "semantic",
+            "import",
+            "--repo",
+            "krepo",
+            "--scip",
+            scip.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "semantic import: {err}");
+    assert_eq!(create(&h, "krepo", "d1", "Decision", "body").0, 0);
+
+    let input = br#"{"record_id":"d1","record_revision":1,"relation":"documents","author":"fixture","rationale":"fixture","provenance":"fixture"}"#;
+    let (code, out, err) = run_stdin(
+        &h,
+        &[
+            "knowledge",
+            "bind",
+            "--repo",
+            "krepo",
+            "--path",
+            "src/a.ts",
+            "--line",
+            "1",
+            "--col",
+            "1",
+            "--symbol",
+            symbol,
+            "--input",
+            "-",
+        ],
+        input,
+    );
+    assert_eq!(code, 0, "bind by symbol: {err}");
+    assert!(out.contains("\"kind\":\"semantic\""), "{out}");
+    assert!(out.contains(symbol), "{out}");
+
+    let at = |symbol: &str| {
+        run(
+            &h,
+            &[
+                "knowledge",
+                "at",
+                "--repo",
+                "krepo",
+                "--path",
+                "src/a.ts",
+                "--line",
+                "1",
+                "--col",
+                "1",
+                "--symbol",
+                symbol,
+            ],
+        )
+    };
+    let (code, out, err) = at(symbol);
+    assert_eq!(code, 0, "at by symbol: {err}");
+    assert!(out.contains("\"status\":\"linked\""), "{out}");
+    assert!(out.contains("\"kind\":\"semantic\""), "{out}");
+    let (code, out, err) = at("scip-kt test pkg 1.0.0 src/a.ts/other().");
+    assert_eq!(code, 0, "at by other symbol: {err}");
+    assert!(out.contains("\"status\":\"unresolved\""), "{out}");
+    assert!(out.contains("\"unresolved_reason\":\""), "{out}");
+}
+
+#[test]
 fn code_binding_read_does_not_cross_canonical_repository_roots() {
     let h = home("binding-root-scope");
     let original = mkrepo(&h, "original");
