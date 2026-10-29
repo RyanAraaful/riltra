@@ -264,6 +264,28 @@ CREATE INDEX IF NOT EXISTS idx_semfacts_lookup ON semantic_facts(snapshot_id, sy
 CREATE INDEX IF NOT EXISTS idx_semfacts_span ON semantic_facts(snapshot_id, rel_path, start_line);
 ";
 
+/// Indexes added without a schema-version bump. Older binaries ignore them, so
+/// the change is compatible in both directions. Fresh and migrated databases
+/// get them inside their migration transaction; databases already at the
+/// current version get them from `ensure_additive_indexes` on live open.
+const ADDITIVE_INDEXES_SQL: &str =
+    "CREATE INDEX IF NOT EXISTS idx_files_snapshot_path ON files(snapshot_id, path);";
+
+fn ensure_additive_indexes(conn: &Connection) -> Result<(), String> {
+    let present: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_files_snapshot_path'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if present == 0 {
+        conn.execute_batch(ADDITIVE_INDEXES_SQL)
+            .map_err(|e| format!("cannot create file path index: {e}"))?;
+    }
+    Ok(())
+}
+
 /// Bring any database to the current schema in ONE explicit transaction:
 /// empty files are built at current, v1 gains nonce backfill, v2 gains the
 /// semantic tables, v3 gains the callee columns + the edges table, v4 gains
@@ -279,12 +301,14 @@ pub fn migrate(conn: &Connection) -> Result<(), String> {
         ));
     }
     if version == SCHEMA_VERSION {
-        return Ok(());
+        return ensure_additive_indexes(conn);
     }
     conn.execute_batch("BEGIN IMMEDIATE;")
         .map_err(|e| e.to_string())?;
     let applied = (|| -> Result<(), String> {
         conn.execute_batch(SCHEMA_SQL)
+            .map_err(|e| format!("schema migration failed: {e}"))?;
+        conn.execute_batch(ADDITIVE_INDEXES_SQL)
             .map_err(|e| format!("schema migration failed: {e}"))?;
         if version == 1 {
             conn.execute_batch(
@@ -2369,6 +2393,47 @@ mod tests {
             rusqlite::ffi::sqlite3_progress_handler(conn.handle(), 0, None, std::ptr::null_mut())
         };
         assert_eq!(result.unwrap(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn file_identity_lookup_uses_the_snapshot_path_index() {
+        let conn = open_memory().unwrap();
+        let plan: Vec<String> = conn
+            .prepare(
+                "EXPLAIN QUERY PLAN SELECT id,digest FROM files WHERE snapshot_id=?1 AND path=?2 ORDER BY id LIMIT 2",
+            )
+            .unwrap()
+            .query_map(rusqlite::params![1_i64, "a.rs"], |row| {
+                row.get::<_, String>(3)
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(
+            plan.iter()
+                .any(|detail| detail.contains("idx_files_snapshot_path")),
+            "{plan:?}"
+        );
+    }
+
+    #[test]
+    fn live_open_restores_the_path_index_on_a_current_schema_database() {
+        let dir = tmpdir("store-path-index");
+        let path = dir.join("index.db");
+        drop(open_live(&path).unwrap());
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch("DROP INDEX idx_files_snapshot_path;")
+            .unwrap();
+        let conn = open_live(&path).unwrap();
+        let present: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_files_snapshot_path'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(present, 1);
     }
 
     #[test]
