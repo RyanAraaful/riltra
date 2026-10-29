@@ -16,6 +16,7 @@ mod ignore;
 mod index;
 mod json;
 mod knowledge;
+mod knowledge_binding;
 mod knowledge_store;
 mod lsp;
 mod mcp;
@@ -51,7 +52,7 @@ pub(crate) fn usage() -> String {
   {NAME} semantic query --repo <name> --path <rel> --line <n> --col <n> [--refs] [--lsp-server <abs-path>]
   {NAME} callers --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--limit <n>] [--offset <n>]
   {NAME} callees --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--limit <n>] [--offset <n>]
-  {NAME} trace --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--to <path:line:col>] [--depth <n>] [--limit <n>] [--offset <n>]\n  {NAME} impact --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--depth <n>] [--limit <n>] [--offset <n>]\n  {NAME} knowledge create --repo <name> --input -\n  {NAME} knowledge show --repo <name> --id <id> [--revision <n>]\n  {NAME} knowledge update --repo <name> --id <id> --expected-revision <n> --input -\n  {NAME} knowledge history --repo <name> --id <id> [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge search --repo <name> [--query <text>] [--path <rel>] [--kind <kind>] [--include-archived] [--include-superseded] [--include-retracted] [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge link --repo <name> --input -\n  {NAME} knowledge unlink --repo <name> --relation <id> --input -\n  {NAME} knowledge related --repo <name> --id <id> [--revision <n>] [--direction inbound|outbound] [--include-retracted] [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge export --repo <name> [--format jsonl|md] [--out <path>]\n  {NAME} knowledge import --repo <name> --file <path>\n  {NAME} knowledge backup --repo <name> --out <path>\n  {NAME} knowledge restore --repo <name> --file <path> [--overwrite]\n  {NAME} knowledge verify --repo <name>\n  {NAME} mcp\n\nCommands:\n  status       Print deterministic bootstrap status as JSON\n  init         Register a local repository root\n  repo list    List registered repositories as JSON\n  repo status  Git/worktree fingerprint of a registered repository\n  doctor       Path-security and repository health checks as JSON\n  scan         Syntax facts (definitions/imports/calls) as JSON\n  index        Build the durable code index for a repository\n  index status Report index freshness (fresh/stale/unknown) as JSON\n  search       Search indexed symbols as JSON\n  semantic import Import a SCIP index against the live snapshot as JSON\n  semantic status Per-provider binding verification as JSON\n  semantic query Single-hop definition/reference lookup as JSON\n  callers Direct callers of the anchored identity as JSON\n  callees Direct callees of the anchored identity as JSON\n  trace Bounded plausible static paths with per-hop evidence\n  impact Conservative inbound impact with evidence and UNKNOWN default\n  mcp Serve the MCP stdio interface\n"
+  {NAME} trace --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--to <path:line:col>] [--depth <n>] [--limit <n>] [--offset <n>]\n  {NAME} impact --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--depth <n>] [--limit <n>] [--offset <n>]\n  {NAME} knowledge create --repo <name> --input -\n  {NAME} knowledge show --repo <name> --id <id> [--revision <n>]\n  {NAME} knowledge update --repo <name> --id <id> --expected-revision <n> --input -\n  {NAME} knowledge history --repo <name> --id <id> [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge search --repo <name> [--query <text>] [--path <rel>] [--kind <kind>] [--include-archived] [--include-superseded] [--include-retracted] [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge link --repo <name> --input -\n  {NAME} knowledge unlink --repo <name> --relation <id> --input -\n  {NAME} knowledge bind --repo <name> --path <rel> --line <n> --col <n> --input -\n  {NAME} knowledge unbind --repo <name> --binding <id> --input -\n  {NAME} knowledge at --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge related --repo <name> --id <id> [--revision <n>] [--direction inbound|outbound] [--include-retracted] [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge export --repo <name> [--format jsonl|md] [--out <path>]\n  {NAME} knowledge import --repo <name> --file <path>\n  {NAME} knowledge backup --repo <name> --out <path>\n  {NAME} knowledge restore --repo <name> --file <path> [--overwrite]\n  {NAME} knowledge verify --repo <name>\n  {NAME} mcp\n\nCommands:\n  status       Print deterministic bootstrap status as JSON\n  init         Register a local repository root\n  repo list    List registered repositories as JSON\n  repo status  Git/worktree fingerprint of a registered repository\n  doctor       Path-security and repository health checks as JSON\n  scan         Syntax facts (definitions/imports/calls) as JSON\n  index        Build the durable code index for a repository\n  index status Report index freshness (fresh/stale/unknown) as JSON\n  search       Search indexed symbols as JSON\n  semantic import Import a SCIP index against the live snapshot as JSON\n  semantic status Per-provider binding verification as JSON\n  semantic query Single-hop definition/reference lookup as JSON\n  callers Direct callers of the anchored identity as JSON\n  callees Direct callees of the anchored identity as JSON\n  trace Bounded plausible static paths with per-hop evidence\n  impact Conservative inbound impact with evidence and UNKNOWN default\n  mcp Serve the MCP stdio interface\n"
     )
 }
 
@@ -1040,6 +1041,49 @@ fn cmd_knowledge(op: args::KnowledgeOp, out: &mut String, err: &mut String) -> i
             relation,
             input,
         } => knowledge_unlink(&repo, &relation, &input, out, err),
+        args::KnowledgeOp::Bind {
+            repo,
+            path,
+            line,
+            col,
+            symbol,
+            input,
+        } => knowledge_binding::create_cli(
+            &repo,
+            &path,
+            &line,
+            &col,
+            symbol.as_deref(),
+            &input,
+            out,
+            err,
+        ),
+        args::KnowledgeOp::Unbind {
+            repo,
+            binding,
+            input,
+        } => knowledge_binding::retract_cli(&repo, &binding, &input, out, err),
+        args::KnowledgeOp::At {
+            repo,
+            path,
+            line,
+            col,
+            symbol,
+            limit,
+            offset,
+            generation,
+        } => knowledge_binding::at_cli(
+            &repo,
+            &path,
+            &line,
+            &col,
+            symbol.as_deref(),
+            limit.as_deref(),
+            offset.as_deref(),
+            generation.as_deref(),
+            out,
+            err,
+        ),
         args::KnowledgeOp::Export {
             repo,
             format,
@@ -1477,10 +1521,11 @@ fn knowledge_export(
         knowledge_store::ExportFormat::Markdown => "md",
     };
     let result = format!(
-        "{{\"format\":\"{format_name}\",\"path\":\"{}\",\"records\":{},\"relations\":{},\"bytes\":{}}}",
+        "{{\"format\":\"{format_name}\",\"path\":\"{}\",\"records\":{},\"relations\":{},\"code_bindings\":{},\"bytes\":{}}}",
         json::escape(path),
         doc.records,
         doc.relations,
+        doc.code_bindings,
         doc.text.len()
     );
     *out = response::knowledge_envelope(&entry.name, generation, "export", &result, None);
@@ -1525,12 +1570,14 @@ fn knowledge_import(repo: &str, file: &str, out: &mut String, err: &mut String) 
         }
     };
     let result = format!(
-        "{{\"records_inserted\":{},\"revisions_appended\":{},\"relations_inserted\":{},\"records_unchanged\":{},\"relations_unchanged\":{}}}",
+        "{{\"records_inserted\":{},\"revisions_appended\":{},\"relations_inserted\":{},\"code_bindings_inserted\":{},\"records_unchanged\":{},\"relations_unchanged\":{},\"code_bindings_unchanged\":{}}}",
         report.records_inserted,
         report.revisions_appended,
         report.relations_inserted,
+        report.code_bindings_inserted,
         report.records_unchanged,
-        report.relations_unchanged
+        report.relations_unchanged,
+        report.code_bindings_unchanged
     );
     *out = response::knowledge_envelope(repo, report.generation, "import", &result, None);
     0
@@ -1580,12 +1627,13 @@ fn knowledge_backup(repo: &str, out_path: &str, out: &mut String, err: &mut Stri
     };
     let backup_paths = backup::backup_paths(base);
     let result = format!(
-        "{{\"db\":\"{}\",\"manifest\":\"{}\",\"schema_version\":{},\"records\":{},\"relations\":{}}}",
+        "{{\"db\":\"{}\",\"manifest\":\"{}\",\"schema_version\":{},\"records\":{},\"relations\":{},\"code_bindings\":{}}}",
         json::escape(&backup_paths.db.to_string_lossy()),
         json::escape(&backup_paths.manifest.to_string_lossy()),
         manifest.schema_version,
         manifest.records,
-        manifest.relations
+        manifest.relations,
+        manifest.code_bindings.unwrap_or(0)
     );
     *out = response::knowledge_envelope(&entry.name, generation, "backup", &result, None);
     0
@@ -1613,8 +1661,8 @@ fn knowledge_verify(repo: &str, out: &mut String, err: &mut String) -> i32 {
         }
     };
     let result = format!(
-        "{{\"status\":\"ok\",\"schema_version\":{},\"records\":{},\"relations\":{}}}",
-        check.schema_version, check.records, check.relations
+        "{{\"status\":\"ok\",\"schema_version\":{},\"records\":{},\"relations\":{},\"code_bindings\":{}}}",
+        check.schema_version, check.records, check.relations, check.code_bindings
     );
     *out = response::knowledge_envelope(&entry.name, generation, "verify", &result, None);
     0
@@ -1643,11 +1691,12 @@ fn knowledge_restore(
         Ok(report) => {
             let db = knowledge_store::knowledge_db_path(&paths::config_dir(), &entry.name);
             let result = format!(
-                "{{\"path\":\"{}\",\"schema_version\":{},\"records\":{},\"relations\":{},\"overwrote\":{}}}",
+                "{{\"path\":\"{}\",\"schema_version\":{},\"records\":{},\"relations\":{},\"code_bindings\":{},\"overwrote\":{}}}",
                 json::escape(&db.to_string_lossy()),
                 report.schema_version,
                 report.records,
                 report.relations,
+                report.code_bindings,
                 report.overwrote
             );
             *out = response::knowledge_envelope(

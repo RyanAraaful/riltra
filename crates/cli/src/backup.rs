@@ -21,7 +21,7 @@ use crate::knowledge_store;
 use crate::registry::RepoEntry;
 
 pub const BACKUP_FORMAT: &str = "riltra-knowledge-backup";
-pub const BACKUP_VERSION: u64 = 1;
+pub const BACKUP_VERSION: u64 = 2;
 
 /// A manifest is a fixed-shape record; anything larger is not one of ours.
 const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
@@ -50,25 +50,28 @@ pub fn backup_paths(base: &Path) -> BackupPaths {
 /// read from the snapshot itself.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BackupManifest {
+    pub format_version: u64,
     pub repo: String,
     pub canonical_root: String,
     pub schema_version: u32,
     pub records: u64,
     pub relations: u64,
+    pub code_bindings: Option<u64>,
 }
 
 impl BackupManifest {
     pub fn to_json(&self) -> String {
         format!(
             "{{\"format\":\"{}\",\"version\":{},\"repo\":\"{}\",\"canonical_root\":\"{}\",\
-             \"schema_version\":{},\"records\":{},\"relations\":{}}}\n",
+             \"schema_version\":{},\"records\":{},\"relations\":{},\"code_bindings\":{}}}\n",
             BACKUP_FORMAT,
-            BACKUP_VERSION,
+            self.format_version,
             escape(&self.repo),
             escape(&self.canonical_root),
             self.schema_version,
             self.records,
-            self.relations
+            self.relations,
+            self.code_bindings.unwrap_or(0)
         )
     }
 }
@@ -87,6 +90,7 @@ pub fn parse_manifest(bytes: &[u8]) -> Result<BackupManifest, String> {
             "schema_version",
             "records",
             "relations",
+            "code_bindings",
         ],
     )
     .map_err(wrap)?;
@@ -97,10 +101,23 @@ pub fn parse_manifest(bytes: &[u8]) -> Result<BackupManifest, String> {
         ));
     }
     let version = crate::field_u64(&fields, "version").map_err(wrap)?;
-    if version != BACKUP_VERSION {
+    if !matches!(version, 1 | BACKUP_VERSION) {
         return Err(format!("unsupported backup manifest version {version}"));
     }
+    let has_code_bindings = fields.iter().any(|(key, _)| key == "code_bindings");
+    let code_bindings = match (version, has_code_bindings) {
+        (1, false) => None,
+        (1, true) => {
+            return Err("corrupt backup manifest: version 1 cannot carry code_bindings".to_string())
+        }
+        (BACKUP_VERSION, true) => Some(crate::field_u64(&fields, "code_bindings").map_err(wrap)?),
+        (BACKUP_VERSION, false) => {
+            return Err("corrupt backup manifest: code_bindings missing for version 2".to_string())
+        }
+        _ => unreachable!(),
+    };
     Ok(BackupManifest {
+        format_version: version,
         repo: crate::field_str(&fields, "repo").map_err(wrap)?,
         canonical_root: crate::field_str(&fields, "canonical_root").map_err(wrap)?,
         schema_version: u32::try_from(crate::field_u64(&fields, "schema_version").map_err(wrap)?)
@@ -109,6 +126,7 @@ pub fn parse_manifest(bytes: &[u8]) -> Result<BackupManifest, String> {
         })?,
         records: crate::field_u64(&fields, "records").map_err(wrap)?,
         relations: crate::field_u64(&fields, "relations").map_err(wrap)?,
+        code_bindings,
     })
 }
 
@@ -165,11 +183,13 @@ pub fn backup_to(
             .map_err(|e| format!("cannot open backup snapshot '{}': {e}", paths.db.display()))?;
         let check = knowledge_store::verify_store(&snap, repo, croot)?;
         let manifest = BackupManifest {
+            format_version: BACKUP_VERSION,
             repo: repo.name.clone(),
             canonical_root: repo.root.clone(),
             schema_version: check.schema_version,
             records: check.records,
             relations: check.relations,
+            code_bindings: Some(check.code_bindings),
         };
         std::fs::write(&paths.manifest, manifest.to_json()).map_err(|e| {
             format!(
@@ -193,6 +213,7 @@ pub struct RestoreReport {
     pub schema_version: u32,
     pub records: u64,
     pub relations: u64,
+    pub code_bindings: u64,
     pub generation: u64,
     pub overwrote: bool,
 }
@@ -276,10 +297,15 @@ pub fn restore_from(
                 manifest.schema_version, check.schema_version
             ));
         }
-        if check.records != manifest.records || check.relations != manifest.relations {
+        if check.records != manifest.records
+            || check.relations != manifest.relations
+            || manifest
+                .code_bindings
+                .is_some_and(|count| count != check.code_bindings)
+        {
             return Err(format!(
-                "corrupt backup: manifest declares {} records and {} relations, snapshot has {} and {}",
-                manifest.records, manifest.relations, check.records, check.relations
+                "corrupt backup: manifest declares {} records, {} relations and {:?} code bindings, snapshot has {}, {} and {}",
+                manifest.records, manifest.relations, manifest.code_bindings, check.records, check.relations, check.code_bindings
             ));
         }
         let generation =
@@ -324,6 +350,7 @@ pub fn restore_from(
         schema_version: check.schema_version,
         records: check.records,
         relations: check.relations,
+        code_bindings: check.code_bindings,
         generation,
         overwrote,
     })

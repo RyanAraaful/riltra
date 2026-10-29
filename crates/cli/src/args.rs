@@ -155,6 +155,29 @@ pub enum KnowledgeOp {
         relation: String,
         input: String,
     },
+    Bind {
+        repo: String,
+        path: String,
+        line: String,
+        col: String,
+        symbol: Option<String>,
+        input: String,
+    },
+    Unbind {
+        repo: String,
+        binding: String,
+        input: String,
+    },
+    At {
+        repo: String,
+        path: String,
+        line: String,
+        col: String,
+        symbol: Option<String>,
+        limit: Option<String>,
+        offset: Option<String>,
+        generation: Option<String>,
+    },
     Related {
         repo: String,
         id: String,
@@ -659,6 +682,57 @@ fn parse_knowledge_op(sub: &str, args: &[String]) -> Result<KnowledgeOp, String>
                 input: knowledge_value(&v, "--input")?,
             })
         }
+        "bind" => {
+            let (v, _) = knowledge_flags(
+                args,
+                2,
+                &["--repo", "--path", "--line", "--col", "--input"],
+                &["--symbol"],
+            )?;
+            Ok(KnowledgeOp::Bind {
+                repo: knowledge_value(&v, "--repo")?,
+                path: knowledge_value(&v, "--path")?,
+                line: knowledge_value(&v, "--line")?,
+                col: knowledge_value(&v, "--col")?,
+                symbol: v.get("--symbol").cloned(),
+                input: knowledge_value(&v, "--input")?,
+            })
+        }
+        "unbind" => {
+            let (v, _) = knowledge_flags(args, 2, &["--repo", "--binding", "--input"], &[])?;
+            Ok(KnowledgeOp::Unbind {
+                repo: knowledge_value(&v, "--repo")?,
+                binding: knowledge_value(&v, "--binding")?,
+                input: knowledge_value(&v, "--input")?,
+            })
+        }
+        "at" => {
+            let (v, _) = knowledge_flags(
+                args,
+                2,
+                &[
+                    "--repo",
+                    "--path",
+                    "--line",
+                    "--col",
+                    "--symbol",
+                    "--limit",
+                    "--offset",
+                    "--generation",
+                ],
+                &[],
+            )?;
+            Ok(KnowledgeOp::At {
+                repo: knowledge_value(&v, "--repo")?,
+                path: knowledge_value(&v, "--path")?,
+                line: knowledge_value(&v, "--line")?,
+                col: knowledge_value(&v, "--col")?,
+                symbol: v.get("--symbol").cloned(),
+                limit: v.get("--limit").cloned(),
+                offset: v.get("--offset").cloned(),
+                generation: v.get("--generation").cloned(),
+            })
+        }
         "related" => {
             let (v, flags) = knowledge_flags(
                 args,
@@ -1038,5 +1112,30 @@ mod tests {
         ));
         assert!(p(&["knowledge", "frobnicate", "--repo", "r"]).is_err());
         assert!(p(&["knowledge"]).is_err());
+    }
+
+    #[test]
+    fn parses_knowledge_anchor_pagination_flags() {
+        assert!(matches!(
+            p(&[
+                "knowledge",
+                "at",
+                "--repo",
+                "r",
+                "--path",
+                "src/lib.rs",
+                "--line",
+                "1",
+                "--col",
+                "1",
+                "--limit",
+                "1",
+                "--offset",
+                "1",
+                "--generation",
+                "2"
+            ]),
+            Ok(Command::Knowledge { .. })
+        ));
     }
 }

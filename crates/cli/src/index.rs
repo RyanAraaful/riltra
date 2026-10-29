@@ -1704,6 +1704,16 @@ fn caller_candidate_paths(
         .map(|(p, (id, _))| (*id, p.as_str()))
         .collect();
     let mut linked = BTreeSet::from([anchor.path.clone()]);
+    if let Some(src_root) = rust_crate_src_root(&anchor.path) {
+        // Fully qualified crate:: calls need no `use` row to connect their file.
+        // shortcut: one src root can contain separate targets; upgrade when Cargo target metadata is available.
+        linked.extend(
+            id_map
+                .keys()
+                .filter(|path| path.ends_with(".rs") && rust_crate_src_root(path) == Some(src_root))
+                .cloned(),
+        );
+    }
     // Local SCIP identities never gain cross-document name candidates.
     if anchor.doc.is_none() {
         let imports = store::imports_for(tx, snapshot_id)?;
@@ -4233,6 +4243,67 @@ mod tests {
             "use a::helper;",
             "crates/a/src/helper.rs"
         ));
+    }
+
+    #[test]
+    fn rust_callers_include_same_crate_calls_but_keep_same_name_as_candidates() {
+        let home = tmpdir("rust-callers-home");
+        let repo = tmpdir("rust-callers-repo");
+        let cli_src = repo.join("crates/cli/src");
+        let other_src = repo.join("crates/other/src");
+        std::fs::create_dir_all(&cli_src).unwrap();
+        std::fs::create_dir_all(&other_src).unwrap();
+        std::fs::write(cli_src.join("semantic.rs"), b"pub fn confined_read() {}\n").unwrap();
+        std::fs::write(
+            cli_src.join("index.rs"),
+            b"fn caller() { crate::semantic::confined_read(); }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            cli_src.join("sibling.rs"),
+            b"fn confined_read() {}\nfn same_name_caller() { confined_read(); }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            other_src.join("other.rs"),
+            b"fn caller() { confined_read(); }\n",
+        )
+        .unwrap();
+        build_full(&home, "r", &repo).unwrap();
+
+        let result = super::edge_query(
+            &home,
+            "r",
+            &repo,
+            &super::EdgeRequest {
+                anchor: super::SpanQuery {
+                    rel: "crates/cli/src/semantic.rs",
+                    line1: 1,
+                    col1: 12,
+                    refs: false,
+                },
+                symbol: None,
+                direction: super::EdgeDir::Callers,
+                limit: 20,
+                offset: 0,
+            },
+        )
+        .unwrap();
+
+        let paths: Vec<_> = result
+            .edges
+            .iter()
+            .map(|hit| hit.edge.caller_path.as_str())
+            .collect();
+        assert_eq!(
+            paths,
+            ["crates/cli/src/index.rs", "crates/cli/src/sibling.rs"]
+        );
+        assert!(result.edges.iter().all(|hit| {
+            hit.edge.edge_kind == "POTENTIAL_CALL"
+                && hit.edge.precision == "Heuristic"
+                && hit.edge.callee.is_none()
+        }));
     }
 
     #[test]
