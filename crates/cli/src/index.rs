@@ -2458,7 +2458,8 @@ pub(crate) fn validated_trace_anchor(
 }
 
 /// The trace/impact body on a caller-provided connection (see
-/// `edge_query_conn`); `started` keeps the time budget anchored to entry.
+/// `edge_query_conn`); `started` keeps the time budget anchored to entry,
+/// except that time spent inside the `pinned` hook is not charged to it.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn graph_query_conn(
     conn: &mut rusqlite::Connection,
@@ -2473,7 +2474,11 @@ pub(crate) fn graph_query_conn(
 ) -> Result<TraceQueryOut, String> {
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     let snapshot = store::latest_snapshot(&tx)?.ok_or("no snapshot: index the repository first")?;
+    // `pinned` is a test seam that runs with the snapshot already pinned. Its
+    // duration is not query work, so it must not consume the traversal budget.
+    let hook_started = Instant::now();
     pinned();
+    let started = started + hook_started.elapsed();
     store::require_graph_proof(&tx, snapshot.id)?;
     let anchor = resolve_edge_anchor(
         &tx,
@@ -4701,6 +4706,11 @@ mod tests {
             let writer_home = home.clone();
             let writer_repo = repo.clone();
             std::thread::spawn(move || {
+                // A slow pin hook (a rebuild on a loaded CI runner) must not
+                // spend the traversal's time budget; the sleep alone exceeds it.
+                std::thread::sleep(std::time::Duration::from_millis(
+                    crate::edges::TRACE_TIME_MS + 200,
+                ));
                 std::fs::write(writer_repo.join("a.py"), changed).unwrap();
                 super::build(&writer_home, "r", &writer_repo, false).unwrap();
             })
