@@ -456,6 +456,27 @@ pub fn upsert_semantic_edges(
         calls_by_file.entry(call.file_id).or_default().push(call);
     }
     let empty: Vec<&store::CallRow> = Vec::new();
+    let mut terminal_occurrence_sites = BTreeSet::new();
+    for fact in &facts {
+        if fact.roles & 1 != 0 || fact.symbol_uri.is_none() {
+            continue;
+        }
+        if let Some(fid) = fid_of.get(fact.rel_path.as_str()) {
+            for call in calls_by_file.get(fid).unwrap_or(&empty) {
+                if call
+                    .tcallee
+                    .as_ref()
+                    .is_some_and(|t| t.byte_start < fact.byte_end && fact.byte_start < t.byte_end)
+                {
+                    terminal_occurrence_sites.insert((
+                        call.file_id,
+                        call.byte_start,
+                        call.byte_end,
+                    ));
+                }
+            }
+        }
+    }
     let mut stats = EdgeStats::default();
     let mut resolved: BTreeSet<(i64, usize, usize)> = BTreeSet::new();
     let mut terminal_sites = BTreeSet::new();
@@ -490,6 +511,17 @@ pub fn upsert_semantic_edges(
                 }
             }
         }
+        callee_hits.retain(|call| {
+            !(call
+                .tcallee
+                .as_ref()
+                .is_some_and(|terminal| fact.byte_end <= terminal.byte_start)
+                && terminal_occurrence_sites.contains(&(
+                    call.file_id,
+                    call.byte_start,
+                    call.byte_end,
+                )))
+        });
         let local_doc = if crate::scip::is_local_symbol(uri) {
             Some(fact.rel_path.clone())
         } else {
@@ -2048,6 +2080,61 @@ mod tests {
             });
             assert_eq!(got, expected, "{callee}");
         }
+    }
+
+    #[test]
+    fn receiver_references_do_not_duplicate_a_resolved_call() {
+        let conn = mem_db();
+        let snap = mk_snap(&conn);
+        let main = b"def caller():\n    x.target()\n";
+        let lib = b"def target():\n    pass\n";
+        ingest_py(&conn, snap, "main.py", main);
+        ingest_py(&conn, snap, "lib.py", lib);
+        let imp = mk_import(&conn, snap, "scip-import");
+        store::insert_semantic_facts(
+            &conn,
+            &[
+                mk_fact(
+                    snap,
+                    imp,
+                    "lib.py",
+                    &store::content_digest(lib),
+                    Some("target"),
+                    "target",
+                    1,
+                    (1, 5, 1, 11),
+                    (4, 10),
+                    false,
+                ),
+                mk_fact(
+                    snap,
+                    imp,
+                    "main.py",
+                    &store::content_digest(main),
+                    Some("receiver"),
+                    "x",
+                    0,
+                    (2, 5, 2, 6),
+                    (18, 19),
+                    false,
+                ),
+                mk_fact(
+                    snap,
+                    imp,
+                    "main.py",
+                    &store::content_digest(main),
+                    Some("target"),
+                    "target",
+                    0,
+                    (2, 7, 2, 13),
+                    (20, 26),
+                    false,
+                ),
+            ],
+        )
+        .unwrap();
+        let stats = upsert_semantic_edges(&conn, snap, imp).unwrap();
+        assert_eq!((stats.calls, stats.potential, stats.references), (1, 0, 1));
     }
 
     #[test]
