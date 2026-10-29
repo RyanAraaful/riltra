@@ -3754,7 +3754,8 @@ fn backup_verify_restore_round_trips_and_reopens_cleanly() {
         man_text.contains("\"format\":\"riltra-knowledge-backup\""),
         "{man_text}"
     );
-    assert!(man_text.contains("\"version\":2"), "{man_text}");
+    assert!(man_text.contains("\"version\":1"), "{man_text}");
+    assert!(!man_text.contains("\"code_bindings\""), "{man_text}");
     assert!(man_text.contains("\"repo\":\"krepo\""), "{man_text}");
     assert!(man_text.contains("\"schema_version\":2"), "{man_text}");
     assert!(
@@ -3850,6 +3851,48 @@ fn backup_verify_restore_round_trips_and_reopens_cleanly() {
         0
     );
     assert_eq!(read_text(&recovered), orig_text);
+}
+
+#[test]
+fn backup_schema_v3_without_bindings_still_uses_manifest_v2() {
+    let h = home("backup-v3-empty-bindings");
+    let root = mkrepo(&h, "krepo");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/lib.rs"), b"pub fn f() {}\n").unwrap();
+    init(&h, &root, "krepo");
+    assert_eq!(run(&h, &["index", "--repo", "krepo", "--full"]).0, 0);
+    assert_eq!(create(&h, "krepo", "d1", "Decision", "body").0, 0);
+    let input = br#"{"record_id":"d1","record_revision":1,"relation":"documents","author":"fixture","rationale":"fixture","provenance":"fixture"}"#;
+    let (code, _, err) = run_stdin(
+        &h,
+        &[
+            "knowledge",
+            "bind",
+            "--repo",
+            "krepo",
+            "--path",
+            "src/lib.rs",
+            "--line",
+            "1",
+            "--col",
+            "8",
+            "--input",
+            "-",
+        ],
+        input,
+    );
+    assert_eq!(code, 0, "{err}");
+    let conn = rusqlite::Connection::open(db_path(&h, "krepo")).unwrap();
+    conn.execute("DELETE FROM code_bindings", []).unwrap();
+    drop(conn);
+    let base = h.join("backup-v3");
+    let (code, _, err) = backup(&h, "krepo", &base);
+    assert_eq!(code, 0, "{err}");
+    let manifest: Value =
+        serde_json::from_str(&read_text(&with_suffix(&base, ".manifest.json"))).unwrap();
+    assert_eq!(manifest["schema_version"], 3);
+    assert_eq!(manifest["version"], 2);
+    assert_eq!(manifest["code_bindings"], 0);
 }
 
 #[test]
@@ -3972,7 +4015,7 @@ fn backup_restore_rejects_missing_corrupt_and_mismatched_artifacts() {
     let man = read_text(&with_suffix(&fwd_man, ".manifest.json"));
     write_text(
         &with_suffix(&fwd_man, ".manifest.json"),
-        &man.replace("\"version\":2", "\"version\":3"),
+        &man.replace("\"version\":1", "\"version\":3"),
     );
     let (code, _, err) = restore(&h, "krepo", &fwd_man, true);
     assert_eq!(code, 3, "forward manifest version: {err}");
@@ -4923,6 +4966,27 @@ fn code_binding_cli_links_an_explicit_anchor_and_marks_changed_source_stale() {
     assert_eq!(code, 0, "bind: {err}");
     assert!(out.contains("\"relation\":\"constrains\""), "{out}");
     assert!(out.contains("\"record_id\":\"d1\""), "{out}");
+    let (code, out, err) = run(
+        &h,
+        &[
+            "knowledge",
+            "at",
+            "--repo",
+            "krepo",
+            "--path",
+            "src/lib.rs",
+            "--line",
+            "1",
+            "--col",
+            "12",
+            "--offset",
+            "1",
+        ],
+    );
+    assert_eq!(code, 0, "at beyond last page: {err}");
+    let page: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(page["pagination"]["total"], 1, "{page}");
+    assert_eq!(page["result"]["status"], "page-empty", "{page}");
     let (code, _, err) = update(
         &h,
         "krepo",
@@ -4972,6 +5036,11 @@ fn code_binding_cli_links_an_explicit_anchor_and_marks_changed_source_stale() {
         ],
     );
     assert_eq!(code, 0, "at: {err}");
+    let stale_page: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert!(
+        stale_page["result"]["unresolved_reason"].as_str().is_some(),
+        "{stale_page}"
+    );
     assert!(out.contains("\"freshness\":\"stale\""), "{out}");
     assert!(out.contains("\"record_revision\":1"), "{out}");
     assert!(
@@ -5074,6 +5143,60 @@ fn code_binding_read_does_not_cross_canonical_repository_roots() {
 }
 
 #[test]
+fn code_binding_read_reports_missing_code_index_reason() {
+    let h = home("binding-missing-index");
+    let root = mkrepo(&h, "krepo");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/lib.rs"), b"pub fn f() {}\n").unwrap();
+    init(&h, &root, "krepo");
+    assert_eq!(run(&h, &["index", "--repo", "krepo", "--full"]).0, 0);
+    assert_eq!(create(&h, "krepo", "d1", "Decision", "body").0, 0);
+    let input = br#"{"record_id":"d1","record_revision":1,"relation":"documents","author":"fixture","rationale":"fixture","provenance":"fixture"}"#;
+    let (code, _, err) = run_stdin(
+        &h,
+        &[
+            "knowledge",
+            "bind",
+            "--repo",
+            "krepo",
+            "--path",
+            "src/lib.rs",
+            "--line",
+            "1",
+            "--col",
+            "8",
+            "--input",
+            "-",
+        ],
+        input,
+    );
+    assert_eq!(code, 0, "{err}");
+    std::fs::remove_file(h.join("index").join("krepo.db")).unwrap();
+    let (code, out, err) = run(
+        &h,
+        &[
+            "knowledge",
+            "at",
+            "--repo",
+            "krepo",
+            "--path",
+            "src/lib.rs",
+            "--line",
+            "1",
+            "--col",
+            "8",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    let value: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(value["result"]["status"], "unresolved");
+    assert!(value["result"]["unresolved_reason"]
+        .as_str()
+        .unwrap()
+        .contains("no code index"));
+}
+
+#[test]
 fn code_binding_export_import_backup_and_retraction_are_auditable() {
     let source_home = home("binding-port-source");
     let root = mkrepo(&source_home, "krepo");
@@ -5095,7 +5218,7 @@ fn code_binding_export_import_backup_and_retraction_are_auditable() {
         .0,
         0
     );
-    let binding = br#"{"record_id":"d1","record_revision":1,"relation":"constrains","author":"owner","rationale":"This decision sets the read boundary.","provenance":"architecture review"}"#;
+    let binding = br#"{"record_id":"d1","record_revision":1,"relation":"constrains","author":"owner","rationale":"Quoted \"boundary\"\nline","provenance":"architecture review"}"#;
     let (code, bound, err) = run_stdin(
         &source_home,
         &[
@@ -5149,6 +5272,10 @@ fn code_binding_export_import_backup_and_retraction_are_auditable() {
     );
     assert_eq!(code, 0, "at: {err}");
     let at: Value = serde_json::from_str(&at).unwrap();
+    assert_eq!(
+        at["result"]["bindings"][0]["rationale"],
+        "Quoted \"boundary\"\nline"
+    );
     assert_eq!(at["result"]["status"], json!("retracted"), "{at}");
     assert_eq!(
         at["result"]["bindings"][0]["retracted"],
@@ -5192,6 +5319,68 @@ fn code_binding_export_import_backup_and_retraction_are_auditable() {
     assert_eq!(meta["code_bindings"], json!(1));
     let export_file = source_home.join("bindings.jsonl");
     std::fs::write(&export_file, &exported).unwrap();
+
+    let live_file = source_home.join("binding-before-retraction.jsonl");
+    let live = exported
+        .lines()
+        .map(|line| {
+            let mut value: Value = serde_json::from_str(line).unwrap();
+            if value["type"] == "code_binding" {
+                value["binding"]["retraction"] = Value::Null;
+            }
+            serde_json::to_string(&value).unwrap()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    std::fs::write(&live_file, live).unwrap();
+    let merge_home = home("binding-port-retraction-merge");
+    init(&merge_home, &root, "krepo");
+    assert_eq!(
+        run(&merge_home, &["index", "--repo", "krepo", "--full"]).0,
+        0
+    );
+    let (code, _, err) = run(
+        &merge_home,
+        &[
+            "knowledge",
+            "import",
+            "--repo",
+            "krepo",
+            "--file",
+            live_file.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "import active binding: {err}");
+    let (code, _, err) = run(
+        &merge_home,
+        &[
+            "knowledge",
+            "import",
+            "--repo",
+            "krepo",
+            "--file",
+            export_file.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "import subsequent retraction: {err}");
+    let (code, out, err) = run(
+        &merge_home,
+        &[
+            "knowledge",
+            "at",
+            "--repo",
+            "krepo",
+            "--path",
+            "src/lib.rs",
+            "--line",
+            "1",
+            "--col",
+            "12",
+        ],
+    );
+    assert_eq!(code, 0, "read merged retraction: {err}");
+    assert!(out.contains("\"status\":\"retracted\""), "{out}");
 
     let target_home = home("binding-port-target");
     init(&target_home, &root, "krepo");
@@ -5249,6 +5438,56 @@ fn code_binding_export_import_backup_and_retraction_are_auditable() {
     );
     assert_eq!(code, 0, "repeat import: {err}");
     assert!(replay.contains("\"code_bindings_unchanged\":1"), "{replay}");
+    let before_conflict = run(&target_home, &["knowledge", "export", "--repo", "krepo"]).1;
+    let conflict_file = source_home.join("binding-conflict.jsonl");
+    let conflict = exported.replace(
+        "\"provenance\":\"architecture review\"",
+        "\"provenance\":\"conflicting review\"",
+    );
+    assert_ne!(conflict, exported);
+    std::fs::write(&conflict_file, conflict).unwrap();
+    let (code, _, err) = run(
+        &target_home,
+        &[
+            "knowledge",
+            "import",
+            "--repo",
+            "krepo",
+            "--file",
+            conflict_file.to_str().unwrap(),
+        ],
+    );
+    assert_ne!(code, 0, "conflicting binding provenance must be rejected");
+    assert!(err.contains("import conflict"), "{err}");
+    assert_eq!(
+        run(&target_home, &["knowledge", "export", "--repo", "krepo"]).1,
+        before_conflict,
+        "conflict must leave the store unchanged"
+    );
+    let retraction_conflict = exported.replace(
+        "\"reason\":\"decision replaced\"",
+        "\"reason\":\"conflicting retraction\"",
+    );
+    assert_ne!(retraction_conflict, exported);
+    std::fs::write(&conflict_file, retraction_conflict).unwrap();
+    let (code, _, err) = run(
+        &target_home,
+        &[
+            "knowledge",
+            "import",
+            "--repo",
+            "krepo",
+            "--file",
+            conflict_file.to_str().unwrap(),
+        ],
+    );
+    assert_ne!(code, 0, "conflicting retraction must be rejected");
+    assert!(err.contains("import conflict"), "{err}");
+    assert_eq!(
+        run(&target_home, &["knowledge", "export", "--repo", "krepo"]).1,
+        before_conflict,
+        "retraction conflict must leave the store unchanged"
+    );
     let (code, verified, err) = run(&target_home, &["knowledge", "verify", "--repo", "krepo"]);
     assert_eq!(code, 0, "verify: {err}");
     assert!(verified.contains("\"code_bindings\":1"), "{verified}");

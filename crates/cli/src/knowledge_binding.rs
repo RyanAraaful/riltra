@@ -4,7 +4,7 @@
 use std::path::Path;
 
 use rusqlite::{params, Connection, Transaction, TransactionBehavior};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use crate::{index, knowledge, knowledge_store, paths, registry, response, semantic, store};
 
@@ -24,7 +24,7 @@ pub struct CodeAnchor {
     pub repo_root_digest: String,
     pub snapshot_id: i64,
     pub snapshot_nonce: String,
-    pub snapshot_digest: String,
+    pub snapshot_digest: Option<String>,
     pub source_digest: String,
     pub path: String,
     pub byte_start: usize,
@@ -92,6 +92,7 @@ pub struct BindingView {
 #[derive(Debug, Clone)]
 pub struct AtPage {
     pub status: &'static str,
+    pub unresolved_reason: Option<String>,
     pub path: String,
     pub line: u32,
     pub col: u32,
@@ -105,7 +106,7 @@ pub struct AtPage {
     pub schema_version: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PortRetraction {
     pub author: String,
@@ -113,7 +114,7 @@ pub(crate) struct PortRetraction {
     pub created_unix: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PortCodeBinding {
     pub repo: String,
@@ -141,15 +142,13 @@ pub(crate) struct PortCodeBinding {
     pub retraction: Option<PortRetraction>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PortCodeBindingLine {
     #[serde(rename = "type")]
     kind: String,
     binding: PortCodeBinding,
 }
-
-const MAX_IMPORTED_BINDING_LINES: usize = 2_000_000;
 
 fn valid_digest(value: &str) -> bool {
     value.len() == 16
@@ -208,11 +207,35 @@ fn nonnegative_sql_u64(row: &rusqlite::Row<'_>, column: usize) -> rusqlite::Resu
 }
 
 fn binding_line(binding: &PortCodeBinding) -> Result<String, String> {
-    serde_json::to_string(&PortCodeBindingLine {
-        kind: "code_binding".to_string(),
-        binding: binding.clone(),
-    })
-    .map_err(|e| format!("cannot encode code binding export: {e}"))
+    let b = binding;
+    let retraction = b.retraction.as_ref().map_or_else(
+        || "null".to_string(),
+        |r| {
+            format!(
+                "{{\"author\":\"{}\",\"reason\":\"{}\",\"created_unix\":{}}}",
+                crate::json::escape(&r.author),
+                crate::json::escape(&r.reason),
+                r.created_unix
+            )
+        },
+    );
+    Ok(format!(
+        concat!(
+            "{{\"type\":\"code_binding\",\"binding\":{{\"repo\":\"{}\",\"repo_root_digest\":\"{}\",",
+            "\"snapshot_id\":{},\"snapshot_nonce\":\"{}\",\"snapshot_digest\":\"{}\",\"source_digest\":\"{}\",",
+            "\"path\":\"{}\",\"byte_start\":{},\"byte_end\":{},\"cursor_line\":{},\"cursor_col\":{},",
+            "\"symbol_uri\":{},\"display_name\":{},\"anchor_kind\":\"{}\",\"precision\":\"{}\",",
+            "\"record_id\":\"{}\",\"record_revision\":{},\"relation\":\"{}\",\"author\":\"{}\",",
+            "\"rationale\":\"{}\",\"provenance\":\"{}\",\"created_unix\":{},\"retraction\":{}}}}}"
+        ),
+        crate::json::escape(&b.repo), crate::json::escape(&b.repo_root_digest), b.snapshot_id,
+        crate::json::escape(&b.snapshot_nonce), crate::json::escape(&b.snapshot_digest),
+        crate::json::escape(&b.source_digest), crate::json::escape(&b.path), b.byte_start, b.byte_end,
+        b.cursor_line, b.cursor_col, optional_string(b.symbol_uri.as_deref()), optional_string(b.display_name.as_deref()),
+        crate::json::escape(&b.anchor_kind), crate::json::escape(&b.precision), crate::json::escape(&b.record_id),
+        b.record_revision, crate::json::escape(&b.relation), crate::json::escape(&b.author),
+        crate::json::escape(&b.rationale), crate::json::escape(&b.provenance), b.created_unix, retraction
+    ))
 }
 
 pub(crate) fn export_lines(conn: &Connection) -> Result<Vec<String>, String> {
@@ -320,9 +343,6 @@ pub(crate) fn validate_import_bindings(
     target_repo: &str,
     target_root_digest: &str,
 ) -> Result<(), String> {
-    if bindings.len() > MAX_IMPORTED_BINDING_LINES {
-        return Err("invalid import payload: too many code binding lines".to_string());
-    }
     for binding in bindings {
         if binding.repo != declared_repo
             || binding.repo != target_repo
@@ -516,6 +536,7 @@ fn snapshot_digest(files: &std::collections::BTreeMap<String, (i64, String)>) ->
     store::content_digest(&input)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn resolve_code_anchor(
     home: &Path,
     entry: &registry::RepoEntry,
@@ -523,6 +544,8 @@ fn resolve_code_anchor(
     line: u32,
     col: u32,
     symbol: Option<&str>,
+    capture_snapshot: bool,
+    cached_source: Option<&[u8]>,
 ) -> Result<CodeAnchor, String> {
     if line == 0 || col == 0 {
         return Err("anchor line and column must be at least 1".to_string());
@@ -533,20 +556,33 @@ fn resolve_code_anchor(
     let conn = code_index_connection(home, &entry.name)?;
     let snapshot = store::latest_snapshot(&conn)?
         .ok_or_else(|| "no code snapshot: index the repository first".to_string())?;
-    let anchor =
-        index::resolve_edge_anchor(&conn, snapshot.id, &root, &path, line - 1, col - 1, symbol)?;
+    let anchor = index::resolve_edge_anchor_with_source(
+        &conn,
+        snapshot.id,
+        &root,
+        &path,
+        line - 1,
+        col - 1,
+        symbol,
+        cached_source,
+    )?;
     let (byte_start, byte_end) = anchor
         .span_bytes
         .ok_or_else(|| "anchor unresolved: no source span".to_string())?;
     if byte_start >= byte_end {
         return Err("anchor unresolved: empty source span".to_string());
     }
-    let files = store::file_id_map(&conn, snapshot.id)?;
-    let (_, source_digest) = files
-        .get(&path)
+    let (_, source_digest) = store::file_identity(&conn, snapshot.id, &path)?
         .ok_or_else(|| "anchor unresolved: path is not in the current code snapshot".to_string())?;
-    let source = semantic::confined_read(&root, &path, crate::scan::MAX_FILE_BYTES)?;
-    if store::content_digest(&source) != *source_digest {
+    let source = match cached_source {
+        Some(bytes) => std::borrow::Cow::Borrowed(bytes),
+        None => std::borrow::Cow::Owned(semantic::confined_read(
+            &root,
+            &path,
+            crate::scan::MAX_FILE_BYTES,
+        )?),
+    };
+    if store::content_digest(&source) != source_digest {
         return Err(
             "anchor unresolved: source changed; reindex before creating a binding".to_string(),
         );
@@ -561,8 +597,12 @@ fn resolve_code_anchor(
         repo_root_digest: store::content_digest(root.to_string_lossy().as_bytes()),
         snapshot_id: snapshot.id,
         snapshot_nonce: snapshot.nonce,
-        snapshot_digest: snapshot_digest(&files),
-        source_digest: source_digest.clone(),
+        snapshot_digest: if capture_snapshot {
+            Some(snapshot_digest(&store::file_id_map(&conn, snapshot.id)?))
+        } else {
+            None
+        },
+        source_digest,
         path,
         byte_start,
         byte_end,
@@ -727,7 +767,10 @@ fn insert_binding(
             anchor.repo_root_digest,
             anchor.snapshot_id,
             anchor.snapshot_nonce,
-            anchor.snapshot_digest,
+            anchor
+                .snapshot_digest
+                .as_deref()
+                .ok_or("missing snapshot digest for binding")?,
             anchor.source_digest,
             anchor.path,
             anchor.byte_start as i64,
@@ -1002,6 +1045,7 @@ pub(crate) fn empty_at(
 ) -> AtPage {
     AtPage {
         status: "no-link-proven",
+        unresolved_reason: None,
         path: path.to_string(),
         line,
         col,
@@ -1066,8 +1110,19 @@ pub(crate) fn at(
     let repo_root_digest = store::content_digest(root.to_string_lossy().as_bytes());
     let current_source = semantic::confined_read(&root, &path, crate::scan::MAX_FILE_BYTES)
         .map_err(|e| format!("anchor source unavailable: {e}"));
-    let anchor = resolve_code_anchor(home, entry, &path, line, col, symbol);
-    let anchor = anchor.ok();
+    let (anchor, unresolved_reason) = match resolve_code_anchor(
+        home,
+        entry,
+        &path,
+        line,
+        col,
+        symbol,
+        false,
+        current_source.as_ref().ok().map(Vec::as_slice),
+    ) {
+        Ok(anchor) => (Some(anchor), None),
+        Err(reason) => (None, Some(reason)),
+    };
     let resolved = anchor.is_some();
     let (selection, selection_end) = match anchor.as_ref() {
         Some(anchor) => (
@@ -1142,6 +1197,8 @@ pub(crate) fn at(
     let next_offset = truncated.then_some(end);
     let status = if !resolved {
         "unresolved"
+    } else if rows.is_empty() && total > 0 {
+        "page-empty"
     } else if rows.is_empty() {
         "no-link-proven"
     } else if rows.iter().all(|binding| binding.retracted) {
@@ -1155,6 +1212,7 @@ pub(crate) fn at(
     };
     Ok(AtPage {
         status,
+        unresolved_reason,
         path,
         line,
         col,
@@ -1169,56 +1227,44 @@ pub(crate) fn at(
     })
 }
 
-fn binding_json(binding: &BindingView) -> serde_json::Value {
-    serde_json::json!({
-        "binding_id": binding.binding_id,
-        "repo": binding.repo,
-        "anchor": {
-            "path": binding.path,
-            "byte_start": binding.byte_start,
-            "byte_end": binding.byte_end,
-            "line": binding.cursor_line,
-            "col": binding.cursor_col,
-            "symbol_uri": binding.symbol_uri,
-            "display_name": binding.display_name,
-            "kind": binding.anchor_kind,
-            "precision": binding.precision,
-            "snapshot_id": binding.snapshot_id,
-            "snapshot_nonce": binding.snapshot_nonce,
-            "snapshot_digest": binding.snapshot_digest,
-            "source_digest": binding.source_digest,
-        },
-        "relation": binding.relation,
-        "record_id": binding.record_id,
-        "record_revision": binding.record_revision,
-        "record": {
-            "kind": binding.record_kind,
-            "title": binding.record_title,
-            "body": binding.record_body,
-            "status": binding.record_status,
-        },
-        "author": binding.author,
-        "rationale": binding.rationale,
-        "provenance": binding.provenance,
-        "created_unix": binding.created_unix,
-        "retracted": binding.retracted,
-        "retraction_author": binding.retraction_author,
-        "retraction_reason": binding.retraction_reason,
-        "retracted_unix": binding.retracted_unix,
-        "freshness": binding.freshness,
-        "freshness_reason": binding.freshness_reason,
-        "verification": "Unverified",
-        "support": "unverified",
-    })
+fn optional_string(value: Option<&str>) -> String {
+    value
+        .map(|s| format!("\"{}\"", crate::json::escape(s)))
+        .unwrap_or_else(|| "null".to_string())
 }
 
-pub(crate) fn page_json(page: &AtPage) -> serde_json::Value {
-    serde_json::json!({
-        "status": page.status,
-        "anchor": {"path": page.path, "line": page.line, "col": page.col},
-        "schema_version": page.schema_version,
-        "bindings": page.bindings.iter().map(binding_json).collect::<Vec<_>>(),
-    })
+fn binding_json(b: &BindingView) -> String {
+    format!(
+        concat!(
+            "{{\"binding_id\":{},\"repo\":\"{}\",",
+            "\"anchor\":{{\"path\":\"{}\",\"byte_start\":{},\"byte_end\":{},\"line\":{},\"col\":{},",
+            "\"symbol_uri\":{},\"display_name\":{},\"kind\":\"{}\",\"precision\":\"{}\",",
+            "\"snapshot_id\":{},\"snapshot_nonce\":\"{}\",\"snapshot_digest\":\"{}\",\"source_digest\":\"{}\"}},",
+            "\"relation\":\"{}\",\"record_id\":\"{}\",\"record_revision\":{},",
+            "\"record\":{{\"kind\":\"{}\",\"title\":\"{}\",\"body\":\"{}\",\"status\":\"{}\"}},",
+            "\"author\":\"{}\",\"rationale\":\"{}\",\"provenance\":\"{}\",\"created_unix\":{},",
+            "\"retracted\":{},\"retraction_author\":{},\"retraction_reason\":{},\"retracted_unix\":{},",
+            "\"freshness\":\"{}\",\"freshness_reason\":{},\"verification\":\"Unverified\",\"support\":\"unverified\"}}"
+        ),
+        b.binding_id, crate::json::escape(&b.repo), crate::json::escape(&b.path), b.byte_start, b.byte_end,
+        b.cursor_line, b.cursor_col, optional_string(b.symbol_uri.as_deref()), optional_string(b.display_name.as_deref()),
+        crate::json::escape(&b.anchor_kind), crate::json::escape(&b.precision), b.snapshot_id,
+        crate::json::escape(&b.snapshot_nonce), crate::json::escape(&b.snapshot_digest), crate::json::escape(&b.source_digest),
+        crate::json::escape(&b.relation), crate::json::escape(&b.record_id), b.record_revision,
+        crate::json::escape(&b.record_kind), crate::json::escape(&b.record_title), crate::json::escape(&b.record_body),
+        crate::json::escape(&b.record_status), crate::json::escape(&b.author), crate::json::escape(&b.rationale),
+        crate::json::escape(&b.provenance), b.created_unix, b.retracted, optional_string(b.retraction_author.as_deref()),
+        optional_string(b.retraction_reason.as_deref()), b.retracted_unix.map_or_else(|| "null".to_string(), |n| n.to_string()),
+        crate::json::escape(&b.freshness), optional_string(b.freshness_reason.as_deref())
+    )
+}
+
+pub(crate) fn page_json(page: &AtPage) -> String {
+    format!(
+        "{{\"status\":\"{}\",\"unresolved_reason\":{},\"anchor\":{{\"path\":\"{}\",\"line\":{},\"col\":{}}},\"schema_version\":{},\"bindings\":[{}]}}",
+        page.status, optional_string(page.unresolved_reason.as_deref()), crate::json::escape(&page.path),
+        page.line, page.col, page.schema_version, page.bindings.iter().map(binding_json).collect::<Vec<_>>().join(",")
+    )
 }
 
 fn position(value: &str, flag: &str, err: &mut String) -> Result<u32, i32> {
@@ -1245,7 +1291,6 @@ fn write_error_code(error: &str) -> i32 {
         || error.starts_with("record_")
         || error.starts_with("rationale ")
         || error.starts_with("provenance ")
-        || error.starts_with("code anchor")
     {
         2
     } else {
@@ -1291,7 +1336,7 @@ pub(crate) fn create_cli(
         Err(code) => return code,
     };
     let home = paths::config_dir();
-    let anchor = match resolve_code_anchor(&home, &entry, path, line, col, symbol) {
+    let anchor = match resolve_code_anchor(&home, &entry, path, line, col, symbol, true, None) {
         Ok(anchor) => anchor,
         Err(e) => {
             err.push_str(&format!("error: {e}\n"));
@@ -1307,35 +1352,26 @@ pub(crate) fn create_cli(
     };
     match create(&mut conn, Path::new(&root), &anchor, &input) {
         Ok((binding_id, generation)) => {
-            let result = serde_json::json!({
-                "binding_id": binding_id,
-                "repo": repo,
-                "anchor": {
-                    "path": anchor.path,
-                    "byte_start": anchor.byte_start,
-                    "byte_end": anchor.byte_end,
-                    "line": anchor.cursor_line,
-                    "col": anchor.cursor_col,
-                    "symbol_uri": anchor.symbol_uri,
-                    "display_name": anchor.display_name,
-                    "kind": anchor.anchor_kind,
-                    "precision": anchor.precision,
-                    "snapshot_id": anchor.snapshot_id,
-                    "snapshot_nonce": anchor.snapshot_nonce,
-                    "snapshot_digest": anchor.snapshot_digest,
-                    "source_digest": anchor.source_digest,
-                },
-                "relation": input.relation,
-                "record_id": input.record_id,
-                "record_revision": input.record_revision,
-                "author": input.author,
-                "rationale": input.rationale,
-                "provenance": input.provenance,
-                "verification": "Unverified",
-                "support": "unverified",
-            });
-            *out =
-                response::knowledge_envelope(repo, generation, "bind", &result.to_string(), None);
+            let result = format!(
+                concat!(
+                    "{{\"binding_id\":{},\"repo\":\"{}\",\"anchor\":{{\"path\":\"{}\",",
+                    "\"byte_start\":{},\"byte_end\":{},\"line\":{},\"col\":{},\"symbol_uri\":{},\"display_name\":{},",
+                    "\"kind\":\"{}\",\"precision\":\"{}\",\"snapshot_id\":{},\"snapshot_nonce\":\"{}\",",
+                    "\"snapshot_digest\":\"{}\",\"source_digest\":\"{}\"}},\"relation\":\"{}\",",
+                    "\"record_id\":\"{}\",\"record_revision\":{},\"author\":\"{}\",\"rationale\":\"{}\",",
+                    "\"provenance\":\"{}\",\"verification\":\"Unverified\",\"support\":\"unverified\"}}"
+                ),
+                binding_id, crate::json::escape(repo), crate::json::escape(&anchor.path),
+                anchor.byte_start, anchor.byte_end, anchor.cursor_line, anchor.cursor_col,
+                optional_string(anchor.symbol_uri.as_deref()), optional_string(anchor.display_name.as_deref()),
+                crate::json::escape(&anchor.anchor_kind), crate::json::escape(&anchor.precision),
+                anchor.snapshot_id, crate::json::escape(&anchor.snapshot_nonce),
+                crate::json::escape(anchor.snapshot_digest.as_deref().expect("stored binding has a snapshot digest")), crate::json::escape(&anchor.source_digest),
+                crate::json::escape(&input.relation), crate::json::escape(&input.record_id),
+                input.record_revision, crate::json::escape(&input.author), crate::json::escape(&input.rationale),
+                crate::json::escape(&input.provenance)
+            );
+            *out = response::knowledge_envelope(repo, generation, "bind", &result, None);
             0
         }
         Err(e) => {
@@ -1379,14 +1415,11 @@ pub(crate) fn retract_cli(
     };
     match retract(&mut conn, binding_id, &input) {
         Ok(generation) => {
-            let result = serde_json::json!({
-                "binding_id": binding_id,
-                "retracted": true,
-                "retraction_author": input.author,
-                "retraction_reason": input.reason,
-            });
-            *out =
-                response::knowledge_envelope(repo, generation, "unbind", &result.to_string(), None);
+            let result = format!(
+                "{{\"binding_id\":{},\"retracted\":true,\"retraction_author\":\"{}\",\"retraction_reason\":\"{}\"}}",
+                binding_id, crate::json::escape(&input.author), crate::json::escape(&input.reason)
+            );
+            *out = response::knowledge_envelope(repo, generation, "unbind", &result, None);
             0
         }
         Err(e) => {
@@ -1510,4 +1543,24 @@ pub(crate) fn at_cli(
         Some(pagination),
     );
     0
+}
+
+#[cfg(test)]
+mod review_regressions {
+    #[test]
+    fn empty_page_has_fixed_order_and_escaped_path() {
+        let page = super::empty_at("a\"b\\c.rs", 1, 2, 0, 0);
+        assert_eq!(super::page_json(&page).to_string(), "{\"status\":\"no-link-proven\",\"unresolved_reason\":null,\"anchor\":{\"path\":\"a\\\"b\\\\c.rs\",\"line\":1,\"col\":2},\"schema_version\":0,\"bindings\":[]}");
+    }
+    #[test]
+    fn changed_anchor_is_a_state_error() {
+        assert_eq!(
+            super::write_error_code("code anchor changed before binding was stored"),
+            3
+        );
+        assert_eq!(
+            super::write_error_code("code anchor span no longer binds source bytes"),
+            3
+        );
+    }
 }

@@ -553,9 +553,77 @@ fn knowledge_at_anchor_mcp_matches_cli_and_keeps_legacy_store_read_only() {
     );
     assert!(!is_error(&result), "{result}");
     assert_eq!(doc(&result), cli, "MCP and CLI documents must match");
+    let cli_symbol = cli_json(
+        &h,
+        &[
+            "knowledge",
+            "at",
+            "--repo",
+            "r",
+            "--path",
+            "src/lib.rs",
+            "--line",
+            "1",
+            "--col",
+            "12",
+            "--symbol",
+            "scip-sym",
+        ],
+    );
+    let selected = call_tool(
+        &mut s,
+        3,
+        "riltra_knowledge_at_anchor",
+        &json!({"repo":"r","path":"src/lib.rs","line":1,"col":12,"symbol":"scip-sym"}),
+    );
+    assert_eq!(
+        doc(&selected),
+        cli_symbol,
+        "MCP and CLI symbol selection must match"
+    );
+    assert_eq!(cli_symbol["result"]["status"], "unresolved");
+    assert!(cli_symbol["result"]["unresolved_reason"].as_str().is_some());
     assert_eq!(listing(&h), before, "MCP read created or modified storage");
     let (code, err) = s.finish();
     assert_eq!(code, 0, "MCP disconnect: {err}");
+
+    std::fs::write(
+        dir.join("src/lib.rs"),
+        b"pub fn confined_read() { let _changed = true; }\n",
+    )
+    .unwrap();
+    let cli_stale = cli_json(
+        &h,
+        &[
+            "knowledge",
+            "at",
+            "--repo",
+            "r",
+            "--path",
+            "src/lib.rs",
+            "--line",
+            "1",
+            "--col",
+            "12",
+        ],
+    );
+    assert!(
+        cli_stale["result"]["unresolved_reason"].as_str().is_some(),
+        "{cli_stale}"
+    );
+    let mut s = ready(&h);
+    let stale = call_tool(
+        &mut s,
+        2,
+        "riltra_knowledge_at_anchor",
+        &json!({"repo":"r","path":"src/lib.rs","line":1,"col":12}),
+    );
+    assert_eq!(
+        doc(&stale),
+        cli_stale,
+        "MCP and CLI unresolved reasons must match"
+    );
+    assert_eq!(s.finish().0, 0);
 
     let legacy = home("knowledge-at-anchor-v1");
     let legacy_repo = home("knowledge-at-anchor-v1-repo");

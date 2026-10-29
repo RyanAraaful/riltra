@@ -61,6 +61,13 @@ pub struct BackupManifest {
 
 impl BackupManifest {
     pub fn to_json(&self) -> String {
+        if self.format_version == 1 {
+            return format!(
+                "{{\"format\":\"{}\",\"version\":1,\"repo\":\"{}\",\"canonical_root\":\"{}\",\"schema_version\":{},\"records\":{},\"relations\":{}}}\n",
+                BACKUP_FORMAT, escape(&self.repo), escape(&self.canonical_root),
+                self.schema_version, self.records, self.relations
+            );
+        }
         format!(
             "{{\"format\":\"{}\",\"version\":{},\"repo\":\"{}\",\"canonical_root\":\"{}\",\
              \"schema_version\":{},\"records\":{},\"relations\":{},\"code_bindings\":{}}}\n",
@@ -116,14 +123,22 @@ pub fn parse_manifest(bytes: &[u8]) -> Result<BackupManifest, String> {
         }
         _ => unreachable!(),
     };
+    let schema_version = u32::try_from(crate::field_u64(&fields, "schema_version").map_err(wrap)?)
+        .map_err(|_| "corrupt backup manifest: schema version out of range".to_string())?;
+    if version == 1
+        && schema_version > 2
+        && schema_version <= knowledge_store::KNOWLEDGE_SCHEMA_VERSION
+    {
+        return Err(
+            "corrupt backup manifest: version 1 cannot describe schema version 3 or later"
+                .to_string(),
+        );
+    }
     Ok(BackupManifest {
         format_version: version,
         repo: crate::field_str(&fields, "repo").map_err(wrap)?,
         canonical_root: crate::field_str(&fields, "canonical_root").map_err(wrap)?,
-        schema_version: u32::try_from(crate::field_u64(&fields, "schema_version").map_err(wrap)?)
-            .map_err(|_| {
-            "corrupt backup manifest: schema version out of range".to_string()
-        })?,
+        schema_version,
         records: crate::field_u64(&fields, "records").map_err(wrap)?,
         relations: crate::field_u64(&fields, "relations").map_err(wrap)?,
         code_bindings,
@@ -183,13 +198,17 @@ pub fn backup_to(
             .map_err(|e| format!("cannot open backup snapshot '{}': {e}", paths.db.display()))?;
         let check = knowledge_store::verify_store(&snap, repo, croot)?;
         let manifest = BackupManifest {
-            format_version: BACKUP_VERSION,
+            format_version: if check.schema_version <= 2 {
+                1
+            } else {
+                BACKUP_VERSION
+            },
             repo: repo.name.clone(),
             canonical_root: repo.root.clone(),
             schema_version: check.schema_version,
             records: check.records,
             relations: check.relations,
-            code_bindings: Some(check.code_bindings),
+            code_bindings: (check.schema_version > 2).then_some(check.code_bindings),
         };
         std::fs::write(&paths.manifest, manifest.to_json()).map_err(|e| {
             format!(
@@ -354,4 +373,13 @@ pub fn restore_from(
         generation,
         overwrote,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn legacy_manifest_cannot_describe_schema_v3() {
+        let manifest = br#"{"format":"riltra-knowledge-backup","version":1,"repo":"r","canonical_root":"/repo","schema_version":3,"records":1,"relations":0}"#;
+        assert!(super::parse_manifest(manifest).is_err());
+    }
 }

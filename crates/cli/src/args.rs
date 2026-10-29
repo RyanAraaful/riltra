@@ -686,8 +686,8 @@ fn parse_knowledge_op(sub: &str, args: &[String]) -> Result<KnowledgeOp, String>
             let (v, _) = knowledge_flags(
                 args,
                 2,
-                &["--repo", "--path", "--line", "--col", "--input"],
-                &["--symbol"],
+                &["--repo", "--path", "--line", "--col", "--symbol", "--input"],
+                &[],
             )?;
             Ok(KnowledgeOp::Bind {
                 repo: knowledge_value(&v, "--repo")?,
@@ -823,7 +823,7 @@ fn take_value(args: &[String], i: &mut usize, flag: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse, Command, SemanticOp};
+    use super::{parse, Command, KnowledgeOp, SemanticOp};
 
     fn p(args: &[&str]) -> Result<Command, String> {
         parse(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>())
@@ -1137,5 +1137,56 @@ mod tests {
             ]),
             Ok(Command::Knowledge { .. })
         ));
+    }
+
+    #[test]
+    fn parses_bind_symbol_as_value() {
+        for symbol in ["--symbol", "--symbol=scip-sym"] {
+            let mut args = vec![
+                "knowledge",
+                "bind",
+                "--repo",
+                "r",
+                "--path",
+                "a.rs",
+                "--line",
+                "1",
+                "--col",
+                "1",
+                symbol,
+            ];
+            if symbol == "--symbol" {
+                args.push("scip-sym");
+            }
+            args.extend(["--input", "-"]);
+            assert!(
+                matches!(p(&args), Ok(Command::Knowledge { op: KnowledgeOp::Bind { symbol: Some(s), .. } }) if s == "scip-sym")
+            );
+        }
+    }
+
+    #[test]
+    fn parses_at_symbol_as_value() {
+        for symbol in ["--symbol", "--symbol=scip-sym"] {
+            let mut args = vec![
+                "knowledge",
+                "at",
+                "--repo",
+                "r",
+                "--path",
+                "a.rs",
+                "--line",
+                "1",
+                "--col",
+                "1",
+                symbol,
+            ];
+            if symbol == "--symbol" {
+                args.push("scip-sym");
+            }
+            assert!(
+                matches!(p(&args), Ok(Command::Knowledge { op: KnowledgeOp::At { symbol: Some(s), .. } }) if s == "scip-sym")
+            );
+        }
     }
 }
