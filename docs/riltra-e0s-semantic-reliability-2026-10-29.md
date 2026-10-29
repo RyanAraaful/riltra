@@ -103,10 +103,11 @@ These runs were made to locate the miss. They are reported separately and do not
 ## Redaction and verification
 
 - Local paths in the evidence are replaced with `<SCRATCH>`, `<REPO>` and `<USERHOME>`. The redaction record is in [`results/redaction-accounting.json`](pilots/riltra-e0s-semantic-reliability-2026-10-29/results/redaction-accounting.json): 273 files, 269 replacements. A pattern scan of the evidence found no drive letters, user-profile paths, session paths or percent-encoded drive letters.
-- File hashes for the whole evidence folder (311 files) are in `MANIFEST.sha256`.
+- File hashes for the evidence folder are in `MANIFEST.sha256`: 310 entries (the manifest does not list itself). The count was 311 before the follow-up commit that removed `raw/report-stderr.txt`.
 - Secret and local-path scan with the pinned gitleaks 8.30.1, run through `security/scan.sh` (`GITLEAKS_BIN` set in the user's Claude Code settings):
-  - `dir` on the evidence folder: no leaks (350.42 KB scanned).
+  - `dir` on the evidence folder: no leaks (348.48 KB scanned).
   - `dir` on this document: no leaks.
   - `tree` on the committed HEAD: no leaks (24.10 MB scanned).
   - Scanner regression suite (`security/scan-tests.sh`): 32 passed, 0 failed.
 - The evidence and this document are added in one commit on this branch. No tracked source file was changed.
+- **Revision (2026-10-29).** A follow-up commit removes `raw/report-stderr.txt`, a 0-byte file left by a shell redirect during the run. It recorded no riltra output. Its line is removed from `MANIFEST.sha256`. `results/redaction-accounting.json` still lists the file with 0 replacements, because it records the redaction pass as it ran. The evidence-folder scan line is rerun on the folder after this change: 348.48 KB, its current byte total. The earlier 350.42 KB did not match the committed folder (348,571 bytes at 8a5f457). No other evidence file changed.

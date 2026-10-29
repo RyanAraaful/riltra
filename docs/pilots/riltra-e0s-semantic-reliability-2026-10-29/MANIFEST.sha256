@@ -298,7 +298,6 @@ a289e1bfb6f7aa2768535feef243466e942b5577e8b28b0062c9ebbff4b15b8a *./raw/rep20-9/
 82dd5504140f273986002f6adef69f00342cc09dd6ef37b57f9e1ff43c6d1909 *./raw/rep20-9/ts-definition-from-callsite.json
 81af0179c80b5308966e023463797d5958b40db027e7d1afe791ecd62539de4d *./raw/rep20-9/ts-index.json
 62142c563af6a785f3e0c3c1a6e7159ddfc96b291bca06be4feaf508454c0f61 *./raw/rep20-9/ts-init.json
-e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 *./raw/report-stderr.txt
 74364152ef73fb5c494641c3dcb0cd67e8fe3cf781350231e844b2105987d701 *./raw/rows.jsonl
 f6ba017360202535eb55f8a3fad7e1afe19fffa318b9a0f72ba7fb89c8200f5a *./raw/warm-1/rust-analyzer-definition.json
 84598886eb2ce0eb602828f017e031b128248d4247b1b964ab3900816d87960d *./raw/warm-1/rust-analyzer-references.json
