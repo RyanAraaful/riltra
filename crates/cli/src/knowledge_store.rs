@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //! M7 knowledge store: separate authoritative SQLite database per registered
-//! repository (`$RILTRA_HOME/knowledge/<name>.db`). Schema v2 with guarded,
+//! repository (`$RILTRA_HOME/knowledge/<name>.db`). Schema v3 with guarded,
 //! lazy migration from v1 on the first Full-stage write; Foundation (v1)
 //! stores stay readable. Never touches the M6 code index.
 //!
@@ -36,12 +36,10 @@ use crate::knowledge::{NewRecord, RecordVersion, UpdateRecord};
 use crate::paths;
 use crate::registry::RepoEntry;
 
-/// Independent knowledge schema version (`PRAGMA user_version`). Full-stage
-/// ships schema v2; Foundation stores are v1 and migrate lazily on the first
-/// Full-stage write (see [`ensure_lifecycle_schema`]). Fresh stores are still
-/// created at v1: a store that never uses Full-stage features stays readable
-/// by a Foundation binary.
-pub const KNOWLEDGE_SCHEMA_VERSION: u32 = 2;
+/// Independent knowledge schema version (`PRAGMA user_version`). Lifecycle
+/// writes migrate v1 to v2; code-anchor writes migrate through v3. Fresh stores
+/// remain v1 until an explicit write needs one of those features.
+pub const KNOWLEDGE_SCHEMA_VERSION: u32 = 3;
 
 /// Per-repository knowledge database file (never inside repositories).
 pub fn knowledge_db_path(home: &Path, repo: &str) -> PathBuf {
@@ -148,10 +146,10 @@ fn open_inner(
     if !existed {
         init_schema(&mut conn, repo, &croot, inject_init_failure)?;
     } else {
-        // Accepted schema versions: 1 (Foundation) and 2 (Full-stage). A
+        // Accept Foundation v1, lifecycle v2 and code-binding v3. A
         // version-0/garbage stamp and any disagreement between the two
         // version stamps fail closed; the store is never deleted or rebuilt.
-        if version != 1 && version != KNOWLEDGE_SCHEMA_VERSION {
+        if !matches!(version, 1..=KNOWLEDGE_SCHEMA_VERSION) {
             return Err(format!(
                 "corrupt knowledge store for '{}': unexpected schema version {version}",
                 repo.name
@@ -449,6 +447,7 @@ const REQUIRED_TRIGGERS: [&str; 2] = ["heads_fts_sync_insert", "heads_fts_sync_u
 /// Additional tables a schema-v2 store must contain. A v2 store without them
 /// is corrupt and fails closed at open.
 const LIFECYCLE_TABLES: [&str; 2] = ["record_lifecycle", "relation_lifecycle"];
+const CODE_BINDING_TABLES: [&str; 2] = ["code_bindings", "code_binding_retractions"];
 
 /// Schema v2 additions, created only by the guarded v1→v2 migration inside a
 /// Full-stage write transaction. `record_lifecycle` is append-only, keyed by
@@ -483,7 +482,7 @@ fn ensure_lifecycle_schema_inner(tx: &Transaction, inject_failure: bool) -> Resu
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .map_err(|e| format!("cannot read knowledge schema version: {e}"))?;
     match version {
-        2 => Ok(()),
+        2 | 3 => Ok(()),
         1 => {
             tx.execute_batch(MIGRATION_V2_SQL)
                 .map_err(|e| format!("cannot migrate knowledge schema: {e}"))?;
@@ -511,6 +510,68 @@ fn ensure_lifecycle_schema_inner(tx: &Transaction, inject_failure: bool) -> Resu
     }
 }
 
+const MIGRATION_V3_SQL: &str = "
+CREATE TABLE IF NOT EXISTS code_bindings (
+  binding_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  repo TEXT NOT NULL,
+  repo_root_digest TEXT NOT NULL CHECK(length(repo_root_digest)=16 AND repo_root_digest NOT GLOB '*[^0-9a-f]*'),
+  snapshot_id INTEGER NOT NULL, snapshot_nonce TEXT NOT NULL,
+  snapshot_digest TEXT NOT NULL CHECK(length(snapshot_digest)=16 AND snapshot_digest NOT GLOB '*[^0-9a-f]*'),
+  source_digest TEXT NOT NULL CHECK(length(source_digest)=16 AND source_digest NOT GLOB '*[^0-9a-f]*'),
+  path TEXT NOT NULL, byte_start INTEGER NOT NULL CHECK(byte_start >= 0),
+  byte_end INTEGER NOT NULL CHECK(byte_end > byte_start),
+  cursor_line INTEGER NOT NULL CHECK(cursor_line > 0),
+  cursor_col INTEGER NOT NULL CHECK(cursor_col > 0),
+  symbol_uri TEXT, display_name TEXT,
+  anchor_kind TEXT NOT NULL CHECK(anchor_kind IN ('semantic','syntax-fallback')),
+  precision TEXT NOT NULL CHECK(precision IN ('Exact','Heuristic')),
+  record_id TEXT NOT NULL, record_revision INTEGER NOT NULL CHECK(record_revision > 0),
+  relation TEXT NOT NULL CHECK(relation IN ('documents','constrains','implements','tests','motivates','observes')),
+  author TEXT NOT NULL CHECK(author <> ''),
+  rationale TEXT NOT NULL CHECK(rationale <> ''),
+  provenance TEXT NOT NULL CHECK(provenance <> ''),
+  created_unix INTEGER NOT NULL CHECK(created_unix >= 0)
+);
+CREATE INDEX IF NOT EXISTS code_bindings_anchor ON code_bindings(repo, path, byte_start);
+CREATE TABLE IF NOT EXISTS code_binding_retractions (
+  binding_id INTEGER PRIMARY KEY,
+  author TEXT NOT NULL CHECK(author <> ''),
+  reason TEXT NOT NULL CHECK(reason <> ''),
+  created_unix INTEGER NOT NULL CHECK(created_unix >= 0)
+);
+";
+
+/// Create v3's explicit code-anchor links inside the caller's write transaction.
+/// Read paths never call this; v1/v2 remain readable until an explicit write.
+pub(crate) fn ensure_code_binding_schema(tx: &Transaction) -> Result<(), String> {
+    ensure_lifecycle_schema(tx)?;
+    let version: u32 = tx
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .map_err(|e| format!("cannot read knowledge schema version: {e}"))?;
+    match version {
+        3 => Ok(()),
+        2 => {
+            tx.execute_batch(MIGRATION_V3_SQL)
+                .map_err(|e| format!("cannot migrate knowledge schema: {e}"))?;
+            let stamped = tx
+                .execute(
+                    "UPDATE meta SET value = '3' WHERE key = 'knowledge_schema_version'",
+                    [],
+                )
+                .map_err(|e| format!("cannot migrate knowledge schema: {e}"))?;
+            if stamped != 1 {
+                return Err("corrupt knowledge store: schema marker missing".to_string());
+            }
+            tx.execute_batch("PRAGMA user_version = 3")
+                .map_err(|e| format!("cannot migrate knowledge schema: {e}"))?;
+            Ok(())
+        }
+        _ => Err(format!(
+            "corrupt knowledge store: unexpected schema version {version}"
+        )),
+    }
+}
+
 /// Test-only entry that exercises the migration exactly as a Full-stage write
 /// would: one immediate transaction, migration first, commit. Later tasks
 /// wire `ensure_lifecycle_schema` into the real write paths.
@@ -529,7 +590,8 @@ fn check_schema_complete(conn: &Connection, repo: &RepoEntry, version: u32) -> R
     let tables = REQUIRED_TABLES
         .iter()
         .copied()
-        .chain(LIFECYCLE_TABLES.iter().copied().filter(|_| version >= 2));
+        .chain(LIFECYCLE_TABLES.iter().copied().filter(|_| version >= 2))
+        .chain(CODE_BINDING_TABLES.iter().copied().filter(|_| version >= 3));
     for table in tables {
         let n: i64 = conn
             .query_row(
@@ -622,6 +684,7 @@ pub struct StoreCheck {
     pub schema_version: u32,
     pub records: u64,
     pub relations: u64,
+    pub code_bindings: u64,
 }
 
 /// Structural verification of an already-open knowledge database, used by
@@ -653,7 +716,7 @@ pub fn verify_store(
             repo.name
         ));
     }
-    if version != 1 && version != KNOWLEDGE_SCHEMA_VERSION {
+    if !matches!(version, 1..=KNOWLEDGE_SCHEMA_VERSION) {
         return Err(format!(
             "corrupt knowledge store for '{}': unexpected schema version {version}",
             repo.name
@@ -669,12 +732,18 @@ pub fn verify_store(
     let relations: i64 = conn
         .query_row("SELECT count(*) FROM relations", [], |row| row.get(0))
         .map_err(|e| format!("corrupt knowledge store: cannot count relations: {e}"))?;
+    let code_bindings = if version >= 3 {
+        crate::knowledge_binding::verify_store_rows(conn, repo, croot)?
+    } else {
+        0
+    };
     Ok(StoreCheck {
         schema_version: version,
         records: u64::try_from(records)
             .map_err(|_| "corrupt knowledge store: negative record count".to_string())?,
         relations: u64::try_from(relations)
             .map_err(|_| "corrupt knowledge store: negative relation count".to_string())?,
+        code_bindings,
     })
 }
 
@@ -718,7 +787,7 @@ pub fn read_generation(conn: &Connection) -> Result<u64, String> {
         .map_err(|_| "corrupt knowledge store: generation unreadable".to_string())
 }
 
-fn bump_generation(tx: &Transaction) -> Result<u64, String> {
+pub(crate) fn bump_generation(tx: &Transaction) -> Result<u64, String> {
     let current = read_generation(tx)?;
     let next = current
         .checked_add(1)
@@ -736,7 +805,7 @@ fn bump_generation(tx: &Transaction) -> Result<u64, String> {
 /// mutation with nothing committed. This covers the check instant only;
 /// races between this scan and SQLite's own access are not claimed away
 /// (TOCTOU), only narrowed to that window on top of SQLite's locking.
-fn revalidate_open_paths(conn: &Connection) -> Result<(), String> {
+pub(crate) fn revalidate_open_paths(conn: &Connection) -> Result<(), String> {
     if let Some(path) = conn.path() {
         let db = Path::new(path);
         reject_link(db)?;
@@ -2556,6 +2625,7 @@ pub struct ExportDocument {
     pub text: String,
     pub records: usize,
     pub relations: usize,
+    pub code_bindings: usize,
     pub generation: u64,
 }
 
@@ -2565,8 +2635,10 @@ pub struct ImportReport {
     pub records_inserted: usize,
     pub revisions_appended: usize,
     pub relations_inserted: usize,
+    pub code_bindings_inserted: usize,
     pub records_unchanged: usize,
     pub relations_unchanged: usize,
+    pub code_bindings_unchanged: usize,
     pub generation: u64,
 }
 
@@ -2675,8 +2747,10 @@ struct PortProse {
 /// only hand it back to [`import_payload`].
 #[derive(Debug, PartialEq)]
 pub struct ImportPayload {
+    repo_name: String,
     records: Vec<PortRecord>,
     relations: Vec<PortRelation>,
+    code_bindings: Vec<crate::knowledge_binding::PortCodeBinding>,
     needs_lifecycle: bool,
 }
 
@@ -2806,11 +2880,18 @@ fn relation_json_line(rel: &PortRelation) -> String {
     )
 }
 
-fn meta_json_line(repo: &str, records: usize, relations: usize) -> String {
-    format!(
-        "{{\"type\":\"meta\",\"format\":\"riltra-knowledge\",\"version\":1,\"repo\":\"{}\",\"records\":{records},\"relations\":{relations}}}",
-        crate::json::escape(repo)
-    )
+fn meta_json_line(repo: &str, records: usize, relations: usize, code_bindings: usize) -> String {
+    if code_bindings == 0 {
+        format!(
+            "{{\"type\":\"meta\",\"format\":\"riltra-knowledge\",\"version\":1,\"repo\":\"{}\",\"records\":{records},\"relations\":{relations}}}",
+            crate::json::escape(repo)
+        )
+    } else {
+        format!(
+            "{{\"type\":\"meta\",\"format\":\"riltra-knowledge\",\"version\":2,\"repo\":\"{}\",\"records\":{records},\"relations\":{relations},\"code_bindings\":{code_bindings}}}",
+            crate::json::escape(repo)
+        )
+    }
 }
 
 fn flush_record(
@@ -3207,13 +3288,19 @@ pub fn export_document(
 
     let records = record_lines.len();
     let relations = relation_lines.len();
-    let mut payload = meta_json_line(&repo, records, relations);
+    let code_binding_lines = crate::knowledge_binding::export_lines(&tx)?;
+    let code_bindings = code_binding_lines.len();
+    let mut payload = meta_json_line(&repo, records, relations, code_bindings);
     payload.push('\n');
     for line in &record_lines {
         payload.push_str(line);
         payload.push('\n');
     }
     for line in &relation_lines {
+        payload.push_str(line);
+        payload.push('\n');
+    }
+    for line in &code_binding_lines {
         payload.push_str(line);
         payload.push('\n');
     }
@@ -3228,6 +3315,7 @@ pub fn export_document(
         text,
         records,
         relations,
+        code_bindings,
         generation,
     })
 }
@@ -3235,7 +3323,7 @@ pub fn export_document(
 /// The export of a repository whose store does not exist yet: a metadata-only
 /// payload with zero counts. Reads answer empty and create nothing.
 pub fn empty_export(repo: &str, format: ExportFormat) -> ExportDocument {
-    let payload = format!("{}\n", meta_json_line(repo, 0, 0));
+    let payload = format!("{}\n", meta_json_line(repo, 0, 0, 0));
     let text = match format {
         ExportFormat::Jsonl => payload,
         ExportFormat::Markdown => markdown_wrapper(repo, &payload, &[]),
@@ -3244,6 +3332,7 @@ pub fn empty_export(repo: &str, format: ExportFormat) -> ExportDocument {
         text,
         records: 0,
         relations: 0,
+        code_bindings: 0,
         generation: 0,
     }
 }
@@ -4034,11 +4123,13 @@ fn parse_port_relation(obj: &[(String, JVal)], line_no: usize) -> Result<PortRel
 /// (duplicates, ordering, counts, prefix consistency, event order) are
 /// `corrupt import file` (CLI exit 3).
 pub fn parse_import_payload(text: &str) -> Result<ImportPayload, String> {
-    let mut meta: Option<(String, usize, usize)> = None;
+    let mut meta: Option<(String, usize, usize, u64, Option<usize>)> = None;
     let mut records: Vec<PortRecord> = Vec::new();
     let mut relations: Vec<PortRelation> = Vec::new();
+    let mut code_bindings: Vec<crate::knowledge_binding::PortCodeBinding> = Vec::new();
     let mut prev_id: Option<String> = None;
     let mut prev_rel_key: Option<(String, u64, String, u64, String, String)> = None;
+    let mut prev_binding_key = None;
     let mut seen_relation_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut seen_relation = false;
     let mut content_index = 0usize;
@@ -4079,7 +4170,15 @@ pub fn parse_import_payload(text: &str) -> Result<ImportPayload, String> {
                 }
                 crate::knowledge::check_known(
                     obj,
-                    &["type", "format", "version", "repo", "records", "relations"],
+                    &[
+                        "type",
+                        "format",
+                        "version",
+                        "repo",
+                        "records",
+                        "relations",
+                        "code_bindings",
+                    ],
                     &format!("line {line_no}"),
                 )
                 .map_err(invalid_msg)?;
@@ -4094,11 +4193,33 @@ pub fn parse_import_payload(text: &str) -> Result<ImportPayload, String> {
                     req_val(obj, "version", &format!("line {line_no}"))?,
                     &format!("line {line_no}.version"),
                 )?;
-                if version != 1 {
+                if !matches!(version, 1 | 2) {
                     return Err(invalid_msg(format!(
                         "line {line_no}: unsupported format version {version}"
                     )));
                 }
+                let declared_code_bindings =
+                    match (version, crate::knowledge::find(obj, "code_bindings")) {
+                        (1, None) => None,
+                        (1, Some(_)) => {
+                            return Err(invalid_msg(format!(
+                                "line {line_no}: format version 1 cannot carry code_bindings"
+                            )));
+                        }
+                        (2, Some(value)) => {
+                            let count = port_uint(value, &format!("line {line_no}.code_bindings"))?;
+                            Some(
+                                usize::try_from(count)
+                                    .map_err(|_| invalid_msg("code binding count out of range"))?,
+                            )
+                        }
+                        (2, None) => {
+                            return Err(invalid_msg(format!(
+                                "line {line_no}: format version 2 requires `code_bindings`"
+                            )));
+                        }
+                        _ => unreachable!(),
+                    };
                 let repo = crate::knowledge::req_str(obj, "repo", &format!("line {line_no}"))
                     .map_err(invalid_msg)?;
                 if repo.is_empty() {
@@ -4118,7 +4239,13 @@ pub fn parse_import_payload(text: &str) -> Result<ImportPayload, String> {
                     .map_err(|_| invalid_msg("record count out of range"))?;
                 let declared_relations = usize::try_from(declared_relations)
                     .map_err(|_| invalid_msg("relation count out of range"))?;
-                meta = Some((repo, declared_records, declared_relations));
+                meta = Some((
+                    repo,
+                    declared_records,
+                    declared_relations,
+                    version,
+                    declared_code_bindings,
+                ));
             }
             "record" => {
                 if meta.is_none() {
@@ -4126,7 +4253,7 @@ pub fn parse_import_payload(text: &str) -> Result<ImportPayload, String> {
                         "line {line_no}: record line before the meta line"
                     )));
                 }
-                if seen_relation {
+                if seen_relation || !code_bindings.is_empty() {
                     return Err(corrupt_msg(format!(
                         "line {line_no}: record line after relation lines"
                     )));
@@ -4157,6 +4284,11 @@ pub fn parse_import_payload(text: &str) -> Result<ImportPayload, String> {
                 if meta.is_none() {
                     return Err(corrupt_msg(format!(
                         "line {line_no}: relation line before the meta line"
+                    )));
+                }
+                if !code_bindings.is_empty() {
+                    return Err(corrupt_msg(format!(
+                        "line {line_no}: relation line after code binding lines"
                     )));
                 }
                 seen_relation = true;
@@ -4190,6 +4322,34 @@ pub fn parse_import_payload(text: &str) -> Result<ImportPayload, String> {
                 prev_rel_key = Some(key);
                 relations.push(rel);
             }
+            "code_binding" => {
+                let Some((_, _, _, version, _)) = &meta else {
+                    return Err(corrupt_msg(format!(
+                        "line {line_no}: code binding line before the meta line"
+                    )));
+                };
+                if *version != 2 {
+                    return Err(invalid_msg(format!(
+                        "line {line_no}: code binding lines require format version 2"
+                    )));
+                }
+                if code_bindings.len() >= MAX_IMPORT_RELATION_LINES {
+                    return Err(invalid_msg(format!(
+                        "more than {} code binding lines",
+                        MAX_IMPORT_RELATION_LINES
+                    )));
+                }
+                let binding = crate::knowledge_binding::parse_export_line(line)
+                    .map_err(|e| invalid_msg(format!("line {line_no}: {e}")))?;
+                let key = crate::knowledge_binding::binding_sort_key(&binding);
+                if prev_binding_key.as_ref().is_some_and(|prev| prev >= &key) {
+                    return Err(corrupt_msg(format!(
+                        "line {line_no}: code binding lines are duplicated or not in canonical order"
+                    )));
+                }
+                prev_binding_key = Some(key);
+                code_bindings.push(binding);
+            }
             other => {
                 return Err(invalid_msg(format!(
                     "line {line_no}: unknown line type '{other}'"
@@ -4198,7 +4358,9 @@ pub fn parse_import_payload(text: &str) -> Result<ImportPayload, String> {
         }
         content_index += 1;
     }
-    let Some((_repo, declared_records, declared_relations)) = meta else {
+    let Some((repo_name, declared_records, declared_relations, _version, declared_code_bindings)) =
+        meta
+    else {
         return Err(invalid_msg("missing meta line"));
     };
     if records.len() != declared_records {
@@ -4213,14 +4375,24 @@ pub fn parse_import_payload(text: &str) -> Result<ImportPayload, String> {
             relations.len()
         )));
     }
+    if let Some(declared) = declared_code_bindings {
+        if code_bindings.len() != declared {
+            return Err(corrupt_msg(format!(
+                "declared code binding count {declared} does not match {} code binding lines",
+                code_bindings.len()
+            )));
+        }
+    }
     check_semantic_coherence(&records, &relations)?;
     let needs_lifecycle = records
         .iter()
         .any(|r| r.revisions.iter().any(|v| !v.events.is_empty()))
         || relations.iter().any(|r| !r.events.is_empty());
     Ok(ImportPayload {
+        repo_name,
         records,
         relations,
+        code_bindings,
         needs_lifecycle,
     })
 }
@@ -4273,6 +4445,15 @@ pub fn import_payload(
     if payload.needs_lifecycle {
         ensure_lifecycle_schema(&tx)?;
     }
+    if !payload.code_bindings.is_empty() {
+        crate::knowledge_binding::validate_import_bindings(
+            &payload.code_bindings,
+            &payload.repo_name,
+            &meta_value(&tx, "repo_name")?,
+            &crate::store::content_digest(meta_value(&tx, "canonical_root")?.as_bytes()),
+        )?;
+        ensure_code_binding_schema(&tx)?;
+    }
     let has_lifecycle = lifecycle_present(&tx)?;
 
     // Phase A: referential integrity across the file and the store.
@@ -4322,6 +4503,14 @@ pub fn import_payload(
                     }
                 }
             }
+        }
+    }
+    for binding in &payload.code_bindings {
+        if !endpoint(&binding.record_id, binding.record_revision)? {
+            return Err(invalid_msg(format!(
+                "code binding references unknown revision {}:{}",
+                binding.record_id, binding.record_revision
+            )));
         }
     }
 
@@ -4454,6 +4643,8 @@ pub fn import_payload(
     let mut records_inserted = 0usize;
     let mut revisions_appended = 0usize;
     let mut relations_inserted = 0usize;
+    let mut code_bindings_inserted = 0usize;
+    let mut code_bindings_unchanged = 0usize;
     let mut changed = false;
     for (rec, first_new) in record_writes {
         if first_new == 0 {
@@ -4596,6 +4787,14 @@ pub fn import_payload(
         relations_inserted += 1;
         changed = true;
     }
+    for binding in &payload.code_bindings {
+        if crate::knowledge_binding::import_binding(&tx, binding)? {
+            code_bindings_inserted += 1;
+            changed = true;
+        } else {
+            code_bindings_unchanged += 1;
+        }
+    }
 
     let generation = if changed {
         bump_generation(&tx)?
@@ -4608,8 +4807,10 @@ pub fn import_payload(
         records_inserted,
         revisions_appended,
         relations_inserted,
+        code_bindings_inserted,
         records_unchanged,
         relations_unchanged,
+        code_bindings_unchanged,
         generation,
     })
 }
@@ -4862,6 +5063,35 @@ mod tests {
             .unwrap();
         assert_eq!(marker, "2");
         conn.close().unwrap();
+    }
+
+    #[test]
+    fn knowledge_schema_v3_migration_from_v1_preserves_existing_records() {
+        let (home, repo) = setup("migrate-v3-v1");
+        let mut conn = open_knowledge_at(&home, &repo, true).unwrap();
+        create_record(&mut conn, &new_record("d1", "preserve through v3")).unwrap();
+        let version: u32 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 1);
+        let before_generation = read_generation(&conn).unwrap();
+        let before_record = show_record(&conn, "d1", Some(1)).unwrap();
+
+        // A pre-v2 store can hold ordinary revisions without lifecycle tables.
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        ensure_code_binding_schema(&tx).unwrap();
+        tx.commit().unwrap();
+
+        let check = verify_store(&conn, &repo, Path::new(&repo.root)).unwrap();
+        assert_eq!(check.schema_version, 3);
+        assert_eq!(check.code_bindings, 0);
+        assert_eq!(read_generation(&conn).unwrap(), before_generation);
+        let after_record = show_record(&conn, "d1", Some(1)).unwrap();
+        assert_eq!(after_record.title, before_record.title);
+        assert_eq!(after_record.body, before_record.body);
+        assert_eq!(after_record.revision, before_record.revision);
     }
 
     #[test]

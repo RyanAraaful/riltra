@@ -155,6 +155,29 @@ pub enum KnowledgeOp {
         relation: String,
         input: String,
     },
+    Bind {
+        repo: String,
+        path: String,
+        line: String,
+        col: String,
+        symbol: Option<String>,
+        input: String,
+    },
+    Unbind {
+        repo: String,
+        binding: String,
+        input: String,
+    },
+    At {
+        repo: String,
+        path: String,
+        line: String,
+        col: String,
+        symbol: Option<String>,
+        limit: Option<String>,
+        offset: Option<String>,
+        generation: Option<String>,
+    },
     Related {
         repo: String,
         id: String,
@@ -659,6 +682,57 @@ fn parse_knowledge_op(sub: &str, args: &[String]) -> Result<KnowledgeOp, String>
                 input: knowledge_value(&v, "--input")?,
             })
         }
+        "bind" => {
+            let (v, _) = knowledge_flags(
+                args,
+                2,
+                &["--repo", "--path", "--line", "--col", "--symbol", "--input"],
+                &[],
+            )?;
+            Ok(KnowledgeOp::Bind {
+                repo: knowledge_value(&v, "--repo")?,
+                path: knowledge_value(&v, "--path")?,
+                line: knowledge_value(&v, "--line")?,
+                col: knowledge_value(&v, "--col")?,
+                symbol: v.get("--symbol").cloned(),
+                input: knowledge_value(&v, "--input")?,
+            })
+        }
+        "unbind" => {
+            let (v, _) = knowledge_flags(args, 2, &["--repo", "--binding", "--input"], &[])?;
+            Ok(KnowledgeOp::Unbind {
+                repo: knowledge_value(&v, "--repo")?,
+                binding: knowledge_value(&v, "--binding")?,
+                input: knowledge_value(&v, "--input")?,
+            })
+        }
+        "at" => {
+            let (v, _) = knowledge_flags(
+                args,
+                2,
+                &[
+                    "--repo",
+                    "--path",
+                    "--line",
+                    "--col",
+                    "--symbol",
+                    "--limit",
+                    "--offset",
+                    "--generation",
+                ],
+                &[],
+            )?;
+            Ok(KnowledgeOp::At {
+                repo: knowledge_value(&v, "--repo")?,
+                path: knowledge_value(&v, "--path")?,
+                line: knowledge_value(&v, "--line")?,
+                col: knowledge_value(&v, "--col")?,
+                symbol: v.get("--symbol").cloned(),
+                limit: v.get("--limit").cloned(),
+                offset: v.get("--offset").cloned(),
+                generation: v.get("--generation").cloned(),
+            })
+        }
         "related" => {
             let (v, flags) = knowledge_flags(
                 args,
@@ -749,7 +823,7 @@ fn take_value(args: &[String], i: &mut usize, flag: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse, Command, SemanticOp};
+    use super::{parse, Command, KnowledgeOp, SemanticOp};
 
     fn p(args: &[&str]) -> Result<Command, String> {
         parse(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>())
@@ -1038,5 +1112,81 @@ mod tests {
         ));
         assert!(p(&["knowledge", "frobnicate", "--repo", "r"]).is_err());
         assert!(p(&["knowledge"]).is_err());
+    }
+
+    #[test]
+    fn parses_knowledge_anchor_pagination_flags() {
+        assert!(matches!(
+            p(&[
+                "knowledge",
+                "at",
+                "--repo",
+                "r",
+                "--path",
+                "src/lib.rs",
+                "--line",
+                "1",
+                "--col",
+                "1",
+                "--limit",
+                "1",
+                "--offset",
+                "1",
+                "--generation",
+                "2"
+            ]),
+            Ok(Command::Knowledge { .. })
+        ));
+    }
+
+    #[test]
+    fn parses_bind_symbol_as_value() {
+        for symbol in ["--symbol", "--symbol=scip-sym"] {
+            let mut args = vec![
+                "knowledge",
+                "bind",
+                "--repo",
+                "r",
+                "--path",
+                "a.rs",
+                "--line",
+                "1",
+                "--col",
+                "1",
+                symbol,
+            ];
+            if symbol == "--symbol" {
+                args.push("scip-sym");
+            }
+            args.extend(["--input", "-"]);
+            assert!(
+                matches!(p(&args), Ok(Command::Knowledge { op: KnowledgeOp::Bind { symbol: Some(s), .. } }) if s == "scip-sym")
+            );
+        }
+    }
+
+    #[test]
+    fn parses_at_symbol_as_value() {
+        for symbol in ["--symbol", "--symbol=scip-sym"] {
+            let mut args = vec![
+                "knowledge",
+                "at",
+                "--repo",
+                "r",
+                "--path",
+                "a.rs",
+                "--line",
+                "1",
+                "--col",
+                "1",
+                symbol,
+            ];
+            if symbol == "--symbol" {
+                args.push("scip-sym");
+            }
+            assert!(
+                matches!(p(&args), Ok(Command::Knowledge { op: KnowledgeOp::At { symbol: Some(s), .. } }) if s == "scip-sym")
+            );
+        }
     }
 }

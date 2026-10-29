@@ -95,7 +95,7 @@ jsonrpc="$(grep -c '^{"jsonrpc":"2.0"' "$work/mcp.out" || true)"
 [ "$lines" -gt 0 ] && [ "$lines" = "$jsonrpc" ] && pass "stdout carries only JSON-RPC ($lines lines)" \
   || fail "stdout carries only JSON-RPC (lines=$lines jsonrpc=$jsonrpc)"
 tools="$(grep -o '"name":"riltra_[a-z_]*"' "$work/mcp.out" | sort -u | wc -l | tr -d ' ')"
-[ "$tools" = "12" ] && pass "twelve tools advertised" || fail "twelve tools advertised (got $tools)"
+[ "$tools" = "13" ] && pass "thirteen tools advertised" || fail "thirteen tools advertised (got $tools)"
 expect "a source-grounded call" 'alpha' "$out"
 expect "a classified error" 'not_registered' "$out"
 [ ! -s "$work/mcp.err" ] && pass "stderr is empty" || { cat "$work/mcp.err" >&2; fail "stderr is empty"; }

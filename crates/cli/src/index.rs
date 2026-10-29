@@ -1338,11 +1338,29 @@ pub fn resolve_edge_anchor(
     col0: u32,
     symbol: Option<&str>,
 ) -> Result<EdgeAnchor, String> {
+    resolve_edge_anchor_with_source(tx, snapshot_id, canon, validated, line0, col0, symbol, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn resolve_edge_anchor_with_source(
+    tx: &rusqlite::Connection,
+    snapshot_id: i64,
+    canon: &Path,
+    validated: &str,
+    line0: u32,
+    col0: u32,
+    symbol: Option<&str>,
+    cached_source: Option<&[u8]>,
+) -> Result<EdgeAnchor, String> {
     let facts = store::semantic_facts_at(tx, snapshot_id, validated)?;
-    let source = crate::semantic::confined_read(canon, validated, crate::scan::MAX_FILE_BYTES).ok();
+    let source = cached_source.map(std::borrow::Cow::Borrowed).or_else(|| {
+        crate::semantic::confined_read(canon, validated, crate::scan::MAX_FILE_BYTES)
+            .ok()
+            .map(std::borrow::Cow::Owned)
+    });
     let current_digest = source.as_ref().map(|s| store::content_digest(s));
-    let files = store::file_id_map(tx, snapshot_id)?;
-    let indexed = files.get(validated);
+    let indexed_file = store::file_identity(tx, snapshot_id, validated)?;
+    let indexed = indexed_file.as_ref();
     let snapshot_offset = if let Some((id, _)) = indexed {
         snapshot_byte_offset(tx, snapshot_id, *id, line0, col0)?
     } else {
@@ -1476,10 +1494,7 @@ pub fn resolve_edge_anchor(
             scan::unsupported_reason(&kind)
         ));
     }
-    if !files
-        .get(validated)
-        .is_some_and(|(_, digest)| *digest == store::content_digest(&source))
-    {
+    if !indexed.is_some_and(|(_, digest)| *digest == store::content_digest(&source)) {
         return Err(
             "anchor unresolved: source-changed; reindex before syntax fallback".to_string(),
         );
@@ -1704,6 +1719,16 @@ fn caller_candidate_paths(
         .map(|(p, (id, _))| (*id, p.as_str()))
         .collect();
     let mut linked = BTreeSet::from([anchor.path.clone()]);
+    if let Some(src_root) = rust_crate_src_root(&anchor.path) {
+        // Fully qualified crate:: calls need no `use` row to connect their file.
+        // shortcut: one src root can contain separate targets; upgrade when Cargo target metadata is available.
+        linked.extend(
+            id_map
+                .keys()
+                .filter(|path| path.ends_with(".rs") && rust_crate_src_root(path) == Some(src_root))
+                .cloned(),
+        );
+    }
     // Local SCIP identities never gain cross-document name candidates.
     if anchor.doc.is_none() {
         let imports = store::imports_for(tx, snapshot_id)?;
@@ -4163,6 +4188,56 @@ mod tests {
     }
 
     #[test]
+    fn edge_anchor_does_not_materialize_all_snapshot_files() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let (conn, snap, dir) = anchor_harness();
+        conn.execute(
+            "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<20000)
+             INSERT INTO files(snapshot_id,path,language,bytes,digest,errors)
+             SELECT ?1,printf('other-%08d.py',x),'python',1,'digest',0 FROM n",
+            [snap],
+        )
+        .unwrap();
+        let steps = AtomicUsize::new(0);
+        unsafe extern "C" fn limit(ctx: *mut std::ffi::c_void) -> std::ffi::c_int {
+            let steps = unsafe { &*(ctx as *const AtomicUsize) };
+            i32::from(steps.fetch_add(1, Ordering::Relaxed) >= 1500)
+        }
+        unsafe {
+            rusqlite::ffi::sqlite3_progress_handler(
+                conn.handle(),
+                100,
+                Some(limit),
+                &steps as *const AtomicUsize as *mut std::ffi::c_void,
+            );
+        }
+        let result = super::resolve_edge_anchor(&conn, snap, &dir, "a.py", 0, 5, None);
+        unsafe {
+            rusqlite::ffi::sqlite3_progress_handler(conn.handle(), 0, None, std::ptr::null_mut())
+        };
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[test]
+    fn edge_anchor_reuses_supplied_source_bytes() {
+        let (conn, snap, dir) = anchor_harness();
+        let source = std::fs::read(dir.join("a.py")).unwrap();
+        std::fs::remove_file(dir.join("a.py")).unwrap();
+        let anchor = super::resolve_edge_anchor_with_source(
+            &conn,
+            snap,
+            &dir,
+            "a.py",
+            0,
+            5,
+            None,
+            Some(&source),
+        )
+        .unwrap();
+        assert_eq!(anchor.display.as_deref(), Some("foo"));
+    }
+
+    #[test]
     fn rust_crate_src_root_is_the_last_src_component() {
         assert_eq!(
             rust_crate_src_root("crates/cli/src/knowledge_store.rs"),
@@ -4233,6 +4308,67 @@ mod tests {
             "use a::helper;",
             "crates/a/src/helper.rs"
         ));
+    }
+
+    #[test]
+    fn rust_callers_include_same_crate_calls_but_keep_same_name_as_candidates() {
+        let home = tmpdir("rust-callers-home");
+        let repo = tmpdir("rust-callers-repo");
+        let cli_src = repo.join("crates/cli/src");
+        let other_src = repo.join("crates/other/src");
+        std::fs::create_dir_all(&cli_src).unwrap();
+        std::fs::create_dir_all(&other_src).unwrap();
+        std::fs::write(cli_src.join("semantic.rs"), b"pub fn confined_read() {}\n").unwrap();
+        std::fs::write(
+            cli_src.join("index.rs"),
+            b"fn caller() { crate::semantic::confined_read(); }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            cli_src.join("sibling.rs"),
+            b"fn confined_read() {}\nfn same_name_caller() { confined_read(); }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            other_src.join("other.rs"),
+            b"fn caller() { confined_read(); }\n",
+        )
+        .unwrap();
+        build_full(&home, "r", &repo).unwrap();
+
+        let result = super::edge_query(
+            &home,
+            "r",
+            &repo,
+            &super::EdgeRequest {
+                anchor: super::SpanQuery {
+                    rel: "crates/cli/src/semantic.rs",
+                    line1: 1,
+                    col1: 12,
+                    refs: false,
+                },
+                symbol: None,
+                direction: super::EdgeDir::Callers,
+                limit: 20,
+                offset: 0,
+            },
+        )
+        .unwrap();
+
+        let paths: Vec<_> = result
+            .edges
+            .iter()
+            .map(|hit| hit.edge.caller_path.as_str())
+            .collect();
+        assert_eq!(
+            paths,
+            ["crates/cli/src/index.rs", "crates/cli/src/sibling.rs"]
+        );
+        assert!(result.edges.iter().all(|hit| {
+            hit.edge.edge_kind == "POTENTIAL_CALL"
+                && hit.edge.precision == "Heuristic"
+                && hit.edge.callee.is_none()
+        }));
     }
 
     #[test]

@@ -764,7 +764,8 @@ pub fn semantic_owner_uris(
     path: &str,
     digest: &str,
 ) -> Result<Vec<String>, String> {
-    let mut stmt=conn.prepare("SELECT DISTINCT symbol_uri FROM semantic_facts WHERE snapshot_id=?1 AND import_id=?2 AND rel_path=?3 AND display_name=?4 AND (roles & 1)!=0 AND symbol_uri IS NOT NULL AND file_digest=?5 AND (file_id IS NULL OR file_id=?6) AND byte_start>=?7 AND byte_end<=?8 ORDER BY symbol_uri LIMIT 2").map_err(|e|e.to_string())?;
+    // Restrict owner lookup to this file instead of scanning the snapshot.
+    let mut stmt=conn.prepare("SELECT DISTINCT symbol_uri FROM semantic_facts INDEXED BY idx_semfacts_span WHERE snapshot_id=?1 AND import_id=?2 AND rel_path=?3 AND display_name=?4 AND (roles & 1)!=0 AND symbol_uri IS NOT NULL AND file_digest=?5 AND (file_id IS NULL OR file_id=?6) AND byte_start>=?7 AND byte_end<=?8 ORDER BY symbol_uri LIMIT 2").map_err(|e|e.to_string())?;
     let rows = stmt
         .query_map(
             params![
@@ -2325,6 +2326,49 @@ mod tests {
             status_at_write: "fresh".to_string(),
             nonce: "test-nonce-1".to_string(),
         }
+    }
+
+    #[test]
+    fn semantic_owner_lookup_avoids_scanning_other_files() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let conn = open_memory().unwrap();
+        conn.execute_batch(
+            "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<20000)
+             INSERT INTO semantic_facts
+               (snapshot_id, import_id, file_id, rel_path, file_digest, symbol_uri,
+                display_name, roles, start_line, start_col, end_line, end_col,
+                byte_start, byte_end, precision)
+             SELECT 1, 1, 2, 'other.rs', 'digest', printf('symbol-%08d', x),
+                    'other', 1, 1, 1, 1, 2, 0, 1, 'Heuristic' FROM n;",
+        )
+        .unwrap();
+        let steps = AtomicUsize::new(0);
+        unsafe extern "C" fn limit_steps(ctx: *mut std::ffi::c_void) -> std::ffi::c_int {
+            // The handler is removed before its borrowed counter is dropped.
+            let steps = unsafe { &*(ctx as *const AtomicUsize) };
+            i32::from(steps.fetch_add(1, Ordering::Relaxed) >= 200)
+        }
+        unsafe {
+            rusqlite::ffi::sqlite3_progress_handler(
+                conn.handle(),
+                100,
+                Some(limit_steps),
+                &steps as *const AtomicUsize as *mut std::ffi::c_void,
+            );
+        }
+        let result = super::semantic_owner_uris(
+            &conn,
+            1,
+            1,
+            &sample_symbol(1, "owner"),
+            "target.rs",
+            "digest",
+        );
+        unsafe {
+            rusqlite::ffi::sqlite3_progress_handler(conn.handle(), 0, None, std::ptr::null_mut())
+        };
+        assert_eq!(result.unwrap(), Vec::<String>::new());
     }
 
     #[test]

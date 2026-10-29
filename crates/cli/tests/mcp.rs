@@ -181,7 +181,7 @@ fn mcp_initialize_handshake_reports_identity() {
 }
 
 #[test]
-fn mcp_tools_list_advertises_the_twelve_tools() {
+fn mcp_tools_list_advertises_the_thirteen_tools() {
     let h = home("tools");
     let mut s = ready(&h);
     s.send(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#);
@@ -203,13 +203,14 @@ fn mcp_tools_list_advertises_the_twelve_tools() {
             "riltra_code_semantic",
             "riltra_code_trace",
             "riltra_health",
+            "riltra_knowledge_at_anchor",
             "riltra_knowledge_related",
             "riltra_knowledge_search",
             "riltra_knowledge_show",
             "riltra_repo_list",
             "riltra_repo_status"
         ],
-        "the server advertises exactly the twelve tools"
+        "the server advertises exactly the thirteen tools"
     );
     assert!(
         !names.iter().any(|n| n.contains("write")),
@@ -288,6 +289,7 @@ fn mcp_tools_list_advertises_the_twelve_tools() {
         "riltra_code_search",
         "riltra_code_semantic",
         "riltra_code_trace",
+        "riltra_knowledge_at_anchor",
         "riltra_knowledge_related",
         "riltra_knowledge_search",
         "riltra_knowledge_show",
@@ -477,9 +479,181 @@ fn mcp_tools_list_advertises_the_twelve_tools() {
         related_schema["additionalProperties"], false,
         "{related_schema}"
     );
+    let at_schema = &find("riltra_knowledge_at_anchor")["inputSchema"];
+    let mut at_required: Vec<&str> = at_schema["required"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap())
+        .collect();
+    at_required.sort_unstable();
+    assert_eq!(at_required, ["col", "line", "path", "repo"], "{at_schema}");
+    assert_eq!(at_schema["additionalProperties"], false, "{at_schema}");
     let (code, _) = s.finish();
     assert_eq!(code, 0, "clean disconnect must exit 0");
     assert_home_untouched(&h);
+}
+
+#[test]
+fn knowledge_at_anchor_mcp_matches_cli_and_keeps_legacy_store_read_only() {
+    let h = home("knowledge-at-anchor");
+    let dir = home("knowledge-at-anchor-repo");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/lib.rs"), b"pub fn confined_read() {}\n").unwrap();
+    indexed_repo(&h, &dir, "r");
+    let record = br#"{"id":"d1","kind":"decision","title":"Read rule","body":"keep reads bounded","status":"active","author":"owner","evidence":[]}"#;
+    let (code, _, err) = run_cli_stdin(
+        &h,
+        &["knowledge", "create", "--repo", "r", "--input", "-"],
+        record,
+    );
+    assert_eq!(code, 0, "create: {err}");
+    let binding = br#"{"record_id":"d1","record_revision":1,"relation":"constrains","author":"owner","rationale":"This decision sets the read boundary.","provenance":"architecture review"}"#;
+    let (code, _, err) = run_cli_stdin(
+        &h,
+        &[
+            "knowledge",
+            "bind",
+            "--repo",
+            "r",
+            "--path",
+            "src/lib.rs",
+            "--line",
+            "1",
+            "--col",
+            "12",
+            "--input",
+            "-",
+        ],
+        binding,
+    );
+    assert_eq!(code, 0, "bind: {err}");
+    let cli = cli_json(
+        &h,
+        &[
+            "knowledge",
+            "at",
+            "--repo",
+            "r",
+            "--path",
+            "src/lib.rs",
+            "--line",
+            "1",
+            "--col",
+            "12",
+        ],
+    );
+    let before = listing(&h);
+    let mut s = ready(&h);
+    let result = call_tool(
+        &mut s,
+        2,
+        "riltra_knowledge_at_anchor",
+        &json!({"repo":"r","path":"src/lib.rs","line":1,"col":12}),
+    );
+    assert!(!is_error(&result), "{result}");
+    assert_eq!(doc(&result), cli, "MCP and CLI documents must match");
+    let cli_symbol = cli_json(
+        &h,
+        &[
+            "knowledge",
+            "at",
+            "--repo",
+            "r",
+            "--path",
+            "src/lib.rs",
+            "--line",
+            "1",
+            "--col",
+            "12",
+            "--symbol",
+            "scip-sym",
+        ],
+    );
+    let selected = call_tool(
+        &mut s,
+        3,
+        "riltra_knowledge_at_anchor",
+        &json!({"repo":"r","path":"src/lib.rs","line":1,"col":12,"symbol":"scip-sym"}),
+    );
+    assert_eq!(
+        doc(&selected),
+        cli_symbol,
+        "MCP and CLI symbol selection must match"
+    );
+    assert_eq!(cli_symbol["result"]["status"], "unresolved");
+    assert!(cli_symbol["result"]["unresolved_reason"].as_str().is_some());
+    assert_eq!(listing(&h), before, "MCP read created or modified storage");
+    let (code, err) = s.finish();
+    assert_eq!(code, 0, "MCP disconnect: {err}");
+
+    std::fs::write(
+        dir.join("src/lib.rs"),
+        b"pub fn confined_read() { let _changed = true; }\n",
+    )
+    .unwrap();
+    let cli_stale = cli_json(
+        &h,
+        &[
+            "knowledge",
+            "at",
+            "--repo",
+            "r",
+            "--path",
+            "src/lib.rs",
+            "--line",
+            "1",
+            "--col",
+            "12",
+        ],
+    );
+    assert!(
+        cli_stale["result"]["unresolved_reason"].as_str().is_some(),
+        "{cli_stale}"
+    );
+    let mut s = ready(&h);
+    let stale = call_tool(
+        &mut s,
+        2,
+        "riltra_knowledge_at_anchor",
+        &json!({"repo":"r","path":"src/lib.rs","line":1,"col":12}),
+    );
+    assert_eq!(
+        doc(&stale),
+        cli_stale,
+        "MCP and CLI unresolved reasons must match"
+    );
+    assert_eq!(s.finish().0, 0);
+
+    let legacy = home("knowledge-at-anchor-v1");
+    let legacy_repo = home("knowledge-at-anchor-v1-repo");
+    std::fs::create_dir_all(legacy_repo.join("src")).unwrap();
+    std::fs::write(legacy_repo.join("src/lib.rs"), b"pub fn plain() {}\n").unwrap();
+    init_repo(&legacy, &legacy_repo, "legacy");
+    let (code, _, err) = run_cli_stdin(
+        &legacy,
+        &["knowledge", "create", "--repo", "legacy", "--input", "-"],
+        br#"{"id":"d1","kind":"decision","title":"Old","body":"still readable","status":"active","author":"owner","evidence":[]}"#,
+    );
+    assert_eq!(code, 0, "legacy create: {err}");
+    let db = legacy.join("knowledge/legacy.db");
+    assert_eq!(user_version(&db), 1);
+    let before = listing(&legacy);
+    let mut s = ready(&legacy);
+    let result = call_tool(
+        &mut s,
+        2,
+        "riltra_knowledge_at_anchor",
+        &json!({"repo":"legacy","path":"src/lib.rs","line":1,"col":8}),
+    );
+    assert!(!is_error(&result), "{result}");
+    assert_eq!(doc(&result)["result"]["status"], json!("unavailable"));
+    assert_eq!(doc(&result)["result"]["schema_version"], json!(1));
+    let (code, err) = s.finish();
+    assert_eq!(code, 0, "legacy MCP disconnect: {err}");
+    assert_eq!(user_version(&db), 1, "MCP read migrated legacy storage");
+    assert!(!schema_dump(&db).contains("code_bindings"));
+    assert_eq!(listing(&legacy), before, "MCP read modified legacy storage");
 }
 
 // --- CP6: health composition -------------------------------------------------
@@ -505,7 +679,7 @@ fn t1_health_composition_matches_cli_and_creates_nothing() {
     assert_eq!(d["doctor"]["pass"], json!(true));
     assert_eq!(d["versions"]["riltra"], json!(env!("CARGO_PKG_VERSION")));
     assert_eq!(d["versions"]["code_index_schema"], json!(CODE_INDEX_SCHEMA));
-    assert_eq!(d["versions"]["knowledge_schema"], json!(2));
+    assert_eq!(d["versions"]["knowledge_schema"], json!(3));
     assert_eq!(d["limits"]["code_search"]["default_limit"], json!(50));
     assert_eq!(d["limits"]["code_search"]["max_limit"], json!(1000));
     assert_eq!(d["limits"]["knowledge_search"]["default_limit"], json!(50));
@@ -540,13 +714,14 @@ fn t1_health_composition_matches_cli_and_creates_nothing() {
             "riltra_code_semantic",
             "riltra_code_trace",
             "riltra_health",
+            "riltra_knowledge_at_anchor",
             "riltra_knowledge_related",
             "riltra_knowledge_search",
             "riltra_knowledge_show",
             "riltra_repo_list",
             "riltra_repo_status"
         ],
-        "the health document must list the twelve tools"
+        "the health document must list the thirteen tools"
     );
     assert_eq!(d["repo_count"], json!(2));
     let (code, _) = s.finish();
@@ -675,6 +850,11 @@ fn g4_unknown_input_fields_are_rejected_not_ignored() {
             12,
             "riltra_code_semantic",
             json!({"repo": "r", "path": "main.rs", "line": 1, "col": 1, "operation": "definition", "bogus": 1}),
+        ),
+        (
+            13,
+            "riltra_knowledge_at_anchor",
+            json!({"repo": "r", "path": "main.rs", "line": 1, "col": 1, "bogus": 1}),
         ),
     ] {
         s.send(

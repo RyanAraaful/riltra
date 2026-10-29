@@ -2,7 +2,7 @@
 //! M8 CP1/CP3/CP4/CP5/CP6: MCP stdio server. CP1 serves initialize; CP3
 //! registers the first read-only tools; CP4 adds the graph tools (callers,
 //! callees, trace, impact); CP5 adds the knowledge tools (search, show,
-//! related); CP6 adds the composed `riltra_health` tool — twelve tools total
+//! related); CP6 adds the composed `riltra_health` tool — thirteen tools total
 //! (design gate §3) through the rmcp tool macros. Tool calls
 //! reuse the CLI's response formatters byte-for-byte, and the index read path
 //! (`store::open_read`) and the knowledge read path
@@ -22,7 +22,8 @@ use serde::Deserialize;
 
 use crate::knowledge_store_absent;
 use crate::{
-    doctor, git, ignore, index, knowledge, knowledge_store, paths, registry, response, store,
+    doctor, git, ignore, index, knowledge, knowledge_binding, knowledge_store, paths, registry,
+    response, store,
 };
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -181,6 +182,27 @@ struct KnowledgeRelatedInput {
     offset: Option<usize>,
     /// Expected store generation; a stale value conflicts instead of serving
     /// a shifted page.
+    generation: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(crate = "rmcp::schemars")]
+struct KnowledgeAtInput {
+    /// Registered repository name.
+    repo: String,
+    /// Repository-relative path containing the anchor.
+    path: String,
+    /// 1-based line and column of the source anchor.
+    line: u32,
+    col: u32,
+    /// Optional exact SCIP symbol identity.
+    symbol: Option<String>,
+    /// Maximum bindings to return (default 50, maximum 1000).
+    limit: Option<usize>,
+    /// Bindings to skip before returning results (default 0).
+    offset: Option<usize>,
+    /// Expected store generation; a stale value conflicts instead of serving a shifted page.
     generation: Option<u64>,
 }
 
@@ -387,6 +409,23 @@ impl RiltraMcp {
         Parameters(input): Parameters<KnowledgeRelatedInput>,
     ) -> CallToolResult {
         blocking(move || knowledge_related_doc(&input)).await
+    }
+
+    #[tool(
+        name = "riltra_knowledge_at_anchor",
+        description = "Read explicit code-anchor bindings to exact knowledge revisions (same document as CLI `knowledge at`). This operation is read-only and never creates or migrates a store; unlinked anchors remain unlinked.",
+        annotations(
+            title = "Read knowledge at a code anchor",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn riltra_knowledge_at_anchor(
+        &self,
+        Parameters(input): Parameters<KnowledgeAtInput>,
+    ) -> CallToolResult {
+        blocking(move || knowledge_at_doc(&input)).await
     }
 
     #[tool(
@@ -1365,6 +1404,72 @@ fn knowledge_related_doc(input: &KnowledgeRelatedInput) -> CallToolResult {
     ))
 }
 
+fn knowledge_at_doc(input: &KnowledgeAtInput) -> CallToolResult {
+    if input.line == 0 || input.col == 0 {
+        return tool_error("invalid_input", "anchor line and column must be at least 1");
+    }
+    let (limit, offset) = match knowledge_page(input.limit, input.offset) {
+        Ok(page) => page,
+        Err(error) => return error,
+    };
+    let (home, canon) = match repo_root(&input.repo) {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    let entry = knowledge_entry(&input.repo, &canon.to_string_lossy());
+    let path = match crate::semantic::validate_doc_path(&canon, &input.path) {
+        Ok(path) => path,
+        Err(error) => return tool_error("invalid_input", &error),
+    };
+    let db = knowledge_store::knowledge_db_path(&home, &input.repo);
+    let page = match knowledge_store_absent(&db) {
+        Ok(true) => {
+            if let Err(error) = knowledge_store::check_missing_store_generation(input.generation) {
+                return knowledge_query_error(error);
+            }
+            let mut page = knowledge_binding::empty_at(&path, input.line, input.col, 0, 0);
+            page.limit = limit;
+            page.offset = offset;
+            page
+        }
+        Ok(false) => {
+            let conn = match knowledge_store::open_knowledge(&entry, false) {
+                Ok(conn) => conn,
+                Err(error) => return knowledge_query_error(error),
+            };
+            match knowledge_binding::at(
+                &conn,
+                &home,
+                &entry,
+                &path,
+                input.line,
+                input.col,
+                input.symbol.as_deref(),
+                limit,
+                offset,
+                input.generation,
+            ) {
+                Ok(page) => page,
+                Err(error) => return knowledge_query_error(error),
+            }
+        }
+        Err(error) => return knowledge_query_error(error),
+    };
+    doc(&response::knowledge_envelope(
+        &input.repo,
+        page.generation,
+        "at",
+        &knowledge_binding::page_json(&page).to_string(),
+        Some(response::pagination_json(
+            page.limit,
+            page.offset,
+            page.total,
+            page.truncated,
+            page.next_offset,
+        )),
+    ))
+}
+
 // --- CP6: health -----------------------------------------------------------
 
 /// The health document: composed from the CLI's own status and environment
@@ -1422,6 +1527,7 @@ fn health_doc() -> CallToolResult {
                 "riltra_code_semantic",
                 "riltra_code_trace",
                 "riltra_health",
+                "riltra_knowledge_at_anchor",
                 "riltra_knowledge_related",
                 "riltra_knowledge_search",
                 "riltra_knowledge_show",
