@@ -163,6 +163,104 @@ fn evidence_json(path: &str, span_bs: usize, span_be: usize, extra: &str) -> Str
     format!("{{\"path\":\"{path}\",\"span\":[{span_bs},{span_be}]{extra}}}")
 }
 
+struct RustAliasProof<'a> {
+    target: &'a store::SemanticFact,
+    target_uri: &'a str,
+    binding: (usize, usize),
+    local_use: (usize, usize),
+}
+
+fn rust_alias_target<'a>(
+    call: &store::CallRow,
+    local_use: &'a store::SemanticFact,
+    path: &str,
+    facts: &'a [store::SemanticFact],
+    proofs: &BTreeMap<i64, crate::syntax::RelationshipProof>,
+    fid_of: &BTreeMap<&str, i64>,
+) -> Option<RustAliasProof<'a>> {
+    let local_uri = local_use.symbol_uri.as_deref()?;
+    if !crate::scip::is_local_symbol(local_uri)
+        || local_use.external
+        || local_use.rel_path != path
+        || call.tcallee.as_ref().is_none_or(|terminal| {
+            (terminal.byte_start, terminal.byte_end) != (local_use.byte_start, local_use.byte_end)
+        })
+    {
+        return None;
+    }
+    let proof = proofs.get(&call.file_id)?;
+    let block = proof
+        .call_blocks
+        .get(&(call.byte_start, call.byte_end))?
+        .as_ref()?;
+    let aliases: Vec<_> = proof
+        .local_function_aliases
+        .iter()
+        .filter(|alias| {
+            alias.block == *block
+                && alias.binding.1 < call.byte_start
+                && facts
+                    .iter()
+                    .filter(|fact| {
+                        fact.rel_path == path
+                            && fact.roles & 1 != 0
+                            && (fact.byte_start, fact.byte_end) == alias.binding
+                            && fact.symbol_uri.as_deref() == Some(local_uri)
+                            && !fact.external
+                    })
+                    .count()
+                    == 1
+        })
+        .collect();
+    if aliases.len() != 1 {
+        return None;
+    }
+    let alias = aliases[0];
+    let targets: Vec<_> = facts
+        .iter()
+        .filter(|fact| {
+            fact.rel_path == path
+                && fact.roles & 1 == 0
+                && (fact.byte_start, fact.byte_end) == alias.target
+                && fact.symbol_uri.is_some()
+                && !fact.external
+        })
+        .collect();
+    if targets.len() != 1 {
+        return None;
+    }
+    let target = targets[0];
+    let target_uri = target.symbol_uri.as_deref()?;
+    let target_definitions: Vec<_> = facts
+        .iter()
+        .filter(|fact| {
+            fact.symbol_uri.as_deref() == Some(target_uri)
+                && fact.roles & 1 != 0
+                && !fact.external
+                && (!crate::scip::is_local_symbol(target_uri) || fact.rel_path == target.rel_path)
+        })
+        .filter(|fact| {
+            fid_of
+                .get(fact.rel_path.as_str())
+                .and_then(|fid| proofs.get(fid))
+                .is_some_and(|source| {
+                    source
+                        .declarations
+                        .contains(&(fact.byte_start, fact.byte_end))
+                })
+        })
+        .collect();
+    if target_definitions.len() != 1 {
+        return None;
+    }
+    Some(RustAliasProof {
+        target,
+        target_uri,
+        binding: alias.binding,
+        local_use: (local_use.byte_start, local_use.byte_end),
+    })
+}
+
 /// Factory templates whose first template argument is the object they build.
 // shortcut: matched by the called name, not by a semantic proof that the
 // callee is `std::make_unique` or `std::make_shared`. Upgrade when a semantic
@@ -396,8 +494,10 @@ pub fn derive_syntax_edges(
 /// non-call reference occurrence. Stored import rows are SCIP-provenance by
 /// construction; the ephemeral `lsp-subprocess` provider (location-only, no
 /// stored identity) yields zero edges — no SCIP identity is ever fabricated
-/// for it. Syntax-only `POTENTIAL_CALL` rows this import resolves are
-/// replaced, never duplicated.
+/// for it. Rust local-function aliases derive a call only from matching local
+/// binding/use identities, a direct initializer reference, and a source-backed
+/// target definition; SCIP does not provide that call edge. Syntax-only
+/// potentials this import resolves are replaced, never duplicated.
 pub fn upsert_semantic_edges(
     conn: &rusqlite::Connection,
     snapshot_id: i64,
@@ -584,6 +684,58 @@ pub fn upsert_semantic_edges(
                         })
                     })
             });
+            if let (Some(o), Some(alias)) = (
+                owner,
+                rust_alias_target(call, fact, path, &facts, &proofs, &fid_of),
+            ) {
+                let callee = EdgeEndpoint::Scip {
+                    import_id,
+                    symbol_uri: alias.target_uri.to_string(),
+                    doc: crate::scip::is_local_symbol(alias.target_uri)
+                        .then(|| alias.target.rel_path.clone()),
+                };
+                let file_digest = digest_of.get(&o.file_id).copied().unwrap_or("");
+                let caller = owner_scip(conn, snapshot_id, import_id, o, path, file_digest)
+                    .unwrap_or(EdgeEndpoint::SyntaxDef {
+                        path: path.to_string(),
+                        byte_start: o.byte_start,
+                        byte_end: o.byte_end,
+                    });
+                let ref_start = alias.target.byte_start;
+                let ref_end = alias.target.byte_end;
+                out.push(EdgeRow {
+                    snapshot_id,
+                    file_id: call.file_id,
+                    caller: Some(caller),
+                    caller_path: path.to_string(),
+                    caller_span_bytes: (call.byte_start, call.byte_end),
+                    callee: Some(callee),
+                    callee_name: alias
+                        .target
+                        .display_name
+                        .clone()
+                        .unwrap_or_else(|| terminal_text(call).to_string()),
+                    edge_kind: EdgeKind::Calls.as_str().to_string(),
+                    precision: "Exact".to_string(),
+                    provider: "scip-import".to_string(),
+                    evidence: evidence_json(
+                        path,
+                        call.byte_start,
+                        call.byte_end,
+                        &format!(
+                            ",\"ref\":[{ref_start},{ref_end}],\"alias\":{{\"binding\":[{},{}],\"use\":[{},{}],\"initializer\":[{ref_start},{ref_end}]}}",
+                            alias.binding.0,
+                            alias.binding.1,
+                            alias.local_use.0,
+                            alias.local_use.1,
+                        ),
+                    ),
+                    unresolved: None,
+                });
+                stats.calls += 1;
+                resolved.insert(site);
+                continue;
+            }
             match (owner, def, external) {
                 (Some(o), Some(_), false) if callable_target => {
                     // Proven call: overlapping reference of the resolved
@@ -1856,8 +2008,14 @@ mod tests {
         })
     }
 
-    /// Ingest parsed Python facts exactly like `index::ingest_file`.
-    fn ingest_py(conn: &rusqlite::Connection, snap: i64, path: &str, src: &[u8]) -> i64 {
+    /// Ingest parsed source facts exactly like `index::ingest_file`.
+    fn ingest_source(
+        conn: &rusqlite::Connection,
+        snap: i64,
+        path: &str,
+        src: &[u8],
+        lang: crate::syntax::Language,
+    ) -> i64 {
         let root: String = conn
             .query_row("SELECT root FROM snapshots WHERE id=?1", [snap], |r| {
                 r.get(0)
@@ -1866,13 +2024,13 @@ mod tests {
         let source_path = std::path::Path::new(&root).join(path);
         std::fs::create_dir_all(source_path.parent().unwrap()).unwrap();
         std::fs::write(source_path, src).unwrap();
-        let facts = crate::syntax::parse_source(crate::syntax::Language::Python, src);
+        let facts = crate::syntax::parse_source(lang, src);
         let fid = store::insert_file(
             conn,
             snap,
             &store::FileRow {
                 path: path.to_string(),
-                language: "python".to_string(),
+                language: crate::syntax::language_name(lang).to_string(),
                 bytes: src.len() as u64,
                 digest: store::content_digest(src),
                 errors: facts.errors,
@@ -1894,8 +2052,8 @@ mod tests {
                     byte_start: d.byte_start,
                     byte_end: d.byte_end,
                     provider: "syntax".to_string(),
-                    grammar: "python:0.25.0".to_string(),
-                    language: "python".to_string(),
+                    grammar: crate::syntax::grammar_version(lang).to_string(),
+                    language: crate::syntax::language_name(lang).to_string(),
                 },
             )
             .unwrap();
@@ -1914,8 +2072,8 @@ mod tests {
                     byte_start: import.byte_start,
                     byte_end: import.byte_end,
                     provider: "syntax".to_string(),
-                    grammar: "python:0.25.0".to_string(),
-                    language: "python".to_string(),
+                    grammar: crate::syntax::grammar_version(lang).to_string(),
+                    language: crate::syntax::language_name(lang).to_string(),
                 },
             )
             .unwrap();
@@ -1937,13 +2095,119 @@ mod tests {
                     tcallee: span_cols(&call.tcallee),
                     unresolved: 1,
                     provider: "syntax".to_string(),
-                    grammar: "python:0.25.0".to_string(),
-                    language: "python".to_string(),
+                    grammar: crate::syntax::grammar_version(lang).to_string(),
+                    language: crate::syntax::language_name(lang).to_string(),
                 },
             )
             .unwrap();
         }
         fid
+    }
+
+    fn ingest_py(conn: &rusqlite::Connection, snap: i64, path: &str, src: &[u8]) -> i64 {
+        ingest_source(conn, snap, path, src, crate::syntax::Language::Python)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn source_fact(
+        snap: i64,
+        imp: i64,
+        path: &str,
+        src: &[u8],
+        uri: &str,
+        display: &str,
+        roles: u32,
+        bytes: (usize, usize),
+    ) -> store::SemanticFact {
+        let position = |offset: usize| {
+            let row = src[..offset].iter().filter(|b| **b == b'\n').count();
+            let line_start = src[..offset]
+                .iter()
+                .rposition(|b| *b == b'\n')
+                .map_or(0, |i| i + 1);
+            (row + 1, offset - line_start + 1)
+        };
+        let (start_line, start_col) = position(bytes.0);
+        let (end_line, end_col) = position(bytes.1);
+        mk_fact(
+            snap,
+            imp,
+            path,
+            &store::content_digest(src),
+            Some(uri),
+            display,
+            roles,
+            (
+                start_line as u32,
+                start_col as u32,
+                end_line as u32,
+                end_col as u32,
+            ),
+            bytes,
+            false,
+        )
+    }
+
+    fn wiy_alias_facts(
+        snap: i64,
+        imp: i64,
+        path: &str,
+        src: &[u8],
+        call_local_uri: &str,
+    ) -> Vec<store::SemanticFact> {
+        let a = "rust-analyzer cargo precision_fixture 0.1.0 a/target().";
+        let b = "rust-analyzer cargo precision_fixture 0.1.0 b/target().";
+        vec![
+            source_fact(snap, imp, path, src, a, "target", 1, (19, 25)),
+            source_fact(snap, imp, path, src, b, "target", 1, (63, 69)),
+            source_fact(
+                snap,
+                imp,
+                path,
+                src,
+                "rust-analyzer cargo precision_fixture 0.1.0 direct().",
+                "direct",
+                1,
+                (95, 101),
+            ),
+            source_fact(snap, imp, path, src, a, "target", 0, (116, 122)),
+            source_fact(
+                snap,
+                imp,
+                path,
+                src,
+                "rust-analyzer cargo precision_fixture 0.1.0 alias().",
+                "alias",
+                1,
+                (135, 140),
+            ),
+            source_fact(snap, imp, path, src, "local 0", "f", 1, (156, 157)),
+            source_fact(snap, imp, path, src, a, "target", 0, (163, 169)),
+            source_fact(snap, imp, path, src, call_local_uri, "f", 0, (171, 172)),
+            source_fact(
+                snap,
+                imp,
+                path,
+                src,
+                "rust-analyzer cargo precision_fixture 0.1.0 reference().",
+                "reference",
+                1,
+                (185, 194),
+            ),
+            source_fact(snap, imp, path, src, "local 1", "_f", 1, (203, 205)),
+            source_fact(snap, imp, path, src, a, "target", 0, (211, 217)),
+            source_fact(
+                snap,
+                imp,
+                path,
+                src,
+                "rust-analyzer cargo precision_fixture 0.1.0 other().",
+                "other",
+                1,
+                (229, 234),
+            ),
+            source_fact(snap, imp, path, src, b, "target", 0, (249, 255)),
+        ]
     }
 
     fn mk_import(conn: &rusqlite::Connection, snap: i64, provider: &str) -> i64 {
@@ -2277,6 +2541,174 @@ mod tests {
             )
             .unwrap();
         assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn rust_local_function_alias_resolves_to_its_scip_target() {
+        let conn = mem_db();
+        let snap = mk_snap(&conn);
+        let src = include_bytes!(
+            "../../../docs/pilots/wiy-caller-precision-2026-10-31/source/src/lib.rs"
+        );
+        let path = "src/lib.rs";
+        ingest_source(&conn, snap, path, src, crate::syntax::Language::Rust);
+        let imp = mk_import(&conn, snap, "scip-import");
+        store::insert_semantic_facts(&conn, &wiy_alias_facts(snap, imp, path, src, "local 0"))
+            .unwrap();
+
+        let stats = upsert_semantic_edges(&conn, snap, imp).unwrap();
+        assert_eq!((stats.calls, stats.references), (3, 2));
+
+        let edge_rows = |uri: &str| {
+            store::edges_inbound(
+                &conn,
+                snap,
+                &EdgeEndpoint::Scip {
+                    import_id: imp,
+                    symbol_uri: uri.to_string(),
+                    doc: None,
+                },
+                50,
+                0,
+            )
+            .unwrap()
+        };
+        let a = "rust-analyzer cargo precision_fixture 0.1.0 a/target().";
+        let b = "rust-analyzer cargo precision_fixture 0.1.0 b/target().";
+        let a_calls: Vec<_> = edge_rows(a)
+            .into_iter()
+            .filter(|e| e.edge_kind == "CALLS")
+            .collect();
+        assert_eq!(a_calls.len(), 2, "direct + alias callers of a::target");
+        assert!(a_calls.iter().any(|e| e.caller_span_bytes == (113, 124)));
+        let alias_edge = a_calls
+            .iter()
+            .find(|e| e.caller_span_bytes == (171, 174))
+            .expect("alias invocation is a CALLS edge");
+        assert_eq!(alias_edge.callee_name, "target");
+        assert!(alias_edge.evidence.contains("\"ref\":[163,169]"));
+        assert!(alias_edge.evidence.contains(
+            "\"alias\":{\"binding\":[156,157],\"use\":[171,172],\"initializer\":[163,169]}"
+        ));
+        assert_eq!(alias_edge.provider, "scip-import");
+
+        let b_calls: Vec<_> = edge_rows(b)
+            .into_iter()
+            .filter(|e| e.edge_kind == "CALLS")
+            .collect();
+        assert_eq!(b_calls.len(), 1, "b::target remains a separate identity");
+        assert_eq!(b_calls[0].caller_span_bytes, (246, 257));
+
+        let reference_only: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM code_edges WHERE snapshot_id = ?1 AND edge_kind = 'CALLS' AND caller_sbs = 211 AND caller_sbe = 217",
+                [snap],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(reference_only, 0, "reference-only never becomes CALLS");
+    }
+
+    #[test]
+    fn rust_alias_does_not_resolve_by_name_when_scip_local_identity_differs() {
+        let conn = mem_db();
+        let snap = mk_snap(&conn);
+        let src = include_bytes!(
+            "../../../docs/pilots/wiy-caller-precision-2026-10-31/source/src/lib.rs"
+        );
+        let path = "src/lib.rs";
+        ingest_source(&conn, snap, path, src, crate::syntax::Language::Rust);
+        let imp = mk_import(&conn, snap, "scip-import");
+        store::insert_semantic_facts(&conn, &wiy_alias_facts(snap, imp, path, src, "local 9"))
+            .unwrap();
+
+        let stats = upsert_semantic_edges(&conn, snap, imp).unwrap();
+        assert_eq!(
+            stats.calls, 2,
+            "direct calls remain; alias lacks local identity proof"
+        );
+        let alias_calls: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM code_edges WHERE snapshot_id = ?1 AND edge_kind = 'CALLS' AND caller_sbs = 171 AND caller_sbe = 174",
+                [snap],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(alias_calls, 0);
+        let unresolved_alias: (String, Option<String>) = conn
+            .query_row(
+                "SELECT edge_kind, unresolved FROM code_edges WHERE snapshot_id = ?1 AND caller_sbs = 171 AND caller_sbe = 174 AND edge_kind = 'POTENTIAL_CALL'",
+                [snap],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(unresolved_alias.0, "POTENTIAL_CALL");
+        assert_eq!(unresolved_alias.1.as_deref(), Some("unresolved"));
+    }
+
+    #[test]
+    fn rust_alias_syntax_proof_excludes_mutable_typed_destructured_and_cast_bindings() {
+        let src = b"fn caller() { let simple = a::target; simple(); let mut mutable = a::target; mutable(); let typed: fn() = a::target; typed(); let (tuple,) = (a::target,); tuple(); let cast = a::target as fn(); cast(); let _reference = a::target; }";
+        let proof = crate::syntax::relationship_proof(crate::syntax::Language::Rust, src);
+        let names: Vec<_> = proof
+            .local_function_aliases
+            .iter()
+            .map(|alias| std::str::from_utf8(&src[alias.binding.0..alias.binding.1]).unwrap())
+            .collect();
+        assert_eq!(names, ["simple", "_reference"]);
+    }
+
+    #[test]
+    fn rust_closure_call_keeps_owner_unproven() {
+        let conn = mem_db();
+        let snap = mk_snap(&conn);
+        let src = include_bytes!("../../../docs/pilots/riltra-rust-semantic-feasibility-2026-10-31/diagnosis/closure-fixture/src/lib.rs");
+        let path = "src/lib.rs";
+        ingest_source(&conn, snap, path, src, crate::syntax::Language::Rust);
+        let imp = mk_import(&conn, snap, "scip-import");
+        let callee = "rust-analyzer cargo mini 0.1.0 callee().";
+        store::insert_semantic_facts(
+            &conn,
+            &[
+                source_fact(snap, imp, path, src, callee, "callee", 1, (7, 13)),
+                source_fact(
+                    snap,
+                    imp,
+                    path,
+                    src,
+                    "rust-analyzer cargo mini 0.1.0 direct_caller().",
+                    "direct_caller",
+                    1,
+                    (61, 74),
+                ),
+                source_fact(snap, imp, path, src, callee, "callee", 0, (104, 110)),
+                source_fact(
+                    snap,
+                    imp,
+                    path,
+                    src,
+                    "rust-analyzer cargo mini 0.1.0 closure_caller().",
+                    "closure_caller",
+                    1,
+                    (124, 138),
+                ),
+                source_fact(snap, imp, path, src, callee, "callee", 0, (184, 190)),
+            ],
+        )
+        .unwrap();
+
+        let stats = upsert_semantic_edges(&conn, snap, imp).unwrap();
+        assert_eq!((stats.calls, stats.potential), (1, 1));
+        let closure: (String, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT edge_kind, unresolved, caller_uri FROM code_edges WHERE snapshot_id = ?1 AND caller_sbs = 184 AND caller_sbe = 193",
+                [snap],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(closure.0, "POTENTIAL_CALL");
+        assert_eq!(closure.1.as_deref(), Some("owner-unproven"));
+        assert_eq!(closure.2, None);
     }
 
     #[test]

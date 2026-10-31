@@ -256,6 +256,16 @@ fn c_name_node(node: tree_sitter::Node<'_>) -> Option<tree_sitter::Node<'_>> {
 pub struct RelationshipProof {
     pub declarations: Vec<(usize, usize)>,
     pub owners: std::collections::BTreeMap<(usize, usize), Option<(usize, usize)>>,
+    pub call_blocks: std::collections::BTreeMap<(usize, usize), Option<(usize, usize)>>,
+    pub local_function_aliases: Vec<LocalFunctionAlias>,
+}
+
+/// Syntax candidate only; graph derivation still has to match both SCIP
+/// identities and a source-backed callable definition.
+pub struct LocalFunctionAlias {
+    pub binding: (usize, usize),
+    pub target: (usize, usize),
+    pub block: (usize, usize),
 }
 
 pub fn relationship_proof(lang: Language, src: &[u8]) -> RelationshipProof {
@@ -295,6 +305,46 @@ pub fn relationship_proof(lang: Language, src: &[u8]) -> RelationshipProof {
         }
         None
     }
+    fn enclosing_block(node: tree_sitter::Node<'_>) -> Option<(usize, usize)> {
+        let mut parent = node.parent();
+        while let Some(p) = parent {
+            if p.kind() == "block" {
+                return Some((p.start_byte(), p.end_byte()));
+            }
+            parent = p.parent();
+        }
+        None
+    }
+    fn rust_alias(node: tree_sitter::Node<'_>) -> Option<LocalFunctionAlias> {
+        let block = node.parent().filter(|p| p.kind() == "block")?;
+        let pattern = node.child_by_field_name("pattern")?;
+        if pattern.kind() != "identifier"
+            || node.child_by_field_name("type").is_some()
+            || (0..node.named_child_count()).any(|i| {
+                node.named_child(i)
+                    .is_some_and(|child| child.kind() == "mutable_specifier")
+            })
+        {
+            return None;
+        }
+        let value = node.child_by_field_name("value")?;
+        let target = match value.kind() {
+            "identifier" => value,
+            "scoped_identifier"
+                if value
+                    .child_by_field_name("path")
+                    .is_some_and(|path| path.kind() == "identifier") =>
+            {
+                value.child_by_field_name("name")?
+            }
+            _ => return None,
+        };
+        Some(LocalFunctionAlias {
+            binding: (pattern.start_byte(), pattern.end_byte()),
+            target: (target.start_byte(), target.end_byte()),
+            block: (block.start_byte(), block.end_byte()),
+        })
+    }
     let mut proof = RelationshipProof::default();
     let mut parser = tree_sitter::Parser::new();
     if parser.set_language(&ts_language(lang)).is_err() {
@@ -317,6 +367,14 @@ pub fn relationship_proof(lang: Language, src: &[u8]) -> RelationshipProof {
             proof
                 .owners
                 .insert((node.start_byte(), node.end_byte()), enclosing_owner(node));
+            proof
+                .call_blocks
+                .insert((node.start_byte(), node.end_byte()), enclosing_block(node));
+        }
+        if lang == Language::Rust && node.kind() == "let_declaration" {
+            if let Some(alias) = rust_alias(node) {
+                proof.local_function_aliases.push(alias);
+            }
         }
         // A C++ direct-initialization call has no `call_expression` node, so
         // its owner is recorded against the same range the call fact uses.
