@@ -1,0 +1,27 @@
+{
+  "file": "src/lib.rs",
+  "files": ["src/lib.rs", "src/covered.rs", "src/unprovided.rs"],
+  "symbols": [
+    {
+      "id": "target",
+      "name": "target",
+      "uri": "scip-test test corpus 1.0.0 src/lib.rs/target()."
+    },
+    {
+      "id": "covered",
+      "name": "covered",
+      "uri": "scip-test test corpus 1.0.0 src/covered.rs/covered()."
+    }
+  ],
+  "occurrences": [
+    {"id": "target", "file": "src/lib.rs", "definition": true, "line": 1, "col": 3, "end": 9, "text": "target"},
+    {"id": "covered", "file": "src/covered.rs", "definition": true, "line": 1, "col": 3, "end": 10, "text": "covered"},
+    {"id": "target", "file": "src/covered.rs", "definition": false, "line": 1, "col": 15, "end": 21, "text": "target"}
+  ],
+  "expected": {
+    "verdict": "UNKNOWN",
+    "path": {"file": "src/covered.rs", "scope": "direct", "distance": 1},
+    "missing_provider_files": 1,
+    "unsupported_files": 0
+  }
+}

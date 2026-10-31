@@ -1,0 +1,25 @@
+{
+  "file": "src/lib.rs",
+  "symbols": [
+    {
+      "id": "target",
+      "name": "target",
+      "uri": "scip-test test corpus 1.0.0 src/lib.rs/target()."
+    }
+  ],
+  "occurrences": [
+    {
+      "id": "target",
+      "definition": true,
+      "line": 1,
+      "col": 3,
+      "end": 9,
+      "text": "target"
+    }
+  ],
+  "expected": {
+    "verdict": "UNKNOWN",
+    "missing_provider_files": 1,
+    "unsupported_files": 1
+  }
+}
