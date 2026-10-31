@@ -1,0 +1,23 @@
+{
+  "file": "impact_chain.rs",
+  "symbols": [
+    {"id": "t", "name": "target", "uri": "scip-test test corpus 1.0.0 impact_chain.rs/target()."},
+    {"id": "m", "name": "middle", "uri": "scip-test test corpus 1.0.0 impact_chain.rs/middle()."},
+    {"id": "c", "name": "caller", "uri": "scip-test test corpus 1.0.0 impact_chain.rs/caller()."}
+  ],
+  "occurrences": [
+    {"id": "t", "definition": true, "line": 1, "col": 3, "end": 9, "text": "target"},
+    {"id": "m", "definition": true, "line": 2, "col": 3, "end": 9, "text": "middle"},
+    {"id": "t", "definition": false, "line": 2, "col": 14, "end": 20, "text": "target"},
+    {"id": "c", "definition": true, "line": 3, "col": 3, "end": 9, "text": "caller"},
+    {"id": "m", "definition": false, "line": 3, "col": 14, "end": 20, "text": "middle"}
+  ],
+  "target": "t",
+  "expected": {
+    "verdict": "HIGH",
+    "paths": [
+      {"scope": "direct", "distance": 1},
+      {"scope": "transitive", "distance": 2}
+    ]
+  }
+}

@@ -279,6 +279,9 @@ fn corpus(lang: &str, case: &str) {
         }
         if cmd == "impact" {
             assert_eq!(v["verdict"], manifest["impact"], "{lang}/{case}: {v}");
+            if lang == "rs" && case == "dynamic_dispatch" {
+                assert!(v["paths"].as_array().unwrap().is_empty(), "{v}");
+            }
         }
         if cmd == "trace" && matches!(case, "recursion" | "cycle") {
             assert_eq!(v["cycle"], true);
@@ -357,6 +360,308 @@ language!(ts);
 language!(rs);
 language!(c);
 language!(cpp);
+
+#[test]
+fn rs_impact_scip_chain_depth_and_stale_match_source_oracle() {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/m6/rs/impact_chain");
+    let manifest: Value =
+        serde_json::from_str(&std::fs::read_to_string(fixture.with_extension("json")).unwrap())
+            .unwrap();
+    let file = manifest["file"].as_str().unwrap();
+    let source = std::fs::read_to_string(fixture.with_extension("rs")).unwrap();
+    let occurrences = manifest["occurrences"].as_array().unwrap();
+    for item in occurrences {
+        raw_span(&source, item);
+    }
+
+    let symbols = manifest["symbols"].as_array().unwrap();
+    let occ: Vec<_> = occurrences
+        .iter()
+        .map(|item| {
+            let symbol = symbols.iter().find(|s| s["id"] == item["id"]).unwrap();
+            occurrence(
+                symbol["uri"].as_str().unwrap(),
+                u64::from(item["definition"].as_bool().unwrap()),
+                number(item, "line") as i64,
+                number(item, "col") as i64,
+                number(item, "end") as i64,
+            )
+        })
+        .collect();
+    let info: Vec<_> = symbols
+        .iter()
+        .map(|s| (s["uri"].as_str().unwrap(), s["name"].as_str().unwrap()))
+        .collect();
+    let h = home("corpus-rs-impact-chain");
+    let dir = repo_with(&h, "sem", &[(file, source.as_str())]);
+    do_index(&h);
+    import_documents(&h, &dir, "corpus", &[test_document(file, &occ, &info)]);
+
+    let target = occurrences
+        .iter()
+        .find(|item| item["id"] == manifest["target"] && item["definition"] == true)
+        .unwrap();
+    let line = (number(target, "line") + 1).to_string();
+    let col = (number(target, "col") + 1).to_string();
+    let impact = |extra: &[&str]| {
+        let mut args = vec![
+            "impact", "--repo", "sem", "--path", file, "--line", &line, "--col", &col,
+        ];
+        args.extend_from_slice(extra);
+        let (code, out, err) = run(&h, &args);
+        assert_eq!(code, 0, "Rust impact oracle query: {err}");
+        serde_json::from_str::<Value>(&out).unwrap()
+    };
+    let full = impact(&[]);
+    assert_eq!(full["verdict"], manifest["expected"]["verdict"], "{full}");
+    assert_eq!(full["paths"].as_array().unwrap().len(), 2, "{full}");
+    for (path, expected) in full["paths"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .zip(manifest["expected"]["paths"].as_array().unwrap())
+    {
+        assert_eq!(path["scope"], expected["scope"]);
+        assert_eq!(path["distance"], expected["distance"]);
+        assert!(path["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|edge| edge["kind"] == "CALLS" && edge["precision"] == "Exact"));
+    }
+
+    let bounded = impact(&["--depth", "1"]);
+    assert_eq!(bounded["verdict"], "UNKNOWN", "{bounded}");
+    assert_eq!(bounded["truncated"], true, "{bounded}");
+
+    std::fs::write(dir.join(file), format!("{source}// edited\n")).unwrap();
+    let stale = impact(&[]);
+    assert_eq!(stale["verification"], "Stale", "{stale}");
+    assert_eq!(stale["verdict"], "UNKNOWN", "{stale}");
+}
+
+#[test]
+fn rs_impact_missing_provider_caller_and_unrelated_unsupported_file_are_unknown() {
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/m6/rs/impact_missing_caller");
+    let manifest: Value =
+        serde_json::from_str(&std::fs::read_to_string(fixture.with_extension("json")).unwrap())
+            .unwrap();
+    let file = manifest["file"].as_str().unwrap();
+    let source = std::fs::read_to_string(fixture.with_extension("rs")).unwrap();
+    let oracle_occurrence = &manifest["occurrences"][0];
+    raw_span(&source, oracle_occurrence);
+
+    let h = home("corpus-rs-impact-missing-caller");
+    let caller =
+        std::fs::read_to_string(fixture.with_file_name("impact_missing_caller_unprovided.rs"))
+            .unwrap();
+    let dir = repo_with(
+        &h,
+        "sem",
+        &[
+            (file, source.as_str()),
+            ("src/unprovided.rs", caller.as_str()),
+        ],
+    );
+    std::fs::write(dir.join("notes.xyz"), "unrelated unsupported input").unwrap();
+    do_index(&h);
+
+    let symbol = manifest["symbols"][0]["uri"].as_str().unwrap();
+    let name = manifest["symbols"][0]["name"].as_str().unwrap();
+    let occ = occurrence(
+        symbol,
+        1,
+        number(oracle_occurrence, "line") as i64,
+        number(oracle_occurrence, "col") as i64,
+        number(oracle_occurrence, "end") as i64,
+    );
+    import_documents(
+        &h,
+        &dir,
+        "corpus",
+        &[test_document(file, &[occ], &[(symbol, name)])],
+    );
+
+    let line = (number(oracle_occurrence, "line") + 1).to_string();
+    let col = (number(oracle_occurrence, "col") + 1).to_string();
+    let (code, out, err) = run(
+        &h,
+        &[
+            "impact", "--repo", "sem", "--path", file, "--line", &line, "--col", &col,
+        ],
+    );
+    assert_eq!(code, 0, "Rust impact with provider gap: {err}");
+    let impact: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(
+        impact["verdict"], manifest["expected"]["verdict"],
+        "{impact}"
+    );
+    assert_eq!(
+        impact["paths"],
+        serde_json::json!([]),
+        "missing caller is unknown, not safe: {impact}"
+    );
+    assert_eq!(
+        impact["completeness"]["denominator"]["missing_provider_files"],
+        manifest["expected"]["missing_provider_files"],
+        "{impact}"
+    );
+    assert_eq!(
+        impact["completeness"]["denominator"]["unsupported_files"],
+        manifest["expected"]["unsupported_files"],
+        "{impact}"
+    );
+}
+
+#[test]
+fn rs_impact_keeps_scip_path_when_another_caller_lacks_provider_coverage() {
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/m6/rs/impact_partial_provider");
+    let manifest: Value =
+        serde_json::from_str(&std::fs::read_to_string(fixture.join("case.json")).unwrap()).unwrap();
+    let file = manifest["file"].as_str().unwrap();
+    let covered_file = manifest["expected"]["path"]["file"].as_str().unwrap();
+    let unprovided_file = manifest["files"][2].as_str().unwrap();
+    let lib_source = std::fs::read_to_string(fixture.join(file)).unwrap();
+    let covered_source = std::fs::read_to_string(fixture.join(covered_file)).unwrap();
+    let unprovided_source = std::fs::read_to_string(fixture.join(unprovided_file)).unwrap();
+    let occurrences = manifest["occurrences"].as_array().unwrap();
+    for item in occurrences {
+        let source = match item["file"].as_str().unwrap() {
+            path if path == file => &lib_source,
+            path if path == covered_file => &covered_source,
+            path if path == unprovided_file => &unprovided_source,
+            path => panic!("unexpected fixture file: {path}"),
+        };
+        raw_span(source, item);
+    }
+
+    let symbols = manifest["symbols"].as_array().unwrap();
+    let target = &symbols[0];
+    let caller = &symbols[1];
+    let target_uri = target["uri"].as_str().unwrap();
+    let caller_uri = caller["uri"].as_str().unwrap();
+    let to_occurrence = |item: &Value| {
+        let symbol = symbols.iter().find(|s| s["id"] == item["id"]).unwrap();
+        occurrence(
+            symbol["uri"].as_str().unwrap(),
+            u64::from(item["definition"].as_bool().unwrap()),
+            number(item, "line") as i64,
+            number(item, "col") as i64,
+            number(item, "end") as i64,
+        )
+    };
+    let lib_occ = occurrences
+        .iter()
+        .filter(|item| item["file"] == file)
+        .map(to_occurrence)
+        .collect::<Vec<_>>();
+    let covered_occ = occurrences
+        .iter()
+        .filter(|item| item["file"] == covered_file)
+        .map(to_occurrence)
+        .collect::<Vec<_>>();
+    let h = home("corpus-rs-impact-partial-provider");
+    let dir = repo_with(
+        &h,
+        "sem",
+        &[
+            (file, &lib_source),
+            (covered_file, &covered_source),
+            (unprovided_file, &unprovided_source),
+        ],
+    );
+    do_index(&h);
+    import_documents(
+        &h,
+        &dir,
+        "corpus",
+        &[
+            test_document(file, &lib_occ, &[(target_uri, "target")]),
+            test_document(
+                covered_file,
+                &covered_occ,
+                &[(target_uri, "target"), (caller_uri, "covered")],
+            ),
+        ],
+    );
+
+    let anchor = occurrences
+        .iter()
+        .find(|item| item["file"] == file && item["id"] == target["id"])
+        .unwrap();
+    let line = (number(anchor, "line") + 1).to_string();
+    let col = (number(anchor, "col") + 1).to_string();
+    let (code, out, err) = run(
+        &h,
+        &[
+            "impact", "--repo", "sem", "--path", file, "--line", &line, "--col", &col,
+        ],
+    );
+    assert_eq!(code, 0, "Rust impact with partial provider coverage: {err}");
+    let impact: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(
+        impact["verdict"], manifest["expected"]["verdict"],
+        "{impact}"
+    );
+    assert_eq!(impact["completeness"]["status"], "partial", "{impact}");
+    assert_eq!(
+        impact["completeness"]["denominator"]["missing_provider_files"],
+        manifest["expected"]["missing_provider_files"],
+        "{impact}"
+    );
+    assert_eq!(
+        impact["completeness"]["denominator"]["unsupported_files"],
+        manifest["expected"]["unsupported_files"],
+        "{impact}"
+    );
+    assert_eq!(impact["paths"].as_array().unwrap().len(), 1, "{impact}");
+    let path = &impact["paths"][0];
+    assert_eq!(path["scope"], manifest["expected"]["path"]["scope"]);
+    assert_eq!(path["distance"], manifest["expected"]["path"]["distance"]);
+    assert_eq!(path["edges"].as_array().unwrap().len(), 1, "{path}");
+    let edge = &path["edges"][0];
+    let reference = occurrences
+        .iter()
+        .find(|item| {
+            item["file"] == covered_file
+                && item["id"] == target["id"]
+                && !item["definition"].as_bool().unwrap()
+        })
+        .unwrap();
+    let reference_span = raw_span(&covered_source, reference);
+    assert_eq!(edge["kind"], "CALLS", "{edge}");
+    assert_eq!(edge["precision"], "Exact", "{edge}");
+    assert_eq!(edge["verification"], "Unverified", "{edge}");
+    assert_eq!(edge["unresolved"], Value::Null, "{edge}");
+    assert_eq!(edge["provider"], "scip-import", "{edge}");
+    assert_eq!(edge["caller"]["symbol_uri"], caller_uri, "{edge}");
+    assert_eq!(edge["callee"]["symbol_uri"], target_uri, "{edge}");
+    assert_eq!(edge["caller"]["import_id"], edge["callee"]["import_id"]);
+    assert_eq!(edge["callee_name"], "target", "{edge}");
+    let evidence = &edge["evidence"];
+    let digest = covered_source
+        .bytes()
+        .fold(0xcbf29ce484222325_u64, |hash, b| {
+            (hash ^ b as u64).wrapping_mul(0x100000001b3)
+        });
+    assert_eq!(evidence["path"], covered_file, "{evidence}");
+    assert_eq!(evidence["digest"], format!("{digest:016x}"), "{evidence}");
+    assert_eq!(evidence["span"], edge["caller_span"]);
+    assert_eq!(evidence["callee_span"], serde_json::json!(reference_span));
+    assert_eq!(evidence["terminal_span"], serde_json::json!(reference_span));
+    assert_eq!(
+        evidence["reference_span"],
+        serde_json::json!(reference_span)
+    );
+    assert_eq!(
+        evidence["imports"].as_array().unwrap().len(),
+        1,
+        "{evidence}"
+    );
+    assert_eq!(evidence["imports"][0]["provider"], "corpus", "{evidence}");
+}
 
 #[test]
 fn py_nested_anonymous() {
