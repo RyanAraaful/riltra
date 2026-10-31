@@ -76,7 +76,7 @@ without touching your own registry.
 
 ## Using it from an MCP client such as OpenCode
 
-`riltra mcp` serves twelve tools over stdio (eleven read-only ones and the
+`riltra mcp` serves thirteen tools over stdio (twelve read-only ones and the
 provider-backed `riltra_code_semantic`, which stays off until an operator sets
 `RILTRA_LSP_SERVER` to a language server's absolute path). An OpenCode
 configuration entry looks like:
@@ -101,6 +101,8 @@ configuration entry looks like:
 A pre-release candidate for local, evidence-first code intelligence. Answers
 are source-grounded and labelled: syntax-only relations are
 `POTENTIAL_CALL` candidates, never proven calls, and an impact answer is
-`UNKNOWN` unless a semantic provider backs it. C++ semantic resolution and
-CUDA are not provided. The archive carries `NOTICE`, `LICENSE`,
+`UNKNOWN` unless a semantic provider backs it. C++ semantic queries require an
+operator-configured language server; results depend on its project index and
+compilation database, and references are not call edges. CUDA is not supported.
+The archive carries `NOTICE`, `LICENSE`,
 `THIRD_PARTY_LICENSES.txt` and `sbom.cdx.json` for the bundled dependencies.
