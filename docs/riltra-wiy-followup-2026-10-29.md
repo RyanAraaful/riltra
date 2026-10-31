@@ -28,3 +28,8 @@ The [manual review procedure](riltra-why-review-workflow.md) uses a separate rev
 - `cargo clippy --locked --all-targets -- -D warnings` and `cargo fmt --all -- --check` exited 0. Cargo reported Windows incremental-cache hard-link warnings and copied files instead; those warnings are retained.
 - This dirty follow-up patch has not yet been validated by cross-platform CI. The earlier successful CI run applies to parent `7238da8`, not this patch.
 - Review identity, structured review validation and an auditable first-class review state remain future work. Continue to display `UNKNOWN` and `Unverified` where their evidence thresholds are unmet.
+
+## Amendment 2026-10-31
+
+- **Superseded: "not yet validated by cross-platform CI" (Verification, second bullet).** The follow-up patch is now on master; its regression test is `receiver_references_do_not_duplicate_a_resolved_call` in `crates/cli/src/edges.rs`. CI run [40900940173](https://github.com/RyanAraaful/riltra/actions/runs/40900940173) on master `86d6e42` completed successfully: the check jobs on Windows, Ubuntu and macOS, the security job, and the three installer Phase A jobs.
+- **Figures in "The new producer stderr" paragraph** (171 enclosing-definition errors, 93 duplicate-symbol diagnostics) describe the earlier source revision. The 2026-10-31 producer run on `86d6e42` reports 177 and 93. See [`riltra-rust-semantic-feasibility-2026-10-31.md`](riltra-rust-semantic-feasibility-2026-10-31.md).
