@@ -16,6 +16,9 @@ use serde_json::{json, Value};
 
 const TIMEOUT: Duration = Duration::from_secs(15);
 
+#[path = "common/rust_alias.rs"]
+mod rust_alias;
+
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn home(tag: &str) -> PathBuf {
@@ -2429,6 +2432,117 @@ fn t2_callers_callees_match_cli_with_semantic_identity_and_paging() {
             .iter()
             .any(|r| r == "empty-result-not-coverage-proof"),
         "{d}"
+    );
+
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn t2_mcp_callers_resolves_rust_local_function_alias_and_matches_cli() {
+    let h = home("rust-alias");
+    let r = home("rust-alias-repo");
+    let dir = r.join("precision_fixture");
+    rust_alias::write_fixture(&dir);
+    init_repo(&h, &dir, "rust-alias");
+    let (code, _, err) = run_cli(&h, &["index", "--repo", "rust-alias"]);
+    assert_eq!(code, 0, "index failed: {err}");
+    let scip = h.join("rust-alias.scip");
+    std::fs::write(&scip, rust_alias::scip_payload(&dir)).unwrap();
+    let (code, _, err) = run_cli(
+        &h,
+        &[
+            "semantic",
+            "import",
+            "--repo",
+            "rust-alias",
+            "--scip",
+            &scip.to_string_lossy(),
+        ],
+    );
+    assert_eq!(code, 0, "semantic import failed: {err}");
+
+    let mut s = ready(&h);
+    let a = graph_doc(
+        &mut s,
+        2,
+        "riltra_code_callers",
+        &json!({"repo": "rust-alias", "path": "src/lib.rs", "line": 1, "col": 20}),
+    );
+    assert_graph_parity(
+        &h,
+        &a,
+        &[
+            "callers",
+            "--repo",
+            "rust-alias",
+            "--path",
+            "src/lib.rs",
+            "--line",
+            "1",
+            "--col",
+            "20",
+        ],
+    );
+    let a_calls: Vec<_> = a["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|edge| edge["kind"] == "CALLS")
+        .collect();
+    assert_eq!(a_calls.len(), 2, "direct + alias callers: {a}");
+    let alias = a_calls
+        .iter()
+        .find(|edge| edge["caller_span"] == json!([171, 174]))
+        .expect("alias caller");
+    assert_eq!(
+        alias["callee"]["symbol_uri"],
+        "rust-analyzer cargo precision_fixture 0.1.0 a/target()."
+    );
+    assert_eq!(alias["evidence"]["terminal_span"], json!([171, 172]));
+    assert_eq!(alias["evidence"]["reference_span"], json!([163, 169]));
+    assert_eq!(
+        &rust_alias::SOURCE[163..169],
+        b"target",
+        "SCIP target reference span is the initializer target"
+    );
+    assert!(a["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|edge| { edge["kind"] == "REFERENCES" && edge["caller_span"] == json!([211, 217]) }));
+
+    let b = graph_doc(
+        &mut s,
+        3,
+        "riltra_code_callers",
+        &json!({"repo": "rust-alias", "path": "src/lib.rs", "line": 2, "col": 20}),
+    );
+    assert_graph_parity(
+        &h,
+        &b,
+        &[
+            "callers",
+            "--repo",
+            "rust-alias",
+            "--path",
+            "src/lib.rs",
+            "--line",
+            "2",
+            "--col",
+            "20",
+        ],
+    );
+    let b_calls: Vec<_> = b["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|edge| edge["kind"] == "CALLS")
+        .collect();
+    assert_eq!(b_calls.len(), 1, "same-name b::target stays distinct: {b}");
+    assert_eq!(
+        b_calls[0]["callee"]["symbol_uri"],
+        "rust-analyzer cargo precision_fixture 0.1.0 b/target()."
     );
 
     let (code, _) = s.finish();

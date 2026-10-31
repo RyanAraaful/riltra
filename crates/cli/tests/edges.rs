@@ -8,6 +8,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[path = "common/rust_alias.rs"]
+mod rust_alias;
+
 static COUNTER: AtomicU64 = AtomicU64::new(20_000);
 
 #[path = "m6_corpus/mod.rs"]
@@ -289,6 +292,124 @@ fn cli_callers_finds_scip_callers_without_reindex() {
     );
     assert_eq!(code, 0, "{err}");
     assert_eq!(out, out2, "agreeing --symbol must not change the answer");
+}
+
+#[test]
+fn cli_callers_resolves_rust_local_function_alias() {
+    let h = home("rust-alias");
+    let dir = h.join("sem");
+    rust_alias::write_fixture(&dir);
+    let (code, _, err) = run(
+        &h,
+        &["init", "--repo", &dir.to_string_lossy(), "--name", "sem"],
+    );
+    assert_eq!(code, 0, "init failed: {err}");
+    do_index(&h);
+    let scip = h.join("rust-alias.scip");
+    std::fs::write(&scip, rust_alias::scip_payload(&dir)).unwrap();
+    let (code, _, err) = run(
+        &h,
+        &[
+            "semantic",
+            "import",
+            "--repo",
+            "sem",
+            "--scip",
+            &scip.to_string_lossy(),
+        ],
+    );
+    assert_eq!(code, 0, "semantic import failed: {err}");
+    let (code, _, err) = run(
+        &h,
+        &[
+            "semantic",
+            "import",
+            "--repo",
+            "sem",
+            "--scip",
+            &scip.to_string_lossy(),
+        ],
+    );
+    assert_eq!(code, 0, "identical re-import failed: {err}");
+
+    let callers = |line: &str| {
+        let (code, out, err) = run(
+            &h,
+            &[
+                "callers",
+                "--repo",
+                "sem",
+                "--path",
+                "src/lib.rs",
+                "--line",
+                line,
+                "--col",
+                "20",
+            ],
+        );
+        assert_eq!(code, 0, "callers failed: {err}");
+        serde_json::from_str::<serde_json::Value>(&out).unwrap()
+    };
+    let a = callers("1");
+    let a_calls: Vec<_> = a["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|edge| edge["kind"] == "CALLS")
+        .collect();
+    assert_eq!(a_calls.len(), 2, "direct + alias to a::target: {a}");
+    let alias = a_calls
+        .iter()
+        .find(|edge| edge["caller_span"] == serde_json::json!([171, 174]))
+        .expect("alias caller");
+    assert_eq!(
+        a_calls
+            .iter()
+            .filter(|edge| edge["caller_span"] == serde_json::json!([171, 174]))
+            .count(),
+        1,
+        "re-import must not duplicate the alias edge"
+    );
+    assert_eq!(
+        alias["callee"]["symbol_uri"],
+        "rust-analyzer cargo precision_fixture 0.1.0 a/target()."
+    );
+    assert_eq!(
+        alias["caller"]["symbol_uri"],
+        "rust-analyzer cargo precision_fixture 0.1.0 alias()."
+    );
+    assert_eq!(
+        alias["evidence"]["terminal_span"],
+        serde_json::json!([171, 172])
+    );
+    assert_eq!(
+        alias["evidence"]["reference_span"],
+        serde_json::json!([163, 169])
+    );
+    assert_eq!(alias["verification"], "Unverified");
+    assert!(a["edges"].as_array().unwrap().iter().any(|edge| {
+        edge["kind"] == "REFERENCES" && edge["caller_span"] == serde_json::json!([211, 217])
+    }));
+    assert!(!a["edges"].as_array().unwrap().iter().any(|edge| {
+        edge["kind"] == "POTENTIAL_CALL" && edge["caller_span"] == serde_json::json!([171, 174])
+    }));
+
+    let b = callers("2");
+    let b_calls: Vec<_> = b["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|edge| edge["kind"] == "CALLS")
+        .collect();
+    assert_eq!(b_calls.len(), 1, "b::target is a distinct identity: {b}");
+    assert_eq!(
+        b_calls[0]["callee"]["symbol_uri"],
+        "rust-analyzer cargo precision_fixture 0.1.0 b/target()."
+    );
+    assert_eq!(
+        b_calls[0]["caller"]["symbol_uri"],
+        "rust-analyzer cargo precision_fixture 0.1.0 other()."
+    );
 }
 
 #[test]
