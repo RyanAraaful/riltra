@@ -145,3 +145,10 @@ These primary sources describe mechanisms used by existing tools; they are desig
 - `crates/cli/tests/knowledge.rs`, `crates/cli/tests/mcp.rs`: persistence, migration, freshness, portability, isolation and parity regression coverage.
 
 No source change claims a complete Rust semantic call graph, a positive impact result for the frozen repository, or truth verification of the linked knowledge record.
+
+## Amendment 2026-10-31
+
+- **Superseded: "Cross-platform CI — NOT RUN" (acceptance table, last row).** CI on master `86d6e42`, which contains this change, completed successfully (run [40900940173](https://github.com/RyanAraaful/riltra/actions/runs/40900940173)): the check jobs on Windows, Ubuntu and macOS, the security job, and the three installer Phase A jobs.
+- **Superseded: "no `scip-rust`, `scip`, or `.scip` artifact" and "the Rust SCIP indexer … absent"** (decision 2 under Scope, and the provider-inventory row). rust-analyzer 1.99.1 includes the `scip` subcommand, so no separate indexer is required. The standalone `scip` CLI, used to inspect indexes, is still absent and was not needed.
+- **Remaining work item 2 (Rust SCIP producer):** stage 1 is recorded in [`riltra-rust-semantic-feasibility-2026-10-31.md`](riltra-rust-semantic-feasibility-2026-10-31.md). On `86d6e42`, the producer output is reproducible on one host, Riltra imports it as `Unverified`, and 16 of 16 frozen oracle call expressions return; eight of the nine production call sites are `CALLS`. The item stays open until the proof contract is decided and cross-platform evidence exists.
+- **Impact remains `UNKNOWN`** for the frozen repository on that pin. No positive affected set is claimed.

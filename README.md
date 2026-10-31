@@ -57,8 +57,12 @@ dependencies beyond itself:
   trusted.
 - **Knowledge store** - revisioned decision/constraint/benchmark records per
   repository with deterministic export, backup, verification and fail-closed
-  restore (`knowledge ...`).
-- **MCP server** - `riltra mcp` serves twelve tools over local stdio: eleven
+  restore (`knowledge ...`). A code-anchor binding (`knowledge bind`,
+  `unbind`, `at`) links one exact source anchor to one exact record revision
+  with a typed relation. Bindings are stored explicitly, never inferred from
+  names or paths; a changed source reports `stale` and is not rebound. A
+  binding records a relationship, not the truth of the record.
+- **MCP server** - `riltra mcp` serves thirteen tools over local stdio: twelve
   read-only ones and one provider-backed tool that starts the operator's
   language server. Reads never create or migrate a store: a missing
   index returns `no-index` without creating files, and an unsupported schema is
@@ -116,15 +120,17 @@ Notes:
   missing executable — nothing is silently faked.
 - Run `cargo run -q -p riltra -- --help` for the full command list.
 
-## MCP server (eleven read-only tools, one provider-backed tool)
+## MCP server (twelve read-only tools, one provider-backed tool)
 
 `riltra mcp` starts a local stdio MCP server for coding agents. It exposes
-twelve tools:
+thirteen tools:
 
 - `riltra_repo_list`, `riltra_repo_status`, `riltra_health`
 - `riltra_code_search`, `riltra_code_callers`, `riltra_code_callees`,
   `riltra_code_trace`, `riltra_code_impact`
 - `riltra_knowledge_search`, `riltra_knowledge_show`, `riltra_knowledge_related`
+- `riltra_knowledge_at_anchor` — read-only lookup of the bindings at a code
+  anchor (`knowledge at`); an unlinked anchor stays unlinked
 - `riltra_code_semantic` — definition or references at a position, answered by
   the language server the operator configured in `RILTRA_LSP_SERVER` (an
   absolute path). It is the one tool that starts a subprocess: the server may

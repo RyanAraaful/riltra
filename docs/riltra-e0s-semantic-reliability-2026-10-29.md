@@ -111,3 +111,15 @@ These runs were made to locate the miss. They are reported separately and do not
   - Scanner regression suite (`security/scan-tests.sh`): 32 passed, 0 failed.
 - The evidence and this document are added in one commit on this branch. No tracked source file was changed.
 - **Revision (2026-10-29).** A follow-up commit removes `raw/report-stderr.txt`, a 0-byte file left by a shell redirect during the run. It recorded no riltra output. Its line is removed from `MANIFEST.sha256`. `results/redaction-accounting.json` still lists the file with 0 replacements, because it records the redaction pass as it ran. The scan lines are rerun at 7ff92e1: the evidence folder is 348.48 KB, and the committed tree is 24.46 MB. The earlier figures, 350.42 KB and 24.10 MB, do not match the committed state. No other evidence file changed.
+
+## Amendment 2026-10-31: reliability baseline decision
+
+Recorded by the assistant on the owner's instruction in the 2026-10-31 working session. The evidence above is unchanged, and nothing here marks a gate PASS.
+
+- **Decision: 27 of 28 is the recorded baseline.** The fresh-home Rust definition result (Wilson 95% [0.82, 0.99]) is accepted as the baseline for the M9 reliability follow-up.
+- **No numeric target yet.** One miss in 28 does not support a target above the lower bound of 0.82. A one-sided 95% bound of at most 5% on the failure rate needs about 59 fresh-home definition queries in a row with no failure, since 0.95^59 ≈ 0.049. The 27 definitions after the miss are 32 short of that. The owner may set a target at any time.
+- **No code change.** The E0-S plan's rule still applies: no new providers, caches or retries on the strength of one timeout.
+- **Optional step 2 (host-state test): not run.** It needs the owner's go-ahead and is lower priority.
+- **Trigger for step 3 (readiness instrumentation):** a fresh-home Rust definition that again returns empty with `analysis wait timed out; answers may be empty`. That event triggers the step. It is not a commitment to run the step now.
+- **Status: OPEN, narrowed, unchanged.** The M9 open finding stays open because its cause is not established.
+- **Related:** the Rust semantic feasibility run on the 2026-10-31 pin is in [`riltra-rust-semantic-feasibility-2026-10-31.md`](riltra-rust-semantic-feasibility-2026-10-31.md).
