@@ -22,7 +22,7 @@ Apache-2.0.
 - SPDX header `SPDX-License-Identifier: Apache-2.0` on new source files.
 - `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, `cargo test`
   must pass before pushing.
-- No network access in core paths; planned provider integrations are explicit
+- No network access in core paths; provider integrations are explicit
   opt-in only.
 - New dependencies need a `docs/licensing.md` entry (package, version,
   license, origin) in the same PR.

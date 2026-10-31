@@ -172,7 +172,7 @@ benchmark report, raw evidence, and limitations.
 | TypeScript / TSX | `.ts` `.mts` `.cts` `.tsx` | same | no | SCIP import, verified on a fixture (scip-typescript) |
 | Rust | `.rs` | same | no | SCIP import, verified on a fixture (rust-analyzer) |
 | C | `.c` | same | no | SCIP import (contract only) |
-| C++ | `.cc` `.cpp` `.cxx` `.h` `.hh` `.hpp` `.hxx` | same, plus classes, structs and data members | yes | language server query (clangd, operator-configured); not verified on a real project |
+| C++ | `.cc` `.cpp` `.cxx` `.h` `.hh` `.hpp` `.hxx` `.inl` | same, plus classes, structs and data members | yes | language server query (clangd, operator-configured); not verified on a real project |
 | CUDA | `.cu` `.cuh` | reported as unsupported, never parsed | no | none |
 
 Other extensions are reported as unsupported, never guessed. Headers parse as
@@ -228,9 +228,10 @@ Every commit needs a `Signed-off-by` line (`git commit -s`), and
 
 ## Security
 
-Riltra is local-first: it uploads nothing, phones home to nothing, and never
-executes a repository's code to inspect it. Future external tool integrations
-will be explicit opt-in only. Please report vulnerabilities through the
+Riltra's core is local-first: it uploads nothing, phones home to nothing, and
+never executes a repository's code to inspect it. External providers are
+explicit opt-in; a configured language server may run project tools or access
+the network. Please report vulnerabilities through the
 repository host's private vulnerability reporting — see [SECURITY.md](SECURITY.md).
 
 ## License
