@@ -1,4 +1,5 @@
 /target/
+/docs/pilots/agent-kebenaran-2026-11-02/raw-local/
 **/*.rs.bk
 .env
 .DS_Store
