@@ -1,6 +1,10 @@
 # Rencana evaluasi multibahasa Riltra
 
-Tanggal: 3 November 2026. Status: rencana; belum ada hasil baru. Persetujuan menyusun rencana tidak berarti persetujuan biaya benchmark eksternal atau publikasi.
+Tanggal rencana: 3 November 2026. Status per 4 November: **sebagian sudah dieksekusi; evaluasi keseluruhan masih parsial**. Lihat [laporan multibahasa](pilots/multilanguage-correctness-2026-11-03/laporan.md), [hasil agent v2](pilots/multilanguage-correctness-2026-11-03/agent-v2-results.md), dan [hasil tindak lanjut](pilots/multilanguage-correctness-2026-11-03/hasil-tindak-lanjut.md).
+
+Yang sudah dilakukan: baseline corpus dan pengulangan Windows/WSL; pemeriksaan engine/provider terbatas pada fixture dan subset repository nyata; satu pemeriksaan freshness/incremental CLI–MCP; serta 68 sesi perbandingan agent v2 pada 17 fixture. Banyak kriteria rinci di bawah belum dipenuhi. Hasil agent v2 memakai fixture yang sudah dikenal dari v1, akses file tidak dibatasi secara teknis, dan bukan ukuran akurasi produk atau benchmark proyek nyata.
+
+Rencana ini tidak memberi persetujuan biaya benchmark eksternal atau publikasi klaim baru.
 
 **Tujuan:** menentukan kebenaran fakta, cakupan kemampuan, keandalan penggunaan, dan prioritas pengembangan berdasarkan bukti per bahasa.
 
@@ -66,4 +70,4 @@ Gunakan folder baru `docs/pilots/multilanguage-correctness-<tanggal-run>/`. Simp
 - [ ] Setiap usulan fix memuat reproduksi, akar masalah, kontrak/caller terdampak, regression test dan validasi OS yang relevan. Jangan mengubah kontrak hanya agar skor naik.
 - [ ] Periksa tautan, hash dan sanitasi; jalankan Gitleaks 8.30.1 sebelum commit DCO. Jangan mengubah freeze atau hasil historis untuk menyesuaikan run baru.
 
-Urutan eksekusi yang direkomendasikan: selesaikan tahap 1–2 dan tinjau gap terlebih dahulu; pilih subset provider/repository tahap 3 dari hasilnya; jalankan tahap 4–5 hanya pada scope yang terdefinisi. Rencana ini tidak menjanjikan satu angka yang membuktikan seluruh kode sudah optimal.
+Prioritas berikutnya: buat oracle baru yang ditinjau sebelum output untuk proyek atau fixture yang belum dipakai; perluas pemeriksaan producer nyata dan parity CLI–MCP; lalu ukur freshness, kegagalan provider dan ketahanan pada kasus yang ditentukan. Evaluasi benchmark eksternal tetap menunggu scope, lisensi dan biaya yang konkret. Rencana ini tidak menjanjikan satu angka yang membuktikan seluruh kode sudah optimal.

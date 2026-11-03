@@ -2,23 +2,38 @@
 
 [![ci](https://github.com/RyanAraaful/riltra/actions/workflows/ci.yml/badge.svg)](https://github.com/RyanAraaful/riltra/actions)
 
-Local-first code intelligence and engineering knowledge for developers and
-AI coding agents. Riltra runs entirely on your machine: no accounts, no cloud,
-no telemetry. It is free and open-source software under the Apache License 2.0,
-suitable for personal, organizational, and commercial use.
+Riltra is a local code map and project notebook for developers and AI coding
+agents. It indexes source code on your machine, helps you follow relationships
+between code, and lets you link project decisions to the code they describe.
+Use the CLI yourself or connect an AI coding agent through Riltra's local MCP
+server.
 
-## Why Riltra
+Riltra's core needs no Riltra account or cloud service and sends no telemetry.
+Optional language-server providers are separate programs; they may run project
+tools or access the network. Riltra is free and open-source under the Apache
+License 2.0 for personal, organizational, and commercial use.
 
-Understanding a codebase means answering three questions: *what does this code
-do, what breaks if I change it, and why was it built this way?* Riltra is being
-built to answer all three locally — with evidence pointing at your source, in
-compact output that humans can skim and coding agents can consume without
-burning context.
+To try Riltra on a repository, start with the [quick start](#quick-start).
 
-For **developers**, that means definitions, callers, impact analysis, and the
-reasoning behind past decisions, without reading the whole repository.
-For **AI coding agents**, that means small, source-backed answers instead of
-thousands of dumped lines.
+## What Riltra helps you do
+
+Think of Riltra as three connected tools: a searchable source index, a cautious
+map of code relationships, and a notebook for project decisions. It helps with
+questions such as:
+
+| When you ask… | Riltra helps by… |
+|---|---|
+| “Where is this symbol defined?” | Finding indexed definitions and their source locations. |
+| “What calls this function?” | Showing direct call-site evidence. Name-based matches remain candidates; they are not presented as proven targets. |
+| “What might this change affect?” | Following bounded, supported relationships. If evidence is insufficient, the impact verdict stays `UNKNOWN`; incomplete coverage is marked `partial`. |
+| “Why does this code have this constraint?” | Storing a revisioned project note and explicitly linking it to a source anchor. |
+| “Can my coding agent use this context?” | Exposing the same local repository and knowledge queries through MCP. |
+
+Graph and index answers report evidence status and freshness where applicable.
+A candidate is a useful place to inspect, not proof that two symbols are
+connected. An empty or partial result is not proof that nothing exists or that
+a change is safe. This is how Riltra makes uncertainty visible instead of
+guessing.
 
 ## Available today
 
@@ -71,12 +86,20 @@ dependencies beyond itself:
 ## Quick start
 
 Prerequisites: a stable Rust toolchain and `git`. No releases are published
-yet — build from source:
+yet — install the CLI from source:
 
 ```powershell
 git clone https://github.com/RyanAraaful/riltra.git
 cd riltra
+cargo install --path crates/cli --locked
+```
 
+This installs `riltra` in Cargo's user binary directory. Make sure that
+directory is on `PATH` so your terminal and coding agent can find it. To run
+commands from the checkout without installing, use `cargo run -q -p riltra --`
+as shown below.
+
+```powershell
 cargo run -q -p riltra -- init --repo . --name riltra
 cargo run -q -p riltra -- repo list
 cargo run -q -p riltra -- repo status --repo riltra
@@ -144,24 +167,65 @@ files; a store with an unsupported schema is refused as `schema_outdated`
 without modification, with a CLI migration instruction. Results keep the same
 freshness, provenance, and `POTENTIAL_CALL`/`CALLS` semantics as the CLI.
 
-Minimal OpenCode configuration for the local stdio server:
+### Connect a coding agent
+
+Install Riltra once using the command above, then configure each coding agent
+you use. Each client starts the same local stdio server with `riltra mcp`.
+These examples use Riltra's default data directory; set `RILTRA_HOME` only if
+you want to store its registry and indexes elsewhere.
+
+#### Codex
+
+Add Riltra to the user-level Codex configuration. Codex CLI and the Codex app
+share this MCP configuration:
+
+```powershell
+codex mcp add riltra -- riltra mcp
+codex mcp list
+```
+
+#### Claude Code
+
+Add Riltra at user scope so it is available in all projects:
+
+```powershell
+claude mcp add --scope user --transport stdio riltra -- riltra mcp
+claude mcp get riltra
+```
+
+#### OpenCode
+
+Add this entry to the global user configuration: `%USERPROFILE%\\.config\\opencode\\opencode.jsonc` on Windows, or
+`~/.config/opencode/opencode.jsonc` on Linux and macOS. Merge it into the
+existing `mcp` object if one is already present:
 
 ```jsonc
 {
+  "$schema": "https://opencode.ai/config.json",
   "mcp": {
     "servers": {
       "riltra": {
         "type": "local",
-        "command": ["riltra", "mcp"],
-        "environment": { "RILTRA_HOME": "<your Riltra home>" }
+        "command": ["riltra", "mcp"]
       }
     }
   }
 }
 ```
 
+Restart the client after configuration and confirm that the Riltra tools are
+listed. If `riltra` is not found, check that Cargo's binary directory is on
+`PATH`, or configure the full path to the installed executable.
+
 See [docs/pilots/cp7a/README.md](docs/pilots/cp7a/README.md) for the CP7-A
 benchmark report, raw evidence, and limitations.
+
+## Correctness evidence
+
+The [multilanguage correctness report](docs/pilots/multilanguage-correctness-2026-11-03/laporan.md)
+summarizes engine and provider checks, agent comparisons, and remaining gaps.
+Its v2 comparison contains 68 sessions over 17 small fixtures reused from v1;
+it is not a general product-accuracy estimate or a performance claim.
 
 ## Language support
 
