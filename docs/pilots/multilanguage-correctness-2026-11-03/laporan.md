@@ -8,7 +8,7 @@ Corpus M6 `cargo test --locked --test edges task7::` lulus **82/82** pada Window
 
 ## TypeScript: producer nyata
 
-Pada fixture existing `gsem/fixture/ts`, `scip-typescript 0.4.0` diimport dengan dua dokumen, empat definisi, enam referensi, nol skipped dan `Unverified`. Expected sumber: import `greet` pada `src/main.ts:1`, pemanggilan pada `:3`. Tiga home dan producer terpisah serta dua query per home (cold/warm) semuanya menghasilkan kedua referensi (6/6 query), tanpa fallback; ini bukan enam fixture independen. Oracle tidak direview secara buta pada run ini.
+Pada fixture existing `gsem/fixture/ts`, `scip-typescript 0.4.0` diimport dengan dua dokumen, empat definisi, enam referensi, nol skipped dan `Unverified`. Expected sumber: import `greet` pada `src/main.ts:1`, pemanggilan pada `:3`. Tiga home dan producer terpisah serta dua query per home (cold/warm) semuanya menghasilkan kedua referensi (6/6 query), tanpa fallback; daftar `definitions` kosong pada query tersebut. Ini bukan enam fixture independen. Oracle tidak direview secara buta pada run ini.
 
 Pada satu run, `callers` hanya mengembalikan `REFERENCES` pada import dan tidak menampilkan call baris 3; hasil `partial`, `Unverified`, dan alasan completeness mencakup `unresolved_owner`. Pemanggilan berada di scope modul; keterkaitan pasti dengan alasan tersebut belum didiagnosis. Satu respons MCP `riltra_code_callers` identik dengan JSON CLI. Perbedaan cakupan semantic reference dan edge callers ini perlu diagnosis terhadap kontrak owner/anchor sebelum disebut defect. Tidak diuji pada repository TypeScript nyata dalam run ini.
 
@@ -25,3 +25,16 @@ Agent Riltra melakukan lima indexed searches pada A1, tetapi lima percobaan sema
 Output corpus, agent dan TypeScript mentah disalin dengan pemeriksaan SHA-256 ke `docs/pilots/agent-kebenaran-2026-11-02/raw-local/multilang-20261103/`, diabaikan Git karena memuat path lokal. Tidak disertakan dalam commit; akses kepada orang lain memerlukan sanitasi terpisah. Salinan source agent: 24 file masing-masing dibandingkan dengan arsip dan identik setelah sesi.
 
 Belum selesai: oracle per kasus tambahan yang dibutakan dan direview terpisah; producer nyata Rust/TypeScript pada repository nyata baru; provider lain, cold/warm seluruh bahasa, parity MCP per kasus termasuk stale/error/paging, perbandingan agent multibahasa dengan pengulangan dan urutan bergantian, serta pengukuran ketahanan. Hindari menggabungkan tes yang belum dinilai ke dalam rata-rata. Laporan ini mempertahankan gap yang ditemukan tanpa mengubah hasil historis.
+
+## Pemeriksaan susulan
+
+- [Rust pada salinan repository](rust-repository.md): 16/16 lokasi oracle historis ditemukan; 12 `CALLS`, satu kandidat dan tiga referensi. Producer mencatat 197 ERROR dan 93 lokasi duplicate; `impact` `UNKNOWN` dan terpotong. Satu query callers MCP sama dengan CLI.
+- [Pengulangan fixture Rust](rust-fixture-repeat.md): tiga home, satu query cold dan warm per home cocok dengan oracle alias `a` yang terbatas; oracle tidak buta.
+- [JavaScript dan TSX](syntax-js-tsx.md): satu fixture per bahasa diperiksa syntax dan producer `scip-typescript`; masing-masing menemukan satu call, dengan batas cakupan fixture kecil.
+- [Pembanding owner TypeScript](diagnosis-typescript.md): call yang sama dalam fungsi bernama muncul sebagai `CALLS`; ini mendukung hipotesis owner tetapi belum membuktikan akar penyebab keluaran scope modul.
+- [Freshness dan incremental](freshness-js-tsx.md): satu edit JS dan query search sama setelah incremental dan full; suite existing 44 index dan 61 MCP lulus di Windows dan WSL. Kegagalan percobaan WSL offline karena cache kosong dipertahankan.
+- [C++ dan clangd di WSL](cpp-clangd.md): dua query pada fixture yang sama menemukan lokasi definisi dan pemanggilan; keduanya tampil sebagai references, dengan definitions kosong dan hasil `Unverified`.
+- [Audit 85 jawaban agent](audit-85-sesi.md): menurut kriteria inventaris lokasi dan jenis yang ditetapkan setelah run, reviewer 14/17, baseline 31/34, Riltra 30/34. Ketidakpastian binding dinilai terpisah; hasil tidak mewakili akurasi engine atau proyek nyata. Model `gpt-6-luna` diminta, tetapi belum dikonfirmasi dari metadata output.
+- [Audit log dan prioritas codebase](audit-log-dan-prioritas.md): semua log command diinventarisasi, termasuk pelanggaran pembatasan fixture yang terlihat; prioritas dikaitkan dengan implementasi dan tes existing.
+
+Tambahan ini tidak menutup kebutuhan oracle yang ditinjau independen, provider nyata seluruh bahasa atau parity MCP pada setiap kasus. Tidak ada rata-rata correctness universal atau klaim performa.
