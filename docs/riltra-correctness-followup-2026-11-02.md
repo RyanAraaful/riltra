@@ -24,8 +24,12 @@ Query `callers` pada `callee` mengembalikan dua lokasi: panggilan langsung sebag
 
 `cargo test --locked --test edges --test mcp --test semantic -- --quiet` pada Windows selesai exit 0: **158 edges, 61 MCP, 22 semantic** lulus. Ini memverifikasi assertions suite yang ada, termasuk kasus CLI/MCP dan fixture alias yang dicakup suite; tidak berarti seluruh kombinasi provider atau semua jawaban diperiksa manual. Tidak ada tes baru atau perubahan source produk.
 
-## Batas dan pekerjaan tersisa
+## Batas dan pekerjaan tersisa pada 2 November
 
-Belum ada evaluasi baru dengan oracle independen yang lebih besar untuk producer nyata pada alias, collisions dan non-call references, belum ada audit lengkap diagnostik producer repository penuh, dan belum ada perbandingan agent baru setelah hasil engine ini. Belum ada pengulangan lintas sistem operasi atau pemeriksaan menyeluruh terhadap setiap output CLI/MCP di luar assertions tes. Tidak ada angka rata-rata yang mewakili kebenaran produk atau klaim kecepatan/biaya.
+Pada saat laporan ini ditulis, belum ada evaluasi baru dengan oracle independen yang lebih besar untuk producer nyata pada alias, collisions dan non-call references; audit lengkap diagnostik producer repository penuh dan perbandingan agent sesudah hasil engine ini juga belum dilakukan. Belum ada pengulangan lintas sistem operasi atau pemeriksaan menyeluruh terhadap setiap output CLI/MCP di luar assertions tes. Tidak ada angka rata-rata yang mewakili kebenaran produk atau klaim kecepatan/biaya.
+
+## Pembaruan status — 4 November 2026
+
+Perbandingan agent v2 telah dijalankan dalam 68 sesi, tetapi memakai 17 fixture kecil yang telah dikenal dari v1 dan tidak mengunci akses file secara teknis. Karena itu, pembaruan ini memenuhi adanya perbandingan lanjutan, bukan kebutuhan oracle baru yang buta atau generalisasi ke proyek nyata. Lihat [hasil v2](pilots/multilanguage-correctness-2026-11-03/agent-v2-results.md) dan [laporan multibahasa](pilots/multilanguage-correctness-2026-11-03/laporan.md). Diagnostik producer penuh, cakupan lintas OS dan parity CLI–MCP menyeluruh tetap belum diuji.
 
 Bukti query, fixture dan output producer disalin ke `docs/pilots/agent-kebenaran-2026-11-02/raw-local/correctness-followup/`, yang diabaikan Git; 18 file salinan diverifikasi terhadap aslinya dengan SHA-256. Arsip sumber pilot ada di direktori induk `raw-local/`. Bukti lokal dapat berisi path pribadi dan tidak tersedia bagi pembaca yang hanya memiliki commit; periksa dan redaksi sebelum membagikan. Catatan sebelumnya: [pilot agent](pilots/agent-kebenaran-2026-11-02/suite-lanjutan/laporan.md) dan [evaluasi correctness](riltra-wiy-correctness-evaluation-2026-10-31.md).

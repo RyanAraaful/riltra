@@ -1,6 +1,6 @@
 # Baseline awal evaluasi multibahasa — 3 November 2026
 
-Status: **baseline awal, pekerjaan evaluasi belum selesai**. Commit yang diuji `59218fa` pada Windows dengan cargo/rustc 1.99.1. Rencana: [evaluasi multibahasa](riltra-multilanguage-evaluation-plan-2026-11-03.md).
+Status baseline pada 3 November: **awal; evaluasi belum selesai**. Commit yang diuji `59218fa` pada Windows dengan cargo/rustc 1.99.1. Status terbaru dan tindak lanjut ada di [laporan multibahasa](pilots/multilanguage-correctness-2026-11-03/laporan.md) dan [hasil agent v2](pilots/multilanguage-correctness-2026-11-03/agent-v2-results.md). Rencana: [evaluasi multibahasa](riltra-multilanguage-evaluation-plan-2026-11-03.md).
 
 ## Pemeriksaan lokal
 
@@ -34,6 +34,10 @@ Satu query `riltra_code_callers` MCP dengan parameter anchor dan limit yang sama
 
 Salinan 18 file bukti Windows/WSL dan fixture TypeScript telah diverifikasi SHA-256 terhadap aslinya dan disimpan lokal di `docs/pilots/agent-kebenaran-2026-11-02/raw-local/multilang-20261103/`, diabaikan Git. Log dan artifact dapat mengandung path lokal dan tidak tersedia dari commit.
 
-## Pekerjaan tersisa
+## Pekerjaan tersisa saat baseline dibuat
 
-Belum ada oracle baru yang ditinjau sesi terpisah, matriks per kasus, pemeriksaan producer nyata multibahasa, atau perbandingan agent baru. WSL di atas hanya mengulang corpus sintetis, bukan seluruh rencana. Hasil ini bukan klaim kebenaran atau optimalitas menyeluruh. Lanjutkan dengan inventaris per kasus dan oracle sebelum menjalankan query tambahan; simpan output mentah yang disanitasi dan hasil unavailable.
+Pada saat baseline ini dibuat, belum ada oracle baru yang ditinjau sesi terpisah, matriks per kasus, pemeriksaan producer nyata multibahasa, atau perbandingan agent baru. WSL di atas hanya mengulang corpus sintetis, bukan seluruh rencana. Hasil ini bukan klaim kebenaran atau optimalitas menyeluruh.
+
+## Pembaruan status — 4 November 2026
+
+Sesudah baseline, laporan lanjutan mencatat pemeriksaan terbatas pada provider, repository, freshness dan CLI–MCP. Protokol agent v2 selesai dengan 68 sesi pada 17 fixture yang sudah digunakan di v1; rincian angka dan batasannya ada di [hasil v2](pilots/multilanguage-correctness-2026-11-03/agent-v2-results.md). Evaluasi menyeluruh tetap belum selesai: oracle baru yang ditinjau sebelum output, cakupan provider nyata yang lebih luas, parity CLI–MCP pada berbagai kondisi, dan uji ketahanan masih menjadi pekerjaan berikutnya.
