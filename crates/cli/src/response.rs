@@ -730,6 +730,7 @@ mod tests {
             import_id: None,
             doc: None,
             display: None,
+            candidate_display: None,
             span_bytes: Some((0, 26)),
             precision: "Heuristic".to_string(),
             uncertainty: Some(
