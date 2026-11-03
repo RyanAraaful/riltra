@@ -1,6 +1,6 @@
 # Protokol perbandingan agent v2
 
-Protokol ini memperbaiki kelemahan run 85 sesi; statusnya rancangan, belum ada run v2. Bekukan fixture, source hash, daftar tugas, urutan, jumlah pengulangan, prompt, model dan versi alat sebelum menjalankan agent. Jangan gunakan jawaban agent untuk menyusun acuan setelah output dilihat.
+Protokol ini ditetapkan untuk memperbaiki kelemahan run 85 sesi dan telah dijalankan pada 3 November 2026 dalam 68 sesi. Hasil dan penyimpangan yang tercatat dijelaskan di [hasil agent v2](agent-v2-results.md) dan [catatan run](agent-v2-run.md). Fixture berasal dari v1 sehingga peninjauan oracle tidak buta; pembatasan akses file juga tidak ditegakkan secara teknis. Bekukan fixture, source hash, daftar tugas, urutan, jumlah pengulangan, prompt, model dan versi alat sebelum menjalankan agent. Jangan gunakan jawaban agent untuk menyusun acuan setelah output dilihat.
 
 Untuk setiap tugas tulis acuan per lokasi dengan kolom berkas, span, jenis (definisi, deklarasi, call atau non-call), pemuat, identitas target dan dasar kepastian. Selector di dalam call tidak dihitung ulang sebagai non-call. Catat acuan yang belum pasti. Pemeriksa lain harus meninjau source dan acuan tanpa melihat output eksperimen; catat akses yang secara teknis dapat dilakukan dan konteks awal yang terlihat. Jika isolasi belum dapat dibuktikan, sebut review terpisah, bukan buta.
 

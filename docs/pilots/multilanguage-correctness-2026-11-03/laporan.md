@@ -24,7 +24,7 @@ Agent Riltra melakukan lima indexed searches pada A1, tetapi lima percobaan sema
 
 Output corpus, agent dan TypeScript mentah disalin dengan pemeriksaan SHA-256 ke `docs/pilots/agent-kebenaran-2026-11-02/raw-local/multilang-20261103/`, diabaikan Git karena memuat path lokal. Tidak disertakan dalam commit; akses kepada orang lain memerlukan sanitasi terpisah. Salinan source agent: 24 file masing-masing dibandingkan dengan arsip dan identik setelah sesi.
 
-Belum selesai: oracle per kasus tambahan yang dibutakan dan direview terpisah; producer nyata Rust/TypeScript pada repository nyata baru; provider lain, cold/warm seluruh bahasa, parity MCP per kasus termasuk stale/error/paging, perbandingan agent multibahasa dengan pengulangan dan urutan bergantian, serta pengukuran ketahanan. Hindari menggabungkan tes yang belum dinilai ke dalam rata-rata. Laporan ini mempertahankan gap yang ditemukan tanpa mengubah hasil historis.
+Sisa pekerjaan: oracle baru per kasus yang dibutakan terhadap output dan ditinjau terpisah; producer nyata Rust/TypeScript pada repository nyata tambahan; provider lain, cold/warm seluruh bahasa, parity MCP per kasus termasuk stale/error/paging, pengujian pada proyek nyata dan corpus baru, serta pengukuran ketahanan. Suite agent v2 menambahkan 68 sesi multibahasa dengan pengulangan dan urutan bergantian pada fixture kecil; hasilnya dicatat terpisah di bawah. Hindari menggabungkan tes yang belum dinilai ke dalam rata-rata. Laporan ini mempertahankan gap yang ditemukan tanpa mengubah hasil historis.
 
 ## Pemeriksaan susulan
 
@@ -36,8 +36,9 @@ Belum selesai: oracle per kasus tambahan yang dibutakan dan direview terpisah; p
 - [C++ dan clangd di WSL](cpp-clangd.md): dua query pada fixture yang sama menemukan lokasi definisi dan pemanggilan; keduanya tampil sebagai references, dengan definitions kosong dan hasil `Unverified`.
 - [Audit 85 jawaban agent](audit-85-sesi.md): menurut kriteria inventaris lokasi dan jenis yang ditetapkan setelah run, reviewer 14/17, baseline 31/34, Riltra 30/34. Ketidakpastian binding dinilai terpisah; hasil tidak mewakili akurasi engine atau proyek nyata. Model `gpt-6-luna` diminta, tetapi belum dikonfirmasi dari metadata output.
 - [Audit log dan prioritas codebase](audit-log-dan-prioritas.md): semua log command diinventarisasi, termasuk pelanggaran pembatasan fixture yang terlihat; prioritas dikaitkan dengan implementasi dan tes existing.
-- [Protokol agent v2](protokol-agent-v2.md): aturan oracle, isolasi, penilaian dan atribusi yang harus dibekukan sebelum run berikutnya; belum dijalankan.
+- [Protokol agent v2](protokol-agent-v2.md): aturan oracle, isolasi, penilaian dan atribusi; dijalankan dalam suite 68 sesi dengan batasan yang tercatat.
 - [Nano Stores](nanostores.md): tiga lokasi source JavaScript dalam proyek nyata ditemukan sebagai kandidat, dengan gap producer dan batas oracle yang dicatat.
 - [Hasil tindak lanjut](hasil-tindak-lanjut.md): perubahan kandidat, tes regresi dan parity, pengujian proyek nyata, protokol v2, serta hasil suite Windows.
+- [Hasil agent v2](agent-v2-results.md): 68 sesi selesai dan diaudit; lokasi, jenis, span dan identitas dilaporkan terpisah. Percobaan awal yang gagal membuka indeks dipertahankan.
 
-Tambahan ini tidak menutup kebutuhan oracle yang ditinjau independen, provider nyata seluruh bahasa atau parity MCP pada setiap kasus. Tidak ada rata-rata correctness universal atau klaim performa.
+Tambahan ini belum menyediakan oracle baru yang buta terhadap output, provider nyata untuk seluruh bahasa atau parity MCP pada setiap kasus. Tidak ada rata-rata correctness universal atau klaim performa.
