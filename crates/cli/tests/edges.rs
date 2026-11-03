@@ -2680,3 +2680,99 @@ fn e8_cross_repository_candidate_scopes_stay_isolated() {
         "no cross-repository leakage: {out}"
     );
 }
+
+#[test]
+fn semantic_empty_display_keeps_module_scope_call_candidate() {
+    let h = home("empty-display-owner");
+    let source = "function target() {}\ntarget();\n";
+    let dir = repo_with(&h, "sem", &[("a.ts", source)]);
+    do_index(&h);
+    let uri = "scip-test test pkg 1 a.ts/target().";
+    let doc = test_document(
+        "a.ts",
+        &[occurrence(uri, 1, 0, 9, 15), occurrence(uri, 0, 1, 0, 6)],
+        &[(uri, "")],
+    );
+    import_documents(&h, &dir, "empty-display", &[doc]);
+    let (code, out, err) = run(
+        &h,
+        &[
+            "callers", "--repo", "sem", "--path", "a.ts", "--line", "1", "--col", "10",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["anchor"]["kind"], "semantic");
+    assert!(
+        v["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["kind"] == "POTENTIAL_CALL" && e["unresolved"] == "owner-unproven"),
+        "{v}"
+    );
+    assert!(
+        v["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|e| e["kind"] != "CALLS"),
+        "{v}"
+    );
+    std::fs::write(
+        dir.join("a.ts"),
+        "// edited\nfunction target() {}\ntarget();\n",
+    )
+    .unwrap();
+    let (code, out, err) = run(
+        &h,
+        &[
+            "callers", "--repo", "sem", "--path", "a.ts", "--line", "1", "--col", "10",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    let stale: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(stale["freshness"]["status"], "stale");
+    assert!(
+        stale["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|e| e["kind"] != "CALLS"),
+        "{stale}"
+    );
+}
+
+#[test]
+fn semantic_empty_display_does_not_link_same_name_in_unrelated_file() {
+    let h = home("empty-display-collision");
+    let source = "function target() {}\ntarget();\n";
+    let dir = repo_with(&h, "sem", &[("a.ts", source), ("b.ts", source)]);
+    do_index(&h);
+    let a = "scip-test test pkg 1 a.ts/target().";
+    let b = "scip-test test pkg 1 b.ts/target().";
+    let doc = |path, uri| {
+        test_document(
+            path,
+            &[occurrence(uri, 1, 0, 9, 15), occurrence(uri, 0, 1, 0, 6)],
+            &[(uri, "")],
+        )
+    };
+    import_documents(&h, &dir, "collision", &[doc("a.ts", a), doc("b.ts", b)]);
+    let (code, out, err) = run(
+        &h,
+        &[
+            "callers", "--repo", "sem", "--path", "a.ts", "--line", "1", "--col", "10",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let edges = v["edges"].as_array().unwrap();
+    assert!(edges.iter().any(|e| e["kind"] == "POTENTIAL_CALL"), "{v}");
+    assert!(
+        edges
+            .iter()
+            .all(|e| e["caller_path"] == "a.ts" && e["kind"] != "CALLS"),
+        "{v}"
+    );
+}

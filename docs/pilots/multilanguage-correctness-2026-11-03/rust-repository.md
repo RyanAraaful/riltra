@@ -14,6 +14,8 @@ Query `callers` pada `crates/cli/src/semantic.rs:276:8` mengembalikan 16 lokasi 
 
 Producer exit 0 tetapi log berisi 197 baris ERROR: 191 `Encountered enclosing definition with no name` dan enam masalah definisi di dokumen SCIP. Producer console mencatat 93 lokasi duplicate symbol. Ini inventaris pesan, bukan audit dampaknya terhadap setiap simbol; tidak dapat disimpulkan bahwa seluruh import benar atau semua 197 diagnostik memengaruhi anchor. Hasil import tidak membawa seluruh diagnostik tersebut.
 
+Pemeriksaan susulan atas enam pesan definisi menemukan empat lokasi di `crates/cli/tests/common/rust_alias.rs` dan dua di `crates/cli/src/semantic.rs` (koordinat log 53 dan 151, nol-based). Anchor `confined_read` yang diuji sebelumnya pada baris CLI 276 tidak tercantum dalam enam pesan tersebut. Sebanyak 191 pesan lain memakai ID internal modul dan tidak memberikan path sumber, sehingga tidak dapat dipetakan langsung ke anchor dari log ini. Console producer sendiri menyebut duplicate symbol sebagai bug internal rust-analyzer; penyebab dan dampak pada hasil tetap belum dibuktikan. Tidak aman menyimpulkan anchor bebas dampak hanya karena tidak disebut dalam enam pesan.
+
 Bukti mentah source archive, oracle, artifact, log producer, output CLI/MCP dan status disalin secara lokal dan diverifikasi hash ke `docs/pilots/agent-kebenaran-2026-11-02/raw-local/multilang-20261103/real-rust-repo/`, yang diabaikan Git dan dapat mengandung path lokal. Tidak ada klaim bahwa bukti tersebut tersedia dari commit.
 
 Setelah run, seluruh 314 file reguler dalam archive dibandingkan byte-per-byte dengan file snapshot dan tidak ada yang berubah atau hilang. Pemeriksaan ini tidak menghitung file baru di luar archive.

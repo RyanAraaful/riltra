@@ -1220,6 +1220,8 @@ pub struct EdgeAnchor {
     pub doc: Option<String>,
     /// Display name backing the caller-candidate union (anchor's own name).
     pub display: Option<String>,
+    /// Source spelling used only for heuristic caller-candidate selection.
+    pub candidate_display: Option<String>,
     /// Syntax definition byte range for fallback anchors; `None` for semantic.
     pub span_bytes: Option<(usize, usize)>,
     pub precision: String,
@@ -1469,6 +1471,23 @@ pub(crate) fn resolve_edge_anchor_with_source(
                 None
             },
             display: best[0].display_name.clone(),
+            candidate_display: best[0]
+                .display_name
+                .clone()
+                .filter(|name| !name.is_empty())
+                .or_else(|| {
+                    let fact = best[0];
+                    if current_digest.as_deref() != Some(fact.file_digest.as_str()) {
+                        return None;
+                    }
+                    let bytes = source.as_ref()?.get(fact.byte_start..fact.byte_end)?;
+                    let name = std::str::from_utf8(bytes).ok()?;
+                    (!name.is_empty()
+                        && name
+                            .chars()
+                            .all(|c| c.is_alphanumeric() || c == '_' || c == '$'))
+                    .then(|| name.to_owned())
+                }),
             span_bytes: Some((best[0].byte_start, best[0].byte_end)),
             precision: best[0].precision.clone(),
             uncertainty: None,
@@ -1551,6 +1570,7 @@ pub(crate) fn resolve_edge_anchor_with_source(
         import_id: None,
         doc: None,
         display: def.name.clone(),
+        candidate_display: def.name.clone(),
         span_bytes: Some((def.byte_start, def.byte_end)),
         precision: "Heuristic".to_string(),
         uncertainty: Some(uncertainty),
@@ -2222,7 +2242,7 @@ pub(crate) fn edge_query_conn(
         endpoint: &endpoint,
         inbound: request.direction == EdgeDir::Callers,
         candidate_name: if by_name {
-            anchor.display.as_deref().map(called_name)
+            anchor.candidate_display.as_deref().map(called_name)
         } else {
             None
         },

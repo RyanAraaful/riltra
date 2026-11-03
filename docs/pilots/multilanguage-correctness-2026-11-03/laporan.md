@@ -36,5 +36,8 @@ Belum selesai: oracle per kasus tambahan yang dibutakan dan direview terpisah; p
 - [C++ dan clangd di WSL](cpp-clangd.md): dua query pada fixture yang sama menemukan lokasi definisi dan pemanggilan; keduanya tampil sebagai references, dengan definitions kosong dan hasil `Unverified`.
 - [Audit 85 jawaban agent](audit-85-sesi.md): menurut kriteria inventaris lokasi dan jenis yang ditetapkan setelah run, reviewer 14/17, baseline 31/34, Riltra 30/34. Ketidakpastian binding dinilai terpisah; hasil tidak mewakili akurasi engine atau proyek nyata. Model `gpt-6-luna` diminta, tetapi belum dikonfirmasi dari metadata output.
 - [Audit log dan prioritas codebase](audit-log-dan-prioritas.md): semua log command diinventarisasi, termasuk pelanggaran pembatasan fixture yang terlihat; prioritas dikaitkan dengan implementasi dan tes existing.
+- [Protokol agent v2](protokol-agent-v2.md): aturan oracle, isolasi, penilaian dan atribusi yang harus dibekukan sebelum run berikutnya; belum dijalankan.
+- [Nano Stores](nanostores.md): tiga lokasi source JavaScript dalam proyek nyata ditemukan sebagai kandidat, dengan gap producer dan batas oracle yang dicatat.
+- [Hasil tindak lanjut](hasil-tindak-lanjut.md): perubahan kandidat, tes regresi dan parity, pengujian proyek nyata, protokol v2, serta hasil suite Windows.
 
 Tambahan ini tidak menutup kebutuhan oracle yang ditinjau independen, provider nyata seluruh bahasa atau parity MCP pada setiap kasus. Tidak ada rata-rata correctness universal atau klaim performa.

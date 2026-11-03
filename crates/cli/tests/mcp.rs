@@ -2615,6 +2615,46 @@ fn t2_syntax_only_callers_keep_heuristic_uncertainty_and_match_cli() {
     assert_eq!(code, 0);
 }
 
+#[test]
+fn javascript_callers_parity_survives_stale_incremental_and_full_rebuild() {
+    let h = home("js-graph-parity");
+    let r = home("js-graph-parity-repo");
+    std::fs::create_dir_all(&r).unwrap();
+    let source = "function target() {}\nfunction caller() { target(); }\n";
+    std::fs::write(r.join("a.js"), source).unwrap();
+    init_repo(&h, &r, "s");
+    assert_eq!(run_cli(&h, &["index", "--repo", "s"]).0, 0);
+    let mut s = ready(&h);
+    let args = json!({"repo":"s", "path":"a.js", "line":1, "col":10, "limit":1});
+    let cli = [
+        "callers", "--repo", "s", "--path", "a.js", "--line", "1", "--col", "10", "--limit", "1",
+    ];
+    let fresh = graph_doc(&mut s, 2, "riltra_code_callers", &args);
+    assert_graph_parity(&h, &fresh, &cli);
+    assert_eq!(fresh["freshness"]["status"], "fresh");
+    std::fs::write(r.join("a.js"), format!("{source}// edited\n")).unwrap();
+    let stale = call_tool(&mut s, 3, "riltra_code_callers", &args);
+    assert!(is_error(&stale), "{stale}");
+    assert!(doc(&stale)["message"]
+        .as_str()
+        .unwrap()
+        .contains("source-changed"));
+    let (code, _, err) = run_cli(&h, &cli);
+    assert_ne!(code, 0);
+    assert!(err.contains("source-changed"), "{err}");
+    assert_eq!(run_cli(&h, &["index", "--repo", "s"]).0, 0);
+    let mut incremental = graph_doc(&mut s, 4, "riltra_code_callers", &args);
+    assert_graph_parity(&h, &incremental, &cli);
+    assert_eq!(incremental["freshness"]["status"], "fresh");
+    assert_eq!(run_cli(&h, &["index", "--repo", "s", "--full"]).0, 0);
+    let mut full = graph_doc(&mut s, 5, "riltra_code_callers", &args);
+    assert_graph_parity(&h, &full, &cli);
+    incremental.as_object_mut().unwrap().remove("snapshot");
+    full.as_object_mut().unwrap().remove("snapshot");
+    assert_eq!(incremental, full);
+    assert_eq!(s.finish().0, 0);
+}
+
 // --- T3: trace / impact ------------------------------------------------------
 
 #[test]
