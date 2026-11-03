@@ -4,6 +4,13 @@ on:
   push:
   pull_request:
 
+# A superseded pull-request run is cancelled. Every other run gets a group of
+# its own: with the default queue a newer pending run cancels an older pending
+# one, which would drop the CI result of a master commit.
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || format('ci-run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   check:
     strategy:
@@ -34,6 +41,10 @@ jobs:
           - { name: macos-15, runner: macos-15-intel }
     name: check (${{ matrix.name }})
     runs-on: ${{ matrix.runner }}
+    # Timeouts are 3x the longest of the last 10 successful runs, rounded up to
+    # 5 minutes (here macos-15: 499 s). Without one a job may run for GitHub's
+    # 6 h default: run 41669633876 held a macos-15 job until that limit.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -61,6 +72,8 @@ jobs:
           - { name: macos-15-intel, runner: macos-15-intel, platform: macos-x64, ext: tar.gz }
     name: installer (${{ matrix.name }})
     runs-on: ${{ matrix.runner }}
+    # Same rule as `check`: macos-15-intel took at most 732 s.
+    timeout-minutes: 40
     permissions:
       contents: read
     steps:
@@ -89,6 +102,8 @@ jobs:
 
   security:
     runs-on: ubuntu-latest
+    # Same rule as `check`: at most 30 s.
+    timeout-minutes: 5
     permissions:
       contents: read
     env:
