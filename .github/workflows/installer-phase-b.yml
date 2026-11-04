@@ -1,0 +1,154 @@
+name: installer-phase-b
+
+# Phase B of the installer checks (M10 design gate, section 9.4; owner
+# decision O-12). Phase A, in ci.yml, installs an archive built from the commit
+# under test. Phase B takes the assets of a PUBLISHED release and checks them
+# the same way, on each native x64 runner:
+#
+#   1. The archive and its .sha256 are downloaded with the runner's own tools
+#      and the checksum is verified.
+#   2. release/test-install.* runs its whole acceptance suite on that archive:
+#      install, reinstall, checksum failures, unsupported platforms, unsafe
+#      archives, the static no-elevation check and the installed CLI/MCP smoke.
+#   3. The installer runs once the way a user runs it, with no local archive, so
+#      it downloads the release itself. The installed binary must report the
+#      version and be byte-identical to the binary in the archive from step 1.
+#
+# It is started by hand with the released version. The tag for that version
+# must exist and have a published release. The job checks out that tag, so the
+# scripts under test are the ones the release notes link to. The download URLs
+# below are spelled the way install.sh and install.ps1 spell them, on purpose:
+# a stale repository name in the installers fails here.
+#
+# It only reads. It creates no tag, release, artifact or commit and uses no
+# secret. GitHub-hosted Windows runners are administrator accounts, so the
+# no-admin property rests on the install location and the static check, not on
+# an unprivileged account (design gate, section 9.4).
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Released version to check, for example 0.1.0 (its tag and release must exist)'
+        required: true
+        default: '0.1.0'
+
+permissions:
+  contents: read
+
+jobs:
+  phase-b:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: windows-2025, runner: windows-2025, platform: windows-x64, ext: zip }
+          - { name: ubuntu-24.04, runner: ubuntu-24.04, platform: linux-x64, ext: tar.gz }
+          - { name: macos-15-intel, runner: macos-15-intel, platform: macos-x64, ext: tar.gz }
+    # The job names are deliberately new: they cannot be mistaken for the
+    # required `check (...)` contexts or for the Phase A `installer (...)` jobs.
+    name: phase-b (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    # There is no build step, so a run is shorter than Phase A (limit 40 minutes,
+    # with a release build). 20 minutes is a ceiling until a first run gives a
+    # measured basis for the usual rule (3x the longest run, rounded up to 5).
+    timeout-minutes: 20
+    env:
+      VERSION: ${{ inputs.version }}
+      PLATFORM: ${{ matrix.platform }}
+      ASSET: riltra-${{ inputs.version }}-${{ matrix.platform }}.${{ matrix.ext }}
+      BASE: https://github.com/terapetralabs/riltra/releases/download/v${{ inputs.version }}
+    steps:
+      - name: Check the version input
+        shell: bash
+        run: |
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "version must look like 0.1.0, got: $VERSION" >&2; exit 1; }
+
+      - uses: actions/checkout@v4
+        with:
+          ref: v${{ inputs.version }}
+
+      - name: Download and verify the release asset (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          $dir = Join-Path $env:RUNNER_TEMP 'assets'
+          New-Item -ItemType Directory -Path $dir | Out-Null
+          $archive = Join-Path $dir $env:ASSET
+          Invoke-WebRequest -Uri "$($env:BASE)/$($env:ASSET)" -OutFile $archive
+          Invoke-WebRequest -Uri "$($env:BASE)/$($env:ASSET).sha256" -OutFile "$archive.sha256"
+          $expected = ((Get-Content -LiteralPath "$archive.sha256" -Raw).Trim() -split '\s+')[0].ToLowerInvariant()
+          $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw "SHA-256 mismatch: downloaded $actual, listed $expected" }
+          $size = (Get-Item -LiteralPath $archive).Length
+          "ASSET_PATH=$archive" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "$($env:ASSET): $size bytes, sha256 $actual" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+
+      - name: Download and verify the release asset (Linux and macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/assets"
+          mkdir -p "$dir"
+          curl -fsSL "$BASE/$ASSET" -o "$dir/$ASSET"
+          curl -fsSL "$BASE/$ASSET.sha256" -o "$dir/$ASSET.sha256"
+          if command -v sha256sum >/dev/null 2>&1; then
+            (cd "$dir" && sha256sum -c "$ASSET.sha256")
+          else
+            (cd "$dir" && shasum -a 256 -c "$ASSET.sha256")
+          fi
+          echo "ASSET_PATH=$dir/$ASSET" >> "$GITHUB_ENV"
+          echo "$ASSET: $(wc -c < "$dir/$ASSET" | tr -d ' ') bytes, sha256 $(cut -d' ' -f1 "$dir/$ASSET.sha256")" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Acceptance tests on the downloaded asset (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: pwsh -NoProfile -File release/test-install.ps1 -ArchivePath $env:ASSET_PATH
+
+      - name: Acceptance tests on the downloaded asset (Linux and macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: bash release/test-install.sh --archive "$ASSET_PATH"
+
+      - name: Installer download path, as a user runs it (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $fresh = Join-Path $env:RUNNER_TEMP 'fresh-localappdata'
+          New-Item -ItemType Directory -Path $fresh | Out-Null
+          $env:LOCALAPPDATA = $fresh
+          powershell -NoProfile -ExecutionPolicy Bypass -File release/install.ps1 -Version $env:VERSION
+          if ($LASTEXITCODE -ne 0) { throw "install.ps1 exited with $LASTEXITCODE" }
+          $installed = Join-Path $fresh 'Programs\Riltra\bin\riltra.exe'
+          $reported = (& $installed --version | Select-Object -First 1)
+          if ($reported -notmatch ('^riltra ' + [regex]::Escape($env:VERSION) + '(\s|$)')) { throw "unexpected version output: $reported" }
+          $unpacked = Join-Path $env:RUNNER_TEMP 'unpacked'
+          Expand-Archive -LiteralPath $env:ASSET_PATH -DestinationPath $unpacked
+          $inArchive = (Get-FileHash -LiteralPath (Join-Path $unpacked "riltra-$($env:VERSION)-$($env:PLATFORM)\riltra.exe") -Algorithm SHA256).Hash
+          $onDisk = (Get-FileHash -LiteralPath $installed -Algorithm SHA256).Hash
+          if ($inArchive -ne $onDisk) { throw "the installed binary differs from the binary in the archive" }
+          "installer download path: the installed binary ($onDisk) matches the archive" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+
+      - name: Installer download path, as a user runs it (Linux and macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          fresh="$RUNNER_TEMP/fresh-home"
+          mkdir -p "$fresh"
+          HOME="$fresh" sh release/install.sh --version "$VERSION"
+          installed="$fresh/.local/share/riltra/riltra"
+          [ -x "$installed" ] && [ -L "$fresh/.local/bin/riltra" ] || { echo "the installer did not create the expected files" >&2; exit 1; }
+          reported="$("$fresh/.local/bin/riltra" --version | head -n 1 | awk '{print $1 " " $2}')"
+          [ "$reported" = "riltra $VERSION" ] || { echo "unexpected version output: $reported" >&2; exit 1; }
+          mkdir -p "$RUNNER_TEMP/unpacked"
+          tar -xzf "$ASSET_PATH" -C "$RUNNER_TEMP/unpacked"
+          digest() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; else shasum -a 256 "$1" | awk '{print $1}'; fi; }
+          in_archive="$(digest "$RUNNER_TEMP/unpacked/riltra-$VERSION-$PLATFORM/riltra")"
+          on_disk="$(digest "$installed")"
+          [ "$in_archive" = "$on_disk" ] || { echo "the installed binary differs from the binary in the archive" >&2; exit 1; }
+          echo "installer download path: the installed binary ($on_disk) matches the archive" >> "$GITHUB_STEP_SUMMARY"
