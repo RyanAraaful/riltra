@@ -245,7 +245,7 @@ struct RiltraMcp;
 impl RiltraMcp {
     #[tool(
         name = "riltra_repo_list",
-        description = "List registered repositories (same document as CLI `repo list`).",
+        description = "List registered repositories (same document as CLI `repo list`). When to call: first, to learn the `repo` name that every other tool takes.",
         annotations(
             title = "List registered repositories",
             read_only_hint = true,
@@ -263,7 +263,7 @@ impl RiltraMcp {
 
     #[tool(
         name = "riltra_repo_status",
-        description = "Repository status (same document as CLI `repo status`) plus a read-only `index_status` member (same document as CLI `index status`).",
+        description = "Repository status (same document as CLI `repo status`) plus a read-only `index_status` member (same document as CLI `index status`). When to call: before relying on other answers, to see whether the index exists and still matches the source.",
         annotations(
             title = "Repository status",
             read_only_hint = true,
@@ -280,7 +280,7 @@ impl RiltraMcp {
 
     #[tool(
         name = "riltra_code_search",
-        description = "Search indexed symbols by name (same document as CLI `search`). A missing index reports `no-index` without creating storage.",
+        description = "Search indexed symbols by name (same document as CLI `search`). A missing index reports `no-index` without creating storage. When to call: to find where a symbol is defined and to get the `path`, `line` and `col` that the graph tools take.",
         annotations(
             title = "Search indexed symbols",
             read_only_hint = true,
@@ -297,7 +297,7 @@ impl RiltraMcp {
 
     #[tool(
         name = "riltra_code_callers",
-        description = "Call sites that reference the anchor symbol (same document as CLI `callers`); heuristic edges stay `POTENTIAL_CALL`, never promoted to `CALLS`.",
+        description = "Call sites that reference the anchor symbol (same document as CLI `callers`); heuristic edges stay `POTENTIAL_CALL`, never promoted to `CALLS`. When to call: before changing a function or method, to see what appears to call it.",
         annotations(
             title = "Find callers",
             read_only_hint = true,
@@ -314,7 +314,7 @@ impl RiltraMcp {
 
     #[tool(
         name = "riltra_code_callees",
-        description = "Symbols the anchor definition calls (same document as CLI `callees`).",
+        description = "Symbols the anchor definition calls (same document as CLI `callees`). When to call: to see what a function or method appears to depend on.",
         annotations(
             title = "Find callees",
             read_only_hint = true,
@@ -331,7 +331,7 @@ impl RiltraMcp {
 
     #[tool(
         name = "riltra_code_trace",
-        description = "Transitive call paths from the anchor, optionally to a destination (same document as CLI `trace`); paths are plausible traversal, not execution.",
+        description = "Transitive call paths from the anchor, optionally to a destination (same document as CLI `trace`); paths are plausible traversal, not execution. When to call: to check whether and how one symbol might reach another.",
         annotations(
             title = "Trace call paths",
             read_only_hint = true,
@@ -345,7 +345,7 @@ impl RiltraMcp {
 
     #[tool(
         name = "riltra_code_impact",
-        description = "Reverse transitive callers of the anchor with a coverage verdict (same document as CLI `impact`); impact is plausible, not execution.",
+        description = "Reverse transitive callers of the anchor with a coverage verdict (same document as CLI `impact`); impact is plausible, not execution. When to call: before changing a symbol, to see what it might affect; `UNKNOWN` or `partial` means not established, not safe.",
         annotations(
             title = "Estimate impact",
             read_only_hint = true,
@@ -362,7 +362,7 @@ impl RiltraMcp {
 
     #[tool(
         name = "riltra_knowledge_search",
-        description = "Search knowledge records by literal text and/or an exact stored evidence path (same document as CLI `knowledge search`). A missing store answers with an empty result and creates nothing.",
+        description = "Search knowledge records by literal text and/or an exact stored evidence path (same document as CLI `knowledge search`). A missing store answers with an empty result and creates nothing. When to call: to look for recorded decisions or notes by text or by an evidence path.",
         annotations(
             title = "Search knowledge records",
             read_only_hint = true,
@@ -379,7 +379,7 @@ impl RiltraMcp {
 
     #[tool(
         name = "riltra_knowledge_show",
-        description = "Read one knowledge revision with its evidence freshness (same document as CLI `knowledge show`). Confirmation is reported as stored provenance, never as promotion.",
+        description = "Read one knowledge revision with its evidence freshness (same document as CLI `knowledge show`). Confirmation is reported as stored provenance, never as promotion. When to call: to read a record that a search, a relation or an anchor lookup returned.",
         annotations(
             title = "Read a knowledge revision",
             read_only_hint = true,
@@ -396,7 +396,7 @@ impl RiltraMcp {
 
     #[tool(
         name = "riltra_knowledge_related",
-        description = "One-hop knowledge relations in either direction (same document as CLI `knowledge related`); retracted relations are hidden unless requested.",
+        description = "One-hop knowledge relations in either direction (same document as CLI `knowledge related`); retracted relations are hidden unless requested. When to call: to follow the links from a record to the records it relates to.",
         annotations(
             title = "Read knowledge relations",
             read_only_hint = true,
@@ -413,7 +413,7 @@ impl RiltraMcp {
 
     #[tool(
         name = "riltra_knowledge_at_anchor",
-        description = "Read explicit code-anchor bindings to exact knowledge revisions (same document as CLI `knowledge at`). This operation is read-only and never creates or migrates a store; unlinked anchors remain unlinked.",
+        description = "Read explicit code-anchor bindings to exact knowledge revisions (same document as CLI `knowledge at`). This operation is read-only and never creates or migrates a store; unlinked anchors remain unlinked. When to call: to check whether a decision is recorded for the code at a position.",
         annotations(
             title = "Read knowledge at a code anchor",
             read_only_hint = true,
@@ -430,7 +430,7 @@ impl RiltraMcp {
 
     #[tool(
         name = "riltra_code_semantic",
-        description = "Definition or references of the symbol at a position, answered by a language server (the same document as CLI `semantic query --lsp-server`). References are locations, not call edges: they are never edges, and they are never a completeness claim — the provider's project index and compilation database may be incomplete. An empty answer means the provider found nothing at this position; it is not a claim that the symbol does not exist. A path that does not exist is reported as a path-containment refusal (`document path escapes repository`), never as an empty answer. The answer carries the provider's verification state and its diagnostics. The language server is a local process that the operator configured; it reads the project and may write its own index cache, and what it runs is provider-dependent — some servers run the project's build tools — so this tool is not read-only.",
+        description = "Definition or references of the symbol at a position, answered by a language server (the same document as CLI `semantic query --lsp-server`). References are locations, not call edges: they are never edges, and they are never a completeness claim — the provider's project index and compilation database may be incomplete. An empty answer means the provider found nothing at this position; it is not a claim that the symbol does not exist. A path that does not exist is reported as a path-containment refusal (`document path escapes repository`), never as an empty answer. The answer carries the provider's verification state and its diagnostics. The language server is a local process that the operator configured; it reads the project and may write its own index cache, and what it runs is provider-dependent — some servers run the project's build tools — so this tool is not read-only. When to call: only when an operator has set `RILTRA_LSP_SERVER` to a language server, to get a definition or references from it.",
         annotations(
             title = "Semantic definition or references",
             read_only_hint = false,
@@ -448,7 +448,7 @@ impl RiltraMcp {
 
     #[tool(
         name = "riltra_health",
-        description = "Environment health: bootstrap status, environment doctor, versions, capabilities, limits, and the registered repository count. Read-only; creates and opens no storage.",
+        description = "Environment health: bootstrap status, environment doctor, versions, capabilities, limits, and the registered repository count. Read-only; creates and opens no storage. When to call: to check that Riltra is reachable and which versions and limits apply.",
         annotations(
             title = "Health",
             read_only_hint = true,
