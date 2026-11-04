@@ -3,7 +3,7 @@ name = "riltra"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Riltra native CLI: repository registry and syntax baseline"
+description = "Local code map and project notebook for developers and AI coding agents: CLI and MCP server"
 
 [dependencies]
 protobuf = "3.7"

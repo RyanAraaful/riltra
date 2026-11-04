@@ -1,6 +1,6 @@
 # Riltra
 
-[![ci](https://github.com/RyanAraaful/riltra/actions/workflows/ci.yml/badge.svg)](https://github.com/RyanAraaful/riltra/actions)
+[![ci](https://github.com/terapetralabs/riltra/actions/workflows/ci.yml/badge.svg)](https://github.com/terapetralabs/riltra/actions)
 
 Riltra is a local code map and project notebook for developers and AI coding
 agents. It indexes source code on your machine, helps you follow relationships
@@ -89,7 +89,7 @@ Prerequisites: a stable Rust toolchain and `git`. No releases are published
 yet — install the CLI from source:
 
 ```powershell
-git clone https://github.com/RyanAraaful/riltra.git
+git clone https://github.com/terapetralabs/riltra.git
 cd riltra
 cargo install --path crates/cli --locked
 ```
@@ -264,8 +264,9 @@ C++.
   of the external construction sites to the class (`D2-C6`), the full call chain including the indirect dispatch
   (`D3-C5`), and the affected set of an impact query (`D4-C5`). They are accepted pre-release limitations, and C++
   answers stay candidates.
-- The repository history still carries machine-local paths from early commits
-  (a history rewrite is a separate, owner-gated decision).
+- The repository history still carries machine-local paths from early commits.
+  The history is not rewritten, because documents under `docs/` cite commits by
+  hash; see [Repository history](SECURITY.md#repository-history).
 
 ## Stability (pre-1.0)
 
