@@ -42,7 +42,7 @@ try {
         }
     } else {
         $archive = Join-Path $stage "riltra-$Version-windows-x64.zip"
-        $base = "https://github.com/RyanAraaful/riltra/releases/download/v$Version"
+        $base = "https://github.com/terapetralabs/riltra/releases/download/v$Version"
         $params = @{ Uri = "$base/riltra-$Version-windows-x64.zip"; OutFile = $archive }
         if ($PSVersionTable.PSVersion.Major -lt 6) { $params.UseBasicParsing = $true }
         Invoke-WebRequest @params

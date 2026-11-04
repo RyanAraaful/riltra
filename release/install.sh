@@ -73,7 +73,7 @@ if [ -n "$archive" ]; then
     esac
 else
     archive="$stage/riltra-$version-$platform.tar.gz"
-    base="https://github.com/RyanAraaful/riltra/releases/download/v$version"
+    base="https://github.com/terapetralabs/riltra/releases/download/v$version"
     if command -v curl >/dev/null 2>&1; then
         curl -fsSL "$base/riltra-$version-$platform.tar.gz" -o "$archive" || fail "download failed"
         curl -fsSL "$base/riltra-$version-$platform.tar.gz.sha256" -o "$archive.sha256" || fail "checksum download failed"
