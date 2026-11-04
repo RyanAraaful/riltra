@@ -24,6 +24,10 @@ jobs:
   guard:
     name: master only
     runs-on: ubuntu-latest
+    # Timeouts are 3x the longest job of the two successful runs so far (guard:
+    # 7 s), rounded up to 5 minutes, with 5 minutes as the floor. Without one a
+    # stalled runner holds a job until GitHub's 6 h default.
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
         with:
@@ -51,6 +55,8 @@ jobs:
           - { name: macos-x64, runner: macos-15-intel, ext: tar.gz }
     name: package (${{ matrix.name }})
     runs-on: ${{ matrix.runner }}
+    # Same rule as `guard`: the longest package job was macos-x64 at 405 s.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
