@@ -4,6 +4,7 @@
 .env
 .DS_Store
 AGENTS.md
+!/AGENTS.md
 CLAUDE.md
 # Owner's private planning doc: kept out of the public repo (see backup outside
 # this directory). Never commit this file.

@@ -1,5 +1,20 @@
 # Security scans (secrets + local machine paths)
 
+## Dependency vulnerabilities
+
+The CI `dependency-audit` job runs on pushes and pull requests. It installs
+`cargo-audit` 0.22.2 with its locked dependencies and checks the committed
+`Cargo.lock` against the current RustSec advisory database. Vulnerabilities
+and scanner/database failures fail the job; informational warnings remain
+visible in its log. No advisories are ignored automatically.
+
+Run locally with `cargo install cargo-audit --version 0.22.2 --locked`, then
+`cargo audit --file Cargo.lock`. This CI tool accesses the network to install
+and fetch advisories; it does not add network access to Riltra itself.
+This detects known dependency advisories, not all vulnerabilities in Riltra's
+own code. Keep Gitleaks and correctness/security review as complementary checks.
+The new job must be made a required check in repository settings to block merges.
+
 Pinned scanner: **gitleaks 8.30.1** (MIT, github.com/gitleaks/gitleaks), plus
 three custom rules in `.gitleaks.toml` for local machine paths: Windows
 user-profile paths, unix/macOS home directories, and absolute workspace paths

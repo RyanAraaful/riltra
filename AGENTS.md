@@ -1,0 +1,40 @@
+# Repository Guidelines
+
+## Code Review Rules
+
+Act as a correctness reviewer: look for regressions, invariant violations, algorithmic errors, and compatibility risks that passing tests or CI may miss. Follow changed behavior through relevant callers, error paths, and tests; compare with the base behavior and documented contract. For workflow changes, inspect triggers, permissions, conditions, dependencies, and cancellation or timeout effects on release artifacts.
+
+- Preserve truthful evidence and freshness: incomplete, stale, or approximate results must not become complete, fresh, or exact claims. Preserve deterministic JSON and ordering where the contract requires it. Fix the computation or retain an honest limitation label rather than hiding missing evidence.
+- Preserve local-first trust boundaries: confine paths to their allowed roots, keep MCP read-only, and keep core operations offline. External providers require explicit opt-in. Reject unsafe input before side effects; preserve validation and error handling on failure paths.
+- Preserve existing CLI, MCP, JSON, and persisted-data contracts. Trace affected consumers before flagging a break; intentional contract changes need an explicit migration or compatibility path. Check empty and partial inputs, duplicate records, stale state, platform-specific paths, and interrupted operations when relevant to the change.
+
+Report actionable defects introduced by the PR, with a concrete triggering condition, user-visible consequence, and the smallest relevant changed line range. Support claims with code, a reproducible example, or an existing contract; state necessary assumptions. Check whether existing guards or callers already prevent the failure before reporting it. Missing tests alone, formatting, naming preferences, and speculative future requirements are not defects. Do not inflate severity or invent findings to fill a quota; a review with no supported findings is valid. Do not claim tests were run without execution evidence. CI and required approvals remain the enforcement mechanisms.
+
+## Project Structure & Module Organization
+
+Riltra is a local-first Rust CLI and MCP server. The Cargo workspace contains one binary crate, `crates/cli`: implementation lives in `src/`, integration tests in `tests/`, and example helpers in `examples/`. Test fixtures and byte-exact golden outputs are under `crates/cli/tests/fixtures/` and `golden/`. Shared fixtures, protocol definitions, documentation, release scripts, and security tooling live in `fixtures/`, `proto/`, `docs/`, `release/`, and `security/` respectively.
+
+## Build, Test, and Development Commands
+
+Use stable Rust and Git. From the repository root:
+
+- `cargo build --locked` builds the CLI with the committed lockfile.
+- `cargo run -q -p riltra -- --help` runs the CLI and lists commands.
+- `cargo fmt --all -- --check` checks formatting; `cargo fmt --all` applies it.
+- `cargo clippy --all-targets -- -D warnings` checks lint warnings.
+- `cargo check --locked` checks compilation; `cargo test --locked` runs the test suite.
+- `cargo test --locked --test mcp` runs one integration test target.
+
+CI checks Windows, Linux, and macOS. Set `RILTRA_HOME` to a scratch directory when manually running commands that create registries or databases.
+
+## Coding Style & Testing
+
+Follow Rust 2021 conventions and rustfmt: four-space indentation, `snake_case` functions and modules, and `CamelCase` types. Add `// SPDX-License-Identifier: Apache-2.0` to new source files. Keep unit tests inline and integration tests in the relevant `crates/cli/tests/*.rs` target; use descriptive test names. Tests use Rust's built-in test framework and isolated temporary homes. Update fixtures and goldens deliberately, reviewing byte-exact output changes. No numeric coverage threshold is specified.
+
+Preserve deterministic JSON, evidence and freshness labels, path confinement, and read-only MCP behavior. Core paths must not access the network; external providers are opt-in. Do not hand-edit generated `scip_proto.rs`.
+
+## Commits & Pull Requests
+
+Recent commits use concise conventional-style subjects such as `test: document impact evidence coverage gaps` and `docs(e2): record baseline`. Every commit requires a DCO sign-off: use `git commit -s`. In pull requests, describe the change and its validation, link relevant issues, and include evidence for behavioral changes. Run formatting, Clippy, and tests before pushing. Document each new dependency's package, version, license, and origin in `docs/licensing.md` in the same PR; see `CONTRIBUTING.md` for licensing and benchmark requirements.
+
+Before committing or pushing, set GITLEAKS_BIN to your local pinned Gitleaks 8.30.1 executable if it is not on PATH. See security/README.md for installation and scan details.
