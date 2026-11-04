@@ -4,14 +4,10 @@ This roadmap says what Riltra is working toward and what it has decided not to b
 
 Riltra is pre-release, and its working rule is to claim only what the evidence supports. Most items below therefore end in something other people can check: a release, a published report, a fixed defect.
 
-## Now: the first pre-release
+## Now: after the first pre-release
 
-- **Publish `0.1.0` as a pre-release.** Native archives for Windows x64, Linux x64 and macOS Intel x64, each with a SHA-256 checksum and the third-party notices ([release/README.md](release/README.md)). No release has been published yet ([Project status](README.md#project-status)).
-- **Check the installers against published assets.** The installers have been checked on hosted runners against locally built archives; the same check against a published release has not run ([M10 consolidation, section 6](docs/m10-consolidation.md#6-release-readiness)).
-- **Make install URLs and repository metadata consistent.**
-- **Harden parsing and error handling.** A very deeply nested source file must not exhaust the stack, and the MCP server's failure handling must match what its own comments promise in release builds.
-- **Help agents use the tools.** The [agent setup guide](docs/guide/agent-setup.md) says when to call which tool and how to read its labels; the tool descriptions get the same treatment.
-- **Give CI time limits and concurrency control**, so a stuck runner cannot hold a required check indefinitely.
+- **Check the installers against the published assets.** The installers have been checked on hosted runners against locally built archives; the same check against the published `0.1.0` pre-release has not run ([M10 consolidation, section 6](docs/m10-consolidation.md#6-release-readiness)).
+- **Make the repository metadata consistent** with the README.
 - **Watch someone else install it.** One person outside the project installs from the release and calls one tool; their friction becomes issues.
 
 ## Next: test one narrow claim
