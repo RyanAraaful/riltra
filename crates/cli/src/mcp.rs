@@ -471,8 +471,10 @@ impl ServerHandler for RiltraMcp {
     }
 }
 
-/// Run synchronous domain work on the blocking pool; a panicked task is a
-/// classified `store_error`, never a dropped connection.
+/// Run synchronous domain work on the blocking pool. Where panics unwind
+/// (debug and test builds), a panicked task is a classified `store_error`. The
+/// release profile sets `panic = "abort"`, so in a release binary a panic ends
+/// the process before any join error exists.
 async fn blocking(f: impl FnOnce() -> CallToolResult + Send + 'static) -> CallToolResult {
     match tokio::task::spawn_blocking(f).await {
         Ok(result) => result,
