@@ -4,11 +4,24 @@
 
 Act as a correctness reviewer: look for regressions, invariant violations, algorithmic errors, and compatibility risks that passing tests or CI may miss. Follow changed behavior through relevant callers, error paths, and tests; compare with the base behavior and documented contract. For workflow changes, inspect triggers, permissions, conditions, dependencies, and cancellation or timeout effects on release artifacts.
 
+For each consequential change, identify the promised behavior, trace the implementation or evidence that establishes it, and try a concrete counterexample before accepting it. For an algorithm, check its preconditions, boundary cases and failure behavior against its callers; for a factual claim, ask whether the cited check could pass while the claim is false. Examine relevant unchanged code rather than treating the diff or a passing CI result as the complete proof. Choose checks relevant to the change, not a mechanical checklist applied to every file.
+
 - Preserve truthful evidence and freshness: incomplete, stale, or approximate results must not become complete, fresh, or exact claims. Preserve deterministic JSON and ordering where the contract requires it. Fix the computation or retain an honest limitation label rather than hiding missing evidence.
 - Preserve local-first trust boundaries: confine paths to their allowed roots, keep MCP read-only, and keep core operations offline. External providers require explicit opt-in. Reject unsafe input before side effects; preserve validation and error handling on failure paths.
 - Preserve existing CLI, MCP, JSON, and persisted-data contracts. Trace affected consumers before flagging a break; intentional contract changes need an explicit migration or compatibility path. Check empty and partial inputs, duplicate records, stale state, platform-specific paths, and interrupted operations when relevant to the change.
 
 Report actionable defects introduced by the PR, with a concrete triggering condition, user-visible consequence, and the smallest relevant changed line range. Support claims with code, a reproducible example, or an existing contract; state necessary assumptions. Check whether existing guards or callers already prevent the failure before reporting it. Missing tests alone, formatting, naming preferences, and speculative future requirements are not defects. Do not inflate severity or invent findings to fill a quota; a review with no supported findings is valid. Do not claim tests were run without execution evidence. CI and required approvals remain the enforcement mechanisms.
+
+### Documentation and evidence claims
+
+Documentation-only PRs require correctness review too. For each consequential new or strengthened claim (test completion, supported platforms, security properties, release readiness, accuracy or performance), trace it to the relevant implementation and primary evidence. The PR description and another document repeating the claim are not independent verification.
+
+- Inspect the referenced workflow and test assertions. Check the exact revision/tag, assets, inputs, runner architecture, permissions, conditional steps and failure propagation. A green job alone does not prove that the intended checks ran or that their assertions support the claim.
+- For cited Actions runs, inspect job/step conclusions and relevant logs when available. Match reported counts and outcomes to actual assertions; distinguish skipped checks, static checks, smoke tests and execution under an unprivileged account. Limit conclusions to the versions, platforms, corpus and conditions actually exercised.
+- Compare changed claims with related README, changelog, roadmap and release records. Preserve historical statements with dated amendments; flag only contradictions that materially mislead users or release decisions.
+- If primary evidence cannot be accessed, mark the claim as unverified in the review summary and name the missing evidence. Do not fabricate a defect or treat unavailable evidence as proof of failure. Never say a claim was verified from its wording alone.
+
+When the review interface supports a summary, briefly identify the claims checked, the evidence inspected (paths/revisions/run IDs), and remaining verification limits, including when there are no findings. Keep inline findings for supported actionable defects; do not inflate severity to bypass the interface's reporting threshold. These instructions guide review effort and do not guarantee external-log access or override the hosted review service's output format.
 
 ## Project Structure & Module Organization
 
