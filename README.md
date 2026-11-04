@@ -85,8 +85,14 @@ dependencies beyond itself:
 
 ## Quick start
 
-Prerequisites: a stable Rust toolchain and `git`. No releases are published
-yet — install the CLI from source:
+The [`0.1.0` pre-release](https://github.com/terapetralabs/riltra/releases/tag/v0.1.0)
+has native archives for Windows x64, Linux x64 and macOS Intel x64, each with a
+SHA-256 checksum. The release notes say what the evidence does and does not
+show. [release/INSTALL.md](release/INSTALL.md) describes the user-level
+installers (`release/install.ps1` and `release/install.sh`), where they put the
+files, and how to remove Riltra.
+
+To build from source instead, you need a stable Rust toolchain and `git`:
 
 ```powershell
 git clone https://github.com/terapetralabs/riltra.git
@@ -169,8 +175,8 @@ freshness, provenance, and `POTENTIAL_CALL`/`CALLS` semantics as the CLI.
 
 ### Connect a coding agent
 
-Install Riltra once using the command above, then configure each coding agent
-you use. Each client starts the same local stdio server with `riltra mcp`.
+Install Riltra once ([quick start](#quick-start)), then configure each coding
+agent you use. Each client starts the same local stdio server with `riltra mcp`.
 These examples use Riltra's default data directory; set `RILTRA_HOME` only if
 you want to store its registry and indexes elsewhere.
 
@@ -214,8 +220,10 @@ existing `mcp` object if one is already present:
 ```
 
 Restart the client after configuration and confirm that the Riltra tools are
-listed. If `riltra` is not found, check that Cargo's binary directory is on
-`PATH`, or configure the full path to the installed executable.
+listed. If `riltra` is not found, check that the directory holding it is on
+`PATH` (Cargo's binary directory for a source install, the directory the
+installer printed for an archive install), or configure the full path to the
+installed executable.
 
 For guidance on when an agent should call each tool and how to read its
 answers, see the [agent setup guide](docs/guide/agent-setup.md).
@@ -280,8 +288,9 @@ with `index`, never silently reused.
 
 ## Project status
 
-Riltra is in pre-release development; `0.1.0` has release candidates but no
-published release. Continuous integration runs format, compile, lint, and test
+Riltra is in pre-release development; `0.1.0` is published as a
+[pre-release](https://github.com/terapetralabs/riltra/releases/tag/v0.1.0), not
+as a stable release. Continuous integration runs format, compile, lint, and test
 checks on Windows, Linux, and macOS (x64) for every change. A manually started
 workflow builds the native archives of a release candidate, checks each with a
 clean-install smoke and writes their checksums; see
