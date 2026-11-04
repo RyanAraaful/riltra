@@ -217,6 +217,9 @@ Restart the client after configuration and confirm that the Riltra tools are
 listed. If `riltra` is not found, check that Cargo's binary directory is on
 `PATH`, or configure the full path to the installed executable.
 
+For guidance on when an agent should call each tool and how to read its
+answers, see the [agent setup guide](docs/guide/agent-setup.md).
+
 See [docs/pilots/cp7a/README.md](docs/pilots/cp7a/README.md) for the CP7-A
 benchmark report, raw evidence, and limitations.
 
@@ -282,6 +285,15 @@ checks on Windows, Linux, and macOS (x64) for every change. A manually started
 workflow builds the native archives of a release candidate, checks each with a
 clean-install smoke and writes their checksums; see
 [release/README.md](release/README.md). The M9 evidence is under `docs/m9-*.md`.
+
+## Documentation
+
+- [Roadmap](ROADMAP.md): what is planned, and what is not.
+- [Changelog](CHANGELOG.md): notable changes per release.
+- [Agent setup guide](docs/guide/agent-setup.md): when an agent should call
+  Riltra and how to read its answers.
+- [Documentation index](docs/README.md): guides, milestone records, and
+  evidence data.
 
 ## Contributing
 
