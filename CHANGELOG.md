@@ -6,9 +6,9 @@ All notable changes to Riltra are recorded here. The format follows [Keep a Chan
 
 Changes made after `0.1.0` is cut are listed here.
 
-## [0.1.0] - not yet released
+## [0.1.0] - 2026-11-04
 
-First pre-release. The version number is already in the build; the date is filled in when the release is tagged. Native archives for Windows x64, Linux x64 and macOS Intel x64 are built by a manually started workflow ([release/README.md](release/README.md)).
+First pre-release. The version number is already in the build. Native archives for Windows x64, Linux x64 and macOS Intel x64 are built by a manually started workflow ([release/README.md](release/README.md)).
 
 ### Added
 
