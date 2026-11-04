@@ -6,7 +6,6 @@ Riltra is pre-release, and its working rule is to claim only what the evidence s
 
 ## Now: after the first pre-release
 
-- **Check the installers against the published assets.** The installers have been checked on hosted runners against locally built archives; the same check against the published `0.1.0` pre-release has not run ([M10 consolidation, section 6](docs/m10-consolidation.md#6-release-readiness)).
 - **Make the repository metadata consistent** with the README.
 - **Watch someone else install it.** One person outside the project installs from the release and calls one tool; their friction becomes issues.
 

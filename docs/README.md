@@ -95,6 +95,7 @@ Semantic providers, the C++ semantic index and reference resolution:
 - [M10 design gate](m10-design-gate.md)
 - [M10 Task 5: distribution decision record, Option B installers](m10-task5-decision.md)
 - [M10 consolidation and owner decision input](m10-consolidation.md)
+- [M10 amendment: Phase B installer checks against the published 0.1.0 release](m10-phase-b-amendment-2026-11-04.md)
 
 ### What, Impact and Why: correctness studies
 
