@@ -498,6 +498,32 @@ fn mcp_tools_list_advertises_the_thirteen_tools() {
 }
 
 #[test]
+fn every_tool_description_says_when_to_call_it() {
+    let h = home("when-to-call");
+    let mut s = ready(&h);
+    s.send(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#);
+    let v = s.recv();
+    let tools = v["result"]["tools"].as_array().expect("tools array");
+    let missing: Vec<&str> = tools
+        .iter()
+        .filter(|t| {
+            !t["description"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("When to call: ")
+        })
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "tools whose description has no \"When to call: \" clause: {missing:?}"
+    );
+    let (code, _) = s.finish();
+    assert_eq!(code, 0, "clean disconnect must exit 0");
+    assert_home_untouched(&h);
+}
+
+#[test]
 fn knowledge_at_anchor_mcp_matches_cli_and_keeps_legacy_store_read_only() {
     let h = home("knowledge-at-anchor");
     let dir = home("knowledge-at-anchor-repo");
