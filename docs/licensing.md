@@ -1,5 +1,11 @@
 # Dependency & License Inventory
 
+## CI security tooling
+
+| Package | Version | License | Origin | Distribution |
+|---|---|---|---|---|
+| cargo-audit | 0.22.2 | Apache-2.0 OR MIT | https://github.com/rustsec/rustsec/tree/main/cargo-audit (crates.io) | CI/local audit tool only; not shipped with Riltra |
+
 Re-check sources at pin time before any release.
 Policy: every bundled grammar, indexer binary, or vendored source needs an
 entry here (package + exact version + license + origin URL + redistributability
