@@ -10,6 +10,17 @@ Act as a correctness reviewer: look for regressions, invariant violations, algor
 
 Report actionable defects introduced by the PR, with a concrete triggering condition, user-visible consequence, and the smallest relevant changed line range. Support claims with code, a reproducible example, or an existing contract; state necessary assumptions. Check whether existing guards or callers already prevent the failure before reporting it. Missing tests alone, formatting, naming preferences, and speculative future requirements are not defects. Do not inflate severity or invent findings to fill a quota; a review with no supported findings is valid. Do not claim tests were run without execution evidence. CI and required approvals remain the enforcement mechanisms.
 
+### Documentation and evidence claims
+
+Documentation-only PRs require correctness review too. For each consequential new or strengthened claim (test completion, supported platforms, security properties, release readiness, accuracy or performance), trace it to the relevant implementation and primary evidence. The PR description and another document repeating the claim are not independent verification.
+
+- Inspect the referenced workflow and test assertions. Check the exact revision/tag, assets, inputs, runner architecture, permissions, conditional steps and failure propagation. A green job alone does not prove that the intended checks ran or that their assertions support the claim.
+- For cited Actions runs, inspect job/step conclusions and relevant logs when available. Match reported counts and outcomes to actual assertions; distinguish skipped checks, static checks, smoke tests and execution under an unprivileged account. Limit conclusions to the versions, platforms, corpus and conditions actually exercised.
+- Compare changed claims with related README, changelog, roadmap and release records. Preserve historical statements with dated amendments; flag only contradictions that materially mislead users or release decisions.
+- If primary evidence cannot be accessed, mark the claim as unverified in the review summary and name the missing evidence. Do not fabricate a defect or treat unavailable evidence as proof of failure. Never say a claim was verified from its wording alone.
+
+When the review interface supports a summary, briefly identify the claims checked, the evidence inspected (paths/revisions/run IDs), and remaining verification limits, including when there are no findings. Keep inline findings for supported actionable defects; do not inflate severity to bypass the interface's reporting threshold. These instructions guide review effort and do not guarantee external-log access or override the hosted review service's output format.
+
 ## Project Structure & Module Organization
 
 Riltra is a local-first Rust CLI and MCP server. The Cargo workspace contains one binary crate, `crates/cli`: implementation lives in `src/`, integration tests in `tests/`, and example helpers in `examples/`. Test fixtures and byte-exact golden outputs are under `crates/cli/tests/fixtures/` and `golden/`. Shared fixtures, protocol definitions, documentation, release scripts, and security tooling live in `fixtures/`, `proto/`, `docs/`, `release/`, and `security/` respectively.
