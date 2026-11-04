@@ -350,6 +350,7 @@ pub fn relationship_proof(lang: Language, src: &[u8]) -> RelationshipProof {
     if parser.set_language(&ts_language(lang)).is_err() {
         return proof;
     }
+    // shortcut: no parse time limit either; see `parse_source`.
     let Some(tree) = parser.parse(src, None) else {
         return proof;
     };
@@ -836,7 +837,31 @@ fn position_of(src: &[u8], off: usize) -> (u32, u32) {
     (line, col)
 }
 
+/// Visit every node under `root` in pre-order. Iterative on purpose: nesting
+/// depth is bounded only by the file size cap, and a recursive walk overflows
+/// the stack on deeply nested source.
 fn visit(
+    lang: Language,
+    root: tree_sitter::Node,
+    src: &[u8],
+    facts: &mut FileFacts,
+    macros: &HashSet<&str>,
+) {
+    let mut cursor = root.walk();
+    loop {
+        visit_node(lang, cursor.node(), src, facts, macros);
+        if cursor.goto_first_child() {
+            continue;
+        }
+        while !cursor.goto_next_sibling() {
+            if !cursor.goto_parent() {
+                return;
+            }
+        }
+    }
+}
+
+fn visit_node(
     lang: Language,
     node: tree_sitter::Node,
     src: &[u8],
@@ -900,11 +925,6 @@ fn visit(
             _ => {}
         },
     }
-    for i in 0..node.child_count() {
-        if let Some(child) = node.child(i) {
-            visit(lang, child, src, facts, macros);
-        }
-    }
 }
 
 /// Parse UTF-8 source. Tree-sitter always produces a tree (error recovery);
@@ -925,6 +945,9 @@ pub fn parse_source(lang: Language, src: &[u8]) -> FileFacts {
         facts.errors += 1;
         return facts;
     }
+    // shortcut: no parse time limit or budget; a time limit would make the
+    // index depend on the machine. Add one at the first parse that hangs
+    // (`parse_with_options` with a progress callback).
     if let Some(tree) = parser.parse(src, None) {
         let macros = if lang == Language::Cpp {
             function_macro_names(tree.root_node(), src)
@@ -1726,5 +1749,31 @@ mod tests {
         assert_eq!(occurrence_confidence(ROLE_MACRO_ARGUMENT), "candidate");
         // An unknown role never claims more than a candidate.
         assert_eq!(occurrence_confidence("anything-else"), "candidate");
+    }
+
+    #[test]
+    fn deeply_nested_source_does_not_overflow_the_stack() {
+        // About 400 KB, inside the 1 MiB file cap, and far deeper than a 2 MiB
+        // stack can recurse through: extraction must not depend on tree depth.
+        const DEPTH: usize = 200_000;
+        let nest = |head: &str, open: &str, close: &str, tail: &str| {
+            format!("{head}{}{}{tail}", open.repeat(DEPTH), close.repeat(DEPTH))
+        };
+        let cases = [
+            (Language::Python, nest("x = ", "[", "]", "\n")),
+            (Language::JavaScript, nest("x = ", "[", "]", ";\n")),
+            (Language::Cpp, nest("int x[] = ", "{", "}", ";\n")),
+        ];
+        for (lang, src) in cases {
+            let name = language_name(lang);
+            let facts = std::thread::Builder::new()
+                .stack_size(2 * 1024 * 1024)
+                .spawn(move || parse_source(lang, src.as_bytes()))
+                .unwrap()
+                .join()
+                .unwrap_or_else(|_| panic!("{name}: extraction panicked"));
+            assert_eq!(facts.errors, 0, "{name}: nested source parses cleanly");
+            assert!(facts.definitions.is_empty(), "{name}");
+        }
     }
 }
