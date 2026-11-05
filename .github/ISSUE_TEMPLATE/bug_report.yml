@@ -1,0 +1,98 @@
+name: Bug report
+description: Report a reproducible problem with Riltra.
+title: "bug: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        Do not include credentials, private source code, or identifying local
+        paths. Sanitize logs and examples before submitting. For vulnerabilities,
+        use the private reporting link beside the issue forms.
+  - type: input
+    id: version
+    attributes:
+      label: Riltra version
+      description: Include the full output of `riltra --version`.
+      placeholder: riltra 0.1.0
+    validations:
+      required: true
+  - type: dropdown
+    id: origin
+    attributes:
+      label: Binary origin
+      description: How was this binary installed or built?
+      options:
+        - GitHub release archive
+        - Built or installed from source with Cargo
+        - Other (describe below)
+    validations:
+      required: true
+  - type: input
+    id: os_arch
+    attributes:
+      label: Operating system and architecture
+      description: Include OS/version and CPU architecture (for example, Windows 11 x64).
+    validations:
+      required: true
+  - type: input
+    id: client
+    attributes:
+      label: CLI or client
+      description: CLI, MCP client and version, or other client if relevant.
+    validations:
+      required: false
+  - type: input
+    id: language
+    attributes:
+      label: Language or file type
+      description: Include the relevant language and extension, if applicable.
+    validations:
+      required: false
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: Give the smallest sequence of commands or actions that reproduces the problem. Use synthetic data where possible.
+      placeholder: |
+        1. Run ...
+        2. Query ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected_actual
+    attributes:
+      label: Expected and actual behavior
+      description: Include the relevant output, with secrets and private paths removed.
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Tool and arguments
+      description: Include the Riltra command or MCP tool name and arguments, if relevant. Redact private paths and values.
+    validations:
+      required: false
+  - type: textarea
+    id: index_freshness
+    attributes:
+      label: Index and freshness
+      description: If relevant, say whether an index existed and include the freshness/status label shown by Riltra.
+    validations:
+      required: false
+  - type: textarea
+    id: prompt_config
+    attributes:
+      label: Relevant prompt or configuration
+      description: Include only the prompt or configuration needed to explain this issue; remove private values, credentials, and paths.
+    validations:
+      required: false
+  - type: textarea
+    id: logs_repro
+    attributes:
+      label: Sanitized logs or minimal synthetic reproduction
+      description: Optional. Attach or paste only the relevant sanitized output and a minimal synthetic example. Do not attach private repositories or source files.
+      render: text
+    validations:
+      required: false

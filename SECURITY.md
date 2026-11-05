@@ -28,8 +28,17 @@ supported.
 Use the repository host's **private vulnerability reporting** feature for this
 repo. Do not open a public issue for unpatched security bugs.
 
+[Report a vulnerability privately](https://github.com/terapetralabs/riltra/security/advisories/new).
+Do not attach private source code, credentials, or unredacted logs to a public
+issue or pull request.
+
 Include: affected version/commit, OS, reproduction steps, and impact.
 We will acknowledge within 7 days and publish a fix + advisory once resolved.
+
+For ordinary bugs and feature requests, use the public issue forms linked from
+the repository's Issues page. The bug form asks for diagnostic details; remove
+secrets, private source, and identifying local paths before sharing logs or
+examples.
 
 ## Scope notes
 
