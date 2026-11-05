@@ -47,7 +47,7 @@ profile, the registry, or a system-wide path. On Linux and macOS the shared
 `~/.local/bin` directory receives only the `riltra` symlink; the notices stay in
 the private payload directory.
 
-## Reinstall and removal
+## Reinstall
 
 Run the same installer again. It replaces only files recorded in the Riltra
 manifest and refuses to overwrite an unrelated `riltra` file or symlink.
@@ -83,8 +83,6 @@ executable and restart the client. Check `riltra --version` and the client's
 `riltra_health` result. Follow the release notes if an index rebuild is needed.
 
 ## Removal
-
-Removal is manual:
 
 - Windows: delete `%LOCALAPPDATA%\Programs\Riltra`.
 - Linux and macOS: delete the `riltra` symlink in `~/.local/bin` (only after
