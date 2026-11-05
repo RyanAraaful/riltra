@@ -279,44 +279,21 @@ pub fn relationship_proof(lang: Language, src: &[u8]) -> RelationshipProof {
         node.child_by_field_name("name")
             .or_else(|| c_name_node(node))
     }
-    /// Nearest enclosing callable definition of `node`, if any.
-    fn enclosing_owner(node: tree_sitter::Node<'_>) -> Option<(usize, usize)> {
-        let mut parent = node.parent();
-        while let Some(p) = parent {
-            if callable(p) && name(p).is_some() {
-                return Some((p.start_byte(), p.end_byte()));
-            }
-            if matches!(
-                p.kind(),
-                "lambda"
-                    | "lambda_expression"
-                    | "arrow_function"
-                    | "closure_expression"
-                    | "function_expression"
-                    | "generator_function"
-                    | "class_definition"
-                    | "class_declaration"
-                    | "class_specifier"
-                    | "struct_specifier"
-            ) {
-                return None;
-            }
-            parent = p.parent();
-        }
-        None
+    /// What a node's ancestors say about it: the nearest enclosing named
+    /// callable definition (none when a lambda, closure or class is closer)
+    /// and the nearest enclosing `block`. Each node passes its own
+    /// contribution to its children, so no node climbs its `parent()` chain.
+    #[derive(Clone, Copy)]
+    struct Scope {
+        owner: Option<(usize, usize)>,
+        block: Option<(usize, usize)>,
     }
-    fn enclosing_block(node: tree_sitter::Node<'_>) -> Option<(usize, usize)> {
-        let mut parent = node.parent();
-        while let Some(p) = parent {
-            if p.kind() == "block" {
-                return Some((p.start_byte(), p.end_byte()));
-            }
-            parent = p.parent();
-        }
-        None
-    }
-    fn rust_alias(node: tree_sitter::Node<'_>) -> Option<LocalFunctionAlias> {
-        let block = node.parent().filter(|p| p.kind() == "block")?;
+    /// `parent` is the node the walk reached `node` from.
+    fn rust_alias(
+        node: tree_sitter::Node<'_>,
+        parent: Option<tree_sitter::Node<'_>>,
+    ) -> Option<LocalFunctionAlias> {
+        let block = parent.filter(|p| p.kind() == "block")?;
         let pattern = node.child_by_field_name("pattern")?;
         if pattern.kind() != "identifier"
             || node.child_by_field_name("type").is_some()
@@ -357,23 +334,26 @@ pub fn relationship_proof(lang: Language, src: &[u8]) -> RelationshipProof {
     if tree.root_node().has_error() {
         return proof;
     }
-    let mut pending = vec![tree.root_node()];
-    while let Some(node) = pending.pop() {
-        if callable(node) {
-            if let Some(n) = name(node) {
-                proof.declarations.push((n.start_byte(), n.end_byte()));
-            }
+    let mut pending = vec![(
+        tree.root_node(),
+        None,
+        Scope {
+            owner: None,
+            block: None,
+        },
+    )];
+    while let Some((node, parent, scope)) = pending.pop() {
+        let declared = if callable(node) { name(node) } else { None };
+        if let Some(n) = declared {
+            proof.declarations.push((n.start_byte(), n.end_byte()));
         }
+        let span = (node.start_byte(), node.end_byte());
         if matches!(node.kind(), "call" | "call_expression") {
-            proof
-                .owners
-                .insert((node.start_byte(), node.end_byte()), enclosing_owner(node));
-            proof
-                .call_blocks
-                .insert((node.start_byte(), node.end_byte()), enclosing_block(node));
+            proof.owners.insert(span, scope.owner);
+            proof.call_blocks.insert(span, scope.block);
         }
         if lang == Language::Rust && node.kind() == "let_declaration" {
-            if let Some(alias) = rust_alias(node) {
+            if let Some(alias) = rust_alias(node, parent) {
                 proof.local_function_aliases.push(alias);
             }
         }
@@ -383,12 +363,38 @@ pub fn relationship_proof(lang: Language, src: &[u8]) -> RelationshipProof {
             if let Some((ty, args)) = direct_init_parts(node) {
                 proof
                     .owners
-                    .insert((ty.start_byte(), args.end_byte()), enclosing_owner(node));
+                    .insert((ty.start_byte(), args.end_byte()), scope.owner);
             }
         }
+        let inner = Scope {
+            owner: if declared.is_some() {
+                Some(span)
+            } else if matches!(
+                node.kind(),
+                "lambda"
+                    | "lambda_expression"
+                    | "arrow_function"
+                    | "closure_expression"
+                    | "function_expression"
+                    | "generator_function"
+                    | "class_definition"
+                    | "class_declaration"
+                    | "class_specifier"
+                    | "struct_specifier"
+            ) {
+                None
+            } else {
+                scope.owner
+            },
+            block: if node.kind() == "block" {
+                Some(span)
+            } else {
+                scope.block
+            },
+        };
         for i in (0..node.named_child_count()).rev() {
             if let Some(child) = node.named_child(i) {
-                pending.push(child);
+                pending.push((child, Some(node), inner));
             }
         }
     }
@@ -1775,5 +1781,133 @@ mod tests {
             assert_eq!(facts.errors, 0, "{name}: nested source parses cleanly");
             assert!(facts.definitions.is_empty(), "{name}");
         }
+    }
+
+    /// Source text of the owner and block recorded for the call written as `text`.
+    fn scope_of<'a>(
+        src: &'a str,
+        proof: &super::RelationshipProof,
+        text: &str,
+    ) -> (Option<&'a str>, Option<&'a str>) {
+        let start = src.find(text).unwrap();
+        let key = (start, start + text.len());
+        let slice = |span: Option<(usize, usize)>| span.map(|(from, to)| &src[from..to]);
+        (slice(proof.owners[&key]), slice(proof.call_blocks[&key]))
+    }
+
+    #[test]
+    fn relationship_proof_attributes_rust_calls_to_the_nearest_definition_and_block() {
+        let src = concat!(
+            "fn outer() {\n",
+            "    first();\n",
+            "    fn inner() {\n",
+            "        second();\n",
+            "    }\n",
+            "    let alias = inner;\n",
+            "    let run = || { third(); };\n",
+            "    run();\n",
+            "}\n",
+            "static S: u8 = side();\n",
+        );
+        let proof = super::relationship_proof(Language::Rust, src.as_bytes());
+        let (owner, block) = scope_of(src, &proof, "first()");
+        assert!(owner.unwrap().starts_with("fn outer()"));
+        let outer_body = block.unwrap();
+        assert!(outer_body.starts_with("{\n    first();") && outer_body.ends_with("\n}"));
+        let (owner, block) = scope_of(src, &proof, "second()");
+        assert!(owner.unwrap().starts_with("fn inner()"));
+        assert_eq!(block, Some("{\n        second();\n    }"));
+        // A closure ends the owner chain, but its body is still the nearest block.
+        assert_eq!(
+            scope_of(src, &proof, "third()"),
+            (None, Some("{ third(); }"))
+        );
+        let (owner, block) = scope_of(src, &proof, "run()");
+        assert!(owner.unwrap().starts_with("fn outer()"));
+        assert_eq!(block, Some(outer_body));
+        // Outside every definition and block there is neither.
+        assert_eq!(scope_of(src, &proof, "side()"), (None, None));
+        let names: Vec<_> = proof
+            .declarations
+            .iter()
+            .map(|&(from, to)| &src[from..to])
+            .collect();
+        assert_eq!(names, ["outer", "inner"]);
+        let aliases: Vec<_> = proof
+            .local_function_aliases
+            .iter()
+            .map(|a| {
+                (
+                    &src[a.binding.0..a.binding.1],
+                    &src[a.target.0..a.target.1],
+                    &src[a.block.0..a.block.1],
+                )
+            })
+            .collect();
+        assert_eq!(aliases, [("alias", "inner", outer_body)]);
+    }
+
+    #[test]
+    fn relationship_proof_attributes_python_calls_to_the_nearest_definition_and_block() {
+        let src = concat!(
+            "def outer():\n",
+            "    first()\n",
+            "    class K:\n",
+            "        attr = second()\n",
+            "        def method(self):\n",
+            "            third()\n",
+            "    f = lambda: fourth()\n",
+            "fifth()\n",
+        );
+        let proof = super::relationship_proof(Language::Python, src.as_bytes());
+        let (owner, block) = scope_of(src, &proof, "first()");
+        assert!(owner.unwrap().starts_with("def outer():"));
+        let outer_body = block.unwrap();
+        assert!(outer_body.starts_with("first()") && outer_body.contains("fourth()"));
+        // A class ends the owner chain; its body is the nearest block...
+        let (owner, block) = scope_of(src, &proof, "second()");
+        assert_eq!(owner, None);
+        let class_body = block.unwrap();
+        assert!(class_body.starts_with("attr = second()") && class_body.contains("third()"));
+        // ...but a method inside it is a new owner with a block of its own.
+        let (owner, block) = scope_of(src, &proof, "third()");
+        assert!(owner.unwrap().starts_with("def method(self):"));
+        assert_eq!(block.map(str::trim_end), Some("third()"));
+        // A lambda ends the owner chain without being a block.
+        assert_eq!(scope_of(src, &proof, "fourth()"), (None, Some(outer_body)));
+        assert_eq!(scope_of(src, &proof, "fifth()"), (None, None));
+        let names: Vec<_> = proof
+            .declarations
+            .iter()
+            .map(|&(from, to)| &src[from..to])
+            .collect();
+        assert_eq!(names, ["outer", "method"]);
+    }
+
+    #[test]
+    fn relationship_proof_walks_deeply_nested_calls_within_a_time_bound() {
+        // Guards the walk against per-call ancestor lookups. The walk over 300
+        // nested calls takes milliseconds; the bound is generous for slow
+        // runners.
+        const CALLS: usize = 300;
+        let src = format!(
+            "fn f() {{ {}1{} }}\n",
+            "g(".repeat(CALLS),
+            ")".repeat(CALLS)
+        );
+        let start = std::time::Instant::now();
+        let proof = super::relationship_proof(Language::Rust, src.as_bytes());
+        let elapsed = start.elapsed();
+        let end = src.trim_end().len();
+        assert_eq!(proof.owners.len(), CALLS);
+        assert!(proof.owners.values().all(|owner| *owner == Some((0, end))));
+        assert!(proof
+            .call_blocks
+            .values()
+            .all(|block| *block == Some((7, end))));
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "{CALLS} nested calls took {elapsed:?}"
+        );
     }
 }
