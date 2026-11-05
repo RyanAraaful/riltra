@@ -1728,17 +1728,23 @@ fn called_name(definition: &str) -> &str {
     definition.rsplit("::").next().unwrap_or(definition)
 }
 
+struct CallerCandidates {
+    paths: Vec<String>,
+    aliases: Vec<(String, String)>,
+}
+
 fn caller_candidate_paths(
     tx: &rusqlite::Connection,
     snapshot_id: i64,
     anchor: &EdgeAnchor,
-) -> Result<Vec<String>, String> {
+) -> Result<CallerCandidates, String> {
     let id_map = store::file_id_map(tx, snapshot_id)?;
     let paths: BTreeMap<i64, &str> = id_map
         .iter()
         .map(|(p, (id, _))| (*id, p.as_str()))
         .collect();
     let mut linked = BTreeSet::from([anchor.path.clone()]);
+    let mut aliases = BTreeSet::new();
     if let Some(src_root) = rust_crate_src_root(&anchor.path) {
         // Fully qualified crate:: calls need no `use` row to connect their file.
         // shortcut: one src root can contain separate targets; upgrade when Cargo target metadata is available.
@@ -1752,6 +1758,21 @@ fn caller_candidate_paths(
     // Local SCIP identities never gain cross-document name candidates.
     if anchor.doc.is_none() {
         let imports = store::imports_for(tx, snapshot_id)?;
+        if let Some(target_name) = anchor.candidate_display.as_deref().map(called_name) {
+            for import in &imports {
+                if import.language == "python" {
+                    if let (Some(path), Some(text)) =
+                        (paths.get(&import.file_id), import.text.as_deref())
+                    {
+                        if import_mentions_path(path, "python", text, &anchor.path) {
+                            if let Some(alias) = python_import_alias(text, target_name) {
+                                aliases.insert(((*path).to_string(), alias.to_string()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
         let mut targets = vec![anchor.path.clone()];
         targets.extend(declaring_headers(
             tx,
@@ -1766,7 +1787,34 @@ fn caller_candidate_paths(
             link_includers(&mut linked, &imports, &id_map, &paths, target);
         }
     }
-    Ok(linked.into_iter().collect())
+    Ok(CallerCandidates {
+        paths: linked.into_iter().collect(),
+        aliases: aliases.into_iter().collect(),
+    })
+}
+
+/// A narrow syntax candidate for `from module import symbol as alias`.
+/// Module-to-file matching is checked by the caller before accepting it.
+fn python_import_alias<'a>(text: &'a str, symbol: &str) -> Option<&'a str> {
+    let words: Vec<_> = text.split_whitespace().collect();
+    match words.as_slice() {
+        ["from", _, "import", imported, "as", alias]
+            if *imported == symbol
+                && is_python_identifier(imported)
+                && is_python_identifier(alias) =>
+        {
+            Some(alias)
+        }
+        _ => None,
+    }
+}
+
+fn is_python_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c == '_' || c.is_ascii_alphabetic())
+        && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
 }
 
 /// Add every file whose imports name `target`.
@@ -2232,10 +2280,13 @@ pub(crate) fn edge_query_conn(
     // Callers are matched by name only for a callable anchor: a data member
     // takes no call by name, so a same-named method call is never its caller.
     let by_name = request.direction == EdgeDir::Callers && !anchor.data_member;
-    let paths = if by_name {
+    let candidates = if by_name {
         caller_candidate_paths(&tx, snapshot.id, &anchor)?
     } else {
-        Vec::new()
+        CallerCandidates {
+            paths: Vec::new(),
+            aliases: Vec::new(),
+        }
     };
     let selection = store::EdgeSelection {
         snapshot_id: snapshot.id,
@@ -2246,7 +2297,8 @@ pub(crate) fn edge_query_conn(
         } else {
             None
         },
-        candidate_paths: &paths,
+        candidate_paths: &candidates.paths,
+        candidate_aliases: &candidates.aliases,
         syntax_aliases: &aliases,
     };
     let counts = store::selected_edge_counts(&tx, &selection)?;
@@ -4394,6 +4446,127 @@ mod tests {
                 && hit.edge.precision == "Heuristic"
                 && hit.edge.callee.is_none()
         }));
+    }
+
+    #[test]
+    fn python_import_alias_callers_are_candidates_only_for_the_imported_target() {
+        let home = tmpdir("python-alias-callers-home");
+        let repo = tmpdir("python-alias-callers-repo");
+        std::fs::create_dir_all(repo.join("pkg")).unwrap();
+        std::fs::create_dir_all(repo.join("other")).unwrap();
+        std::fs::write(repo.join("pkg/mod.py"), b"def target():\n    pass\n").unwrap();
+        std::fs::write(
+            repo.join("main.py"),
+            b"from pkg.mod import target as alias\ndef caller():\n    alias()\n",
+        )
+        .unwrap();
+        std::fs::write(
+            repo.join("unrelated_module.py"),
+            b"from other.mod import target as alias\ndef caller():\n    alias()\n",
+        )
+        .unwrap();
+        std::fs::write(
+            repo.join("unrelated_symbol.py"),
+            b"from pkg.mod import other as alias\ndef caller():\n    alias()\n",
+        )
+        .unwrap();
+        std::fs::write(
+            repo.join("module_alias.py"),
+            b"import pkg.mod as alias\ndef caller():\n    alias()\n",
+        )
+        .unwrap();
+        std::fs::write(
+            repo.join("shadowed.py"),
+            b"from pkg.mod import target as alias\ndef caller(alias):\n    alias()\n",
+        )
+        .unwrap();
+        build_full(&home, "r", &repo).unwrap();
+        let conn = store::open_live(&store::db_path(&home, "r")).unwrap();
+        let snapshot = store::latest_snapshot(&conn).unwrap().unwrap();
+        let live = super::live_state_for(&conn, &snapshot).unwrap();
+        let (file_id, digest) =
+            store::file_id_map(&conn, snapshot.id).unwrap()["pkg/mod.py"].clone();
+        let import_id = store::insert_semantic_import(
+            &conn,
+            &store::SemanticImport {
+                snapshot_id: snapshot.id,
+                provider_name: "scip-import".to_string(),
+                provider_version: "v".to_string(),
+                capability: "definitions,references".to_string(),
+                project_root: repo.to_string_lossy().into_owned(),
+                text_encoding: "UTF8".to_string(),
+                artifact_id: "python-alias-target".to_string(),
+                source_revision: crate::semantic::revision_string(&live),
+                claimed_source_digest: String::new(),
+                content_identity: live.content_identity.clone(),
+                external_symbols: "[]".to_string(),
+                verification: "Unverified".to_string(),
+            },
+        )
+        .unwrap();
+        store::insert_semantic_facts(
+            &conn,
+            &[store::SemanticFact {
+                snapshot_id: snapshot.id,
+                import_id,
+                file_id: Some(file_id),
+                rel_path: "pkg/mod.py".to_string(),
+                file_digest: digest,
+                symbol_uri: Some("scip-test pkg 1 pkg.mod/target().".to_string()),
+                display_name: None,
+                roles: 1,
+                start_line: 0,
+                start_col: 4,
+                end_line: 0,
+                end_col: 10,
+                byte_start: 4,
+                byte_end: 10,
+                precision: "Exact".to_string(),
+                relationships: "[]".to_string(),
+                external: false,
+            }],
+        )
+        .unwrap();
+        drop(conn);
+
+        let result = super::edge_query(
+            &home,
+            "r",
+            &repo,
+            &super::EdgeRequest {
+                anchor: super::SpanQuery {
+                    rel: "pkg/mod.py",
+                    line1: 1,
+                    col1: 6,
+                    refs: false,
+                },
+                symbol: None,
+                direction: super::EdgeDir::Callers,
+                limit: 20,
+                offset: 0,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(result.anchor.kind.as_str(), "semantic");
+        assert_eq!(result.anchor.display, None);
+        assert_eq!(result.anchor.candidate_display.as_deref(), Some("target"));
+        assert_eq!(
+            result
+                .edges
+                .iter()
+                .map(|hit| hit.edge.caller_path.as_str())
+                .collect::<Vec<_>>(),
+            ["main.py", "shadowed.py"]
+        );
+        for hit in &result.edges {
+            assert_eq!(hit.edge.edge_kind, "POTENTIAL_CALL");
+            assert_eq!(hit.edge.callee_name, "alias");
+            assert_eq!(hit.edge.precision, "Heuristic");
+            assert_eq!(hit.verification, "Unverified");
+            assert_eq!(hit.edge.unresolved.as_deref(), Some("alias"));
+            assert_eq!(hit.edge.callee, None);
+        }
     }
 
     #[test]

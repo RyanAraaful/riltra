@@ -1335,6 +1335,7 @@ pub fn traverse(
                 inbound: false,
                 candidate_name: None,
                 candidate_paths: &[],
+                candidate_aliases: &[],
                 syntax_aliases: &aliases,
             };
             if budget.expired() {
@@ -1574,6 +1575,7 @@ pub fn traverse_impact(
                 inbound: true,
                 candidate_name: None,
                 candidate_paths: &[],
+                candidate_aliases: &[],
                 syntax_aliases: &[],
             };
             if prefix.len() == budget.depth {
