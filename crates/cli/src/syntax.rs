@@ -438,7 +438,12 @@ fn push_import(facts: &mut FileFacts, node: tree_sitter::Node, src: &[u8]) {
     }
     let pos = node.start_position();
     // Both end coordinates come from the same trimmed offset.
-    let (end_line, end_col) = position_of(src, end);
+    let (end_line, end_col) = position_from(
+        src,
+        node.start_byte(),
+        ((pos.row + 1) as u32, (pos.column + 1) as u32),
+        end,
+    );
     let span = Span {
         start_line: (pos.row + 1) as u32,
         start_col: (pos.column + 1) as u32,
@@ -817,8 +822,13 @@ fn terminal_span(src: &[u8], callee: tree_sitter::Node) -> Option<CalleeSpan> {
     if start >= callee_be {
         return None;
     }
-    let (start_line, start_col) = position_of(src, start);
-    let (end_line, end_col) = position_of(src, callee_be);
+    let start_point = callee.start_position();
+    let start_pos = (
+        (start_point.row + 1) as u32,
+        (start_point.column + 1) as u32,
+    );
+    let (start_line, start_col) = position_from(src, callee_bs, start_pos, start);
+    let (end_line, end_col) = position_from(src, callee_bs, start_pos, callee_be);
     Some(CalleeSpan {
         start_line,
         start_col,
@@ -829,18 +839,22 @@ fn terminal_span(src: &[u8], callee: tree_sitter::Node) -> Option<CalleeSpan> {
     })
 }
 
-/// 1-based (line, byte-column) of a byte offset, matching `span_of`.
-fn position_of(src: &[u8], off: usize) -> (u32, u32) {
+/// 1-based (line, byte-column) of byte offset `off`, computed from `base`, the
+/// start of a node, and `base_pos`, that node's 1-based position as tree-sitter
+/// reports it. Only the bytes from `base` to `off` are read. The result equals
+/// counting the newlines before `off` in the whole file: the line is one plus
+/// that count, and the column is one plus the bytes after the last newline.
+fn position_from(src: &[u8], base: usize, base_pos: (u32, u32), off: usize) -> (u32, u32) {
     let off = off.min(src.len());
-    let line = src[..off].iter().filter(|b| **b == b'\n').count() as u32 + 1;
-    let col = (off
-        - src[..off]
-            .iter()
-            .rposition(|b| *b == b'\n')
-            .map(|p| p + 1)
-            .unwrap_or(0)) as u32
-        + 1;
-    (line, col)
+    debug_assert!(base <= off, "a position is taken from its node's own start");
+    let rel = src.get(base..off).unwrap_or_default();
+    match rel.iter().rposition(|b| *b == b'\n') {
+        Some(last) => {
+            let newlines = rel.iter().filter(|b| **b == b'\n').count();
+            (base_pos.0 + newlines as u32, (rel.len() - last) as u32)
+        }
+        None => (base_pos.0, base_pos.1 + rel.len() as u32),
+    }
 }
 
 /// Visit every node under `root` in pre-order. Iterative on purpose: nesting
@@ -1013,7 +1027,9 @@ pub fn file_facts_json(rel: &str, facts: &FileFacts) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{classify, grammar_version, language_name, parse_source, FileKind, Language};
+    use super::{
+        classify, grammar_version, language_name, parse_source, position_from, FileKind, Language,
+    };
     use std::path::Path;
 
     #[test]
@@ -1909,5 +1925,60 @@ mod tests {
             elapsed < std::time::Duration::from_secs(2),
             "{CALLS} nested calls took {elapsed:?}"
         );
+    }
+
+    #[test]
+    fn wide_call_block_extraction_completes_promptly() {
+        // One function body holding many call statements, parsed in full.
+        const STATEMENTS: usize = 20_000;
+        const BOUND: std::time::Duration = std::time::Duration::from_secs(5);
+        let mut source = String::from("fn main() {\n");
+        for _ in 0..STATEMENTS {
+            source.push_str("    g();\n");
+        }
+        source.push_str("}\n");
+        let started = std::time::Instant::now();
+        let facts = parse_source(Language::Rust, source.as_bytes());
+        let elapsed = started.elapsed();
+        assert_eq!(facts.calls.len(), STATEMENTS);
+        assert!(elapsed < BOUND, "a wide call block took {elapsed:?}");
+    }
+
+    #[test]
+    fn node_relative_positions_match_a_whole_file_count() {
+        // The whole-file count that `position_from` replaces, as the reference.
+        fn whole_file(src: &[u8], off: usize) -> (u32, u32) {
+            let off = off.min(src.len());
+            let line = src[..off].iter().filter(|b| **b == b'\n').count() as u32 + 1;
+            let col = (off
+                - src[..off]
+                    .iter()
+                    .rposition(|b| *b == b'\n')
+                    .map(|p| p + 1)
+                    .unwrap_or(0)) as u32
+                + 1;
+            (line, col)
+        }
+        let cases: [&[u8]; 6] = [
+            b"fn f() {}\n",
+            b"a\n  b.c()\r\n  d\n",
+            "x = \"é\"\n  ü.g()\n".as_bytes(),
+            b"",
+            b"\n\n\n",
+            b"tail without newline",
+        ];
+        for src in cases {
+            for base in 0..=src.len() {
+                let base_pos = whole_file(src, base);
+                for off in base..=src.len() {
+                    assert_eq!(
+                        position_from(src, base, base_pos, off),
+                        whole_file(src, off),
+                        "base {base}, offset {off}, source {:?}",
+                        String::from_utf8_lossy(src)
+                    );
+                }
+            }
+        }
     }
 }
