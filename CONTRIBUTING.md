@@ -28,3 +28,12 @@ Apache-2.0.
   license, origin) in the same PR.
 - No performance/accuracy claims vs competitors without a reproducible
   benchmark committed under `tests/` + methodology in docs.
+
+## Pull request checklist
+
+Use the [pull request checklist](.github/pull_request_template.md) when preparing
+a change.
+
+For a bug report or feature request, use the repository's issue forms. Report
+security vulnerabilities through the private channel in [SECURITY.md](SECURITY.md),
+not as a public issue.

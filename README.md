@@ -312,6 +312,14 @@ Every commit needs a `Signed-off-by` line (`git commit -s`), and
 `cargo fmt`, `cargo clippy`, and `cargo test` must pass. Details live in
 [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## Reporting a problem or idea
+
+Use the repository's issue forms for ordinary bug reports and feature requests.
+Include only sanitized diagnostics: redact credentials, private source, and
+local paths that identify you or your organization. Security vulnerabilities
+must go through the [private reporting channel](SECURITY.md#reporting-a-vulnerability),
+not a public issue.
+
 ## Security
 
 Riltra's core is local-first: it uploads nothing, phones home to nothing, and

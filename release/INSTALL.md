@@ -47,12 +47,42 @@ profile, the registry, or a system-wide path. On Linux and macOS the shared
 `~/.local/bin` directory receives only the `riltra` symlink; the notices stay in
 the private payload directory.
 
-## Reinstall and removal
+## Reinstall
 
 Run the same installer again. It replaces only files recorded in the Riltra
 manifest and refuses to overwrite an unrelated `riltra` file or symlink.
+The registry and indexes under `RILTRA_HOME` are separate from the installed
+payload and are not removed by reinstalling.
 
-Removal is manual:
+## Check the version and update
+
+Check the installed version with `riltra --version`, then review the [published
+releases](https://github.com/terapetralabs/riltra/releases) and their notes for
+the version you want. To update an archive install, run the same installer
+again with that version selected. The scripts currently default to `0.1.0`;
+pass the version listed on the release page without the leading `v` when
+selecting another release (replace `0.1.0` with the version you selected):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -Version 0.1.0
+```
+
+```sh
+sh install.sh --version 0.1.0
+```
+
+The installers verify the archive's adjacent SHA-256 file and replace the
+installed payload. If you installed from a local archive, use the matching
+`-ArchivePath` or `--archive` option again instead. For a Cargo source install,
+rebuild and reinstall from the source revision you want using the instructions
+in the [README](../README.md#quick-start); the release archive installer does
+not manage it.
+
+After updating, check that your MCP client configuration points to the updated
+executable and restart the client. Check `riltra --version` and the client's
+`riltra_health` result. Follow the release notes if an index rebuild is needed.
+
+## Removal
 
 - Windows: delete `%LOCALAPPDATA%\Programs\Riltra`.
 - Linux and macOS: delete the `riltra` symlink in `~/.local/bin` (only after
