@@ -403,6 +403,30 @@ fn callers_of_a_data_member_never_list_a_same_named_call() {
 }
 
 #[test]
+fn callers_in_module_scope_include_unresolved_python_alias_calls() {
+    let h = home("python-alias-module-call");
+    let repo = mkrepo(&h, "work");
+    std::fs::write(repo.join("impl.py"), "def target():\n    pass\n").unwrap();
+    std::fs::write(
+        repo.join("use.py"),
+        "from impl import target as renamed\nrenamed()\n",
+    )
+    .unwrap();
+    init_and_index(&h, &repo, "r");
+
+    let doc = edge_doc(&h, "callers", "impl.py", "1", "5");
+    let edges = doc["edges"].as_array().unwrap();
+    assert_eq!(edges.len(), 1, "{doc}");
+    assert_eq!(edges[0]["kind"], "POTENTIAL_CALL", "{doc}");
+    assert_eq!(edges[0]["precision"], "Heuristic", "{doc}");
+    assert_eq!(edges[0]["verification"], "Unverified", "{doc}");
+    assert_eq!(edges[0]["unresolved"], "owner-unproven", "{doc}");
+    assert_eq!(edges[0]["caller"], serde_json::Value::Null, "{doc}");
+    assert_eq!(edges[0]["caller_path"], "use.py", "{doc}");
+    assert_eq!(doc["completeness"]["status"], "partial", "{doc}");
+}
+
+#[test]
 fn rust_workspace_imports_link_from_the_crate_source_root() {
     // `use crate::helper` is relative to the importing crate, not the repo
     // root. A same-named file in another crate and an external `use b::helper`

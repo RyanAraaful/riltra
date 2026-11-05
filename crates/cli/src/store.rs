@@ -1913,6 +1913,7 @@ pub struct EdgeSelection<'a> {
     pub inbound: bool,
     pub candidate_name: Option<&'a str>,
     pub candidate_paths: &'a [String],
+    pub candidate_aliases: &'a [(String, String)],
     pub syntax_aliases: &'a [EdgeEndpoint],
 }
 
@@ -1952,8 +1953,9 @@ impl EdgeSelection<'_> {
                 )
                 .expect("syntax aliases"),
             ),
+            Value::Text(serde_json::to_string(self.candidate_aliases).expect("candidate aliases")),
         ];
-        let predicate = format!("snapshot_id = ?1 AND (({p}_kind = ?2 AND {p}_import_id IS ?3 AND {p}_uri IS ?4 AND {p}_doc IS ?5 AND {p}_path IS ?6 AND {p}_bs IS ?7 AND {p}_be IS ?8) OR (edge_kind = 'POTENTIAL_CALL' AND callee_kind = 'unknown' AND callee_name = ?9 AND (provider = 'syntax' OR CASE WHEN json_valid(evidence) THEN json_extract(evidence, '$.import') END = ?3) AND caller_file IN (SELECT value FROM json_each(?10))) OR (caller_kind = 'syntax' AND (provider = 'syntax' OR callee_import_id = ?3 OR CASE WHEN json_valid(evidence) THEN json_extract(evidence, '$.import') END = ?3) AND EXISTS (SELECT 1 FROM json_each(?11) a WHERE caller_path = json_extract(a.value, '$[0]') AND caller_bs = json_extract(a.value, '$[1]') AND caller_be = json_extract(a.value, '$[2]'))))");
+        let predicate = format!("snapshot_id = ?1 AND (({p}_kind = ?2 AND {p}_import_id IS ?3 AND {p}_uri IS ?4 AND {p}_doc IS ?5 AND {p}_path IS ?6 AND {p}_bs IS ?7 AND {p}_be IS ?8) OR (edge_kind = 'POTENTIAL_CALL' AND callee_kind = 'unknown' AND (callee_name = ?9 OR EXISTS (SELECT 1 FROM json_each(?12) a WHERE caller_file = json_extract(a.value, '$[0]') AND callee_name = json_extract(a.value, '$[1]'))) AND (provider = 'syntax' OR CASE WHEN json_valid(evidence) THEN json_extract(evidence, '$.import') END = ?3) AND caller_file IN (SELECT value FROM json_each(?10))) OR (caller_kind = 'syntax' AND (provider = 'syntax' OR callee_import_id = ?3 OR CASE WHEN json_valid(evidence) THEN json_extract(evidence, '$.import') END = ?3) AND EXISTS (SELECT 1 FROM json_each(?11) a WHERE caller_path = json_extract(a.value, '$[0]') AND caller_bs = json_extract(a.value, '$[1]') AND caller_be = json_extract(a.value, '$[2]'))))");
         (predicate, values)
     }
 }
@@ -2000,7 +2002,7 @@ pub fn selected_edge_page(
     let (predicate, mut values) = selection.sql();
     values.push(rusqlite::types::Value::Integer(limit.clamp(1, 1000)));
     values.push(rusqlite::types::Value::Integer(offset.max(0)));
-    let mut stmt = conn.prepare(&format!("SELECT {EDGE_COLS} FROM code_edges WHERE {predicate} ORDER BY {EDGE_ORDER} LIMIT ?12 OFFSET ?13")).map_err(|e| e.to_string())?;
+    let mut stmt = conn.prepare(&format!("SELECT {EDGE_COLS} FROM code_edges WHERE {predicate} ORDER BY {EDGE_ORDER} LIMIT ?13 OFFSET ?14")).map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map(rusqlite::params_from_iter(values), read_edge)
         .map_err(|e| e.to_string())?;
@@ -2046,6 +2048,7 @@ fn query_edges(
             inbound: prefix == "callee",
             candidate_name: None,
             candidate_paths: &[],
+            candidate_aliases: &[],
             syntax_aliases: &[],
         },
         limit,

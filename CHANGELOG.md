@@ -10,6 +10,10 @@ Changes made after `0.1.0` is cut are listed here.
 
 - A manual workflow, `installer-phase-b`, that downloads the assets of a published release and runs the installer checks on them on hosted Windows, Linux and macOS x64 runners ([workflow](.github/workflows/installer-phase-b.yml)).
 
+### Changed
+
+- Python caller queries can include candidates for simple aliased imports. These remain heuristic, unverified candidates and do not establish a binding.
+
 ### Scope and limits of the evidence
 
 - The installers were run against the published `0.1.0` assets on 2026-11-04, once, on GitHub-hosted Windows, Linux and macOS (Intel) x64 runners. Checksum, install, reinstall, the refusal checks and a user-style install passed on all three ([M10 Phase B amendment](docs/m10-phase-b-amendment-2026-11-04.md)). The hosted Windows runner is an administrator account, so no least-privilege claim follows.
