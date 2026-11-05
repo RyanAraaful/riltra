@@ -25,7 +25,7 @@ The program consists of 12 task categories, four per language, and 12 independen
 
 ## Evaluation unit and outcomes
 
-A task is one frozen case family, one pinned repository or fixture revision, and one set of assertions. Use the existing M6 corpus, language fixtures, semantic fixtures, and harnesses where they apply. Run equivalent inputs through CLI and MCP when both surfaces support the operation. Report per-task and per-language results; do not average unlike outcomes.
+A task is one frozen case family over one or more pinned repository or fixture revisions, each graded separately; control fixtures are tracked separately and excluded from the private-corpus denominator. Use the existing M6 corpus, language fixtures, semantic fixtures, and harnesses where they apply. Run equivalent inputs through CLI and MCP when both surfaces support the operation. Report per-task and per-language results; do not average unlike outcomes.
 
 Before querying, freeze the oracle privately. Record Riltra revision, binary digest, platform/toolchain, source alias and revision, configuration, scratch-home identity, Luna session metadata, and provider/version if opted in. Keep failed attempts. A second reviewer checks results against the oracle and current contract. Compare parsed CLI/MCP contract fields; explain documented transport differences.
 
