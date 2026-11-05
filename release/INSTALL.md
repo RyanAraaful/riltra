@@ -60,8 +60,8 @@ Check the installed version with `riltra --version`, then review the [published
 releases](https://github.com/terapetralabs/riltra/releases) and their notes for
 the version you want. To update an archive install, run the same installer
 again with that version selected. The scripts currently default to `0.1.0`;
-pass the version listed on the release page explicitly when selecting another
-release (replace `0.1.0` with the version you selected):
+pass the version listed on the release page without the leading `v` when
+selecting another release (replace `0.1.0` with the version you selected):
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install.ps1 -Version 0.1.0
@@ -81,6 +81,8 @@ not manage it.
 After updating, check that your MCP client configuration points to the updated
 executable and restart the client. Check `riltra --version` and the client's
 `riltra_health` result. Follow the release notes if an index rebuild is needed.
+
+## Removal
 
 Removal is manual:
 

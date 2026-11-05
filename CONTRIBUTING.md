@@ -31,11 +31,8 @@ Apache-2.0.
 
 ## Pull request checklist
 
-- Describe the user-visible change and link a related issue when one exists.
-- Report the checks you ran and any checks you could not run.
-- Update user documentation when behavior or installation instructions change.
-- Remove secrets, private source, and unnecessary local paths from examples and
-  logs.
+Use the [pull request checklist](.github/pull_request_template.md) when preparing
+a change.
 
 For a bug report or feature request, use the repository's issue forms. Report
 security vulnerabilities through the private channel in [SECURITY.md](SECURITY.md),
