@@ -216,6 +216,17 @@ fn mcp_tools_list_advertises_the_fourteen_tools() {
         ],
         "the server advertises exactly the fourteen tools"
     );
+    let context_tool = tools
+        .iter()
+        .find(|tool| tool["name"] == "riltra_context")
+        .expect("context tool");
+    let limit_description = context_tool["inputSchema"]["properties"]["limit"]["description"]
+        .as_str()
+        .expect("context limit description");
+    assert!(
+        limit_description.contains("Maximum context nodes returned"),
+        "the limit describes returned context nodes: {limit_description}"
+    );
     assert!(
         !names.iter().any(|n| n.contains("write")),
         "no write tool may be advertised: {names:?}"

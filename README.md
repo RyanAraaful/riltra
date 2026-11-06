@@ -77,7 +77,7 @@ dependencies beyond itself:
   with a typed relation. Bindings are stored explicitly, never inferred from
   names or paths; a changed source reports `stale` and is not rebound. A
   binding records a relationship, not the truth of the record.
-- **MCP server** - `riltra mcp` serves thirteen tools over local stdio: twelve
+- **MCP server** - `riltra mcp` serves fourteen tools over local stdio: thirteen
   read-only ones and one provider-backed tool that starts the operator's
   language server. Reads never create or migrate a store: a missing
   index returns `no-index` without creating files, and an unsupported schema is
@@ -149,14 +149,15 @@ Notes:
   missing executable — nothing is silently faked.
 - Run `cargo run -q -p riltra -- --help` for the full command list.
 
-## MCP server (twelve read-only tools, one provider-backed tool)
+## MCP server (thirteen read-only tools, one provider-backed tool)
 
 `riltra mcp` starts a local stdio MCP server for coding agents. It exposes
-thirteen tools:
+fourteen tools:
 
 - `riltra_repo_list`, `riltra_repo_status`, `riltra_health`
 - `riltra_code_search`, `riltra_code_callers`, `riltra_code_callees`,
-  `riltra_code_trace`, `riltra_code_impact`
+  `riltra_code_trace`, `riltra_code_impact`, `riltra_context` — bounded graph
+  context with caller-to-anchor distances
 - `riltra_knowledge_search`, `riltra_knowledge_show`, `riltra_knowledge_related`
 - `riltra_knowledge_at_anchor` — read-only lookup of the bindings at a code
   anchor (`knowledge at`); an unlinked anchor stays unlinked

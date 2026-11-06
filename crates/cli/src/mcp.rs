@@ -139,7 +139,7 @@ struct ContextInput {
     semantic: Option<bool>,
     /// Maximum graph depth (default 3, range 1-6).
     depth: Option<usize>,
-    /// Maximum paths inspected for context (default 20, range 1-100).
+    /// Maximum context nodes returned (default 20, range 1-100).
     limit: Option<usize>,
     /// Maximum final JSON bytes (default 32768, range 8192-131072).
     max_bytes: Option<usize>,
