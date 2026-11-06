@@ -434,6 +434,54 @@
       "version": "0.1.14"
     },
     {
+      "bom-ref": "pkg:cargo/fixedbitset@0.5.7",
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/petgraph/fixedbitset"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "1d674e81391d1e1ab681a28d99df07927c6d4aa5b027d7da16ba32d1d21ecd99"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "fixedbitset",
+      "purl": "pkg:cargo/fixedbitset@0.5.7",
+      "type": "library",
+      "version": "0.5.7"
+    },
+    {
+      "bom-ref": "pkg:cargo/foldhash@0.1.5",
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/orlp/foldhash"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "Zlib"
+        }
+      ],
+      "name": "foldhash",
+      "purl": "pkg:cargo/foldhash@0.1.5",
+      "type": "library",
+      "version": "0.1.5"
+    },
+    {
       "bom-ref": "pkg:cargo/foldhash@0.2.0",
       "externalReferences": [
         {
@@ -696,6 +744,30 @@
       "purl": "pkg:cargo/getrandom@0.4.3",
       "type": "library",
       "version": "0.4.3"
+    },
+    {
+      "bom-ref": "pkg:cargo/hashbrown@0.15.5",
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/rust-lang/hashbrown"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "hashbrown",
+      "purl": "pkg:cargo/hashbrown@0.15.5",
+      "type": "library",
+      "version": "0.15.5"
     },
     {
       "bom-ref": "pkg:cargo/hashbrown@0.16.1",
@@ -1080,6 +1152,30 @@
       "purl": "pkg:cargo/pastey@0.2.3",
       "type": "library",
       "version": "0.2.3"
+    },
+    {
+      "bom-ref": "pkg:cargo/petgraph@0.8.3",
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/petgraph/petgraph"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "8701b58ea97060d5e5b155d383a69952a60943f0e6dfe30b04c287beb0b27455"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "petgraph",
+      "purl": "pkg:cargo/petgraph@0.8.3",
+      "type": "library",
+      "version": "0.8.3"
     },
     {
       "bom-ref": "pkg:cargo/pin-project-lite@0.2.17",
@@ -2712,6 +2808,14 @@
     },
     {
       "dependsOn": [],
+      "ref": "pkg:cargo/fixedbitset@0.5.7"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:cargo/foldhash@0.1.5"
+    },
+    {
+      "dependsOn": [],
       "ref": "pkg:cargo/foldhash@0.2.0"
     },
     {
@@ -2786,6 +2890,12 @@
         "pkg:cargo/r-efi@6.0.0"
       ],
       "ref": "pkg:cargo/getrandom@0.4.3"
+    },
+    {
+      "dependsOn": [
+        "pkg:cargo/foldhash@0.1.5"
+      ],
+      "ref": "pkg:cargo/hashbrown@0.15.5"
     },
     {
       "dependsOn": [
@@ -2883,6 +2993,14 @@
       "ref": "pkg:cargo/pastey@0.2.3"
     },
     {
+      "dependsOn": [
+        "pkg:cargo/fixedbitset@0.5.7",
+        "pkg:cargo/hashbrown@0.15.5",
+        "pkg:cargo/indexmap@2.14.2"
+      ],
+      "ref": "pkg:cargo/petgraph@0.8.3"
+    },
+    {
       "dependsOn": [],
       "ref": "pkg:cargo/pin-project-lite@0.2.17"
     },
@@ -2957,6 +3075,7 @@
     },
     {
       "dependsOn": [
+        "pkg:cargo/petgraph@0.8.3",
         "pkg:cargo/protobuf@3.7.2",
         "pkg:cargo/rmcp@3.5.1",
         "pkg:cargo/rusqlite@0.40.2",

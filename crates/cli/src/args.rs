@@ -46,10 +46,25 @@ pub enum Command {
     },
     Trace(TraceArgs),
     Impact(TraceArgs),
+    Context(ContextArgs),
     Knowledge {
         op: KnowledgeOp,
     },
     Mcp,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct ContextArgs {
+    pub repo: String,
+    pub path: String,
+    pub line: String,
+    pub col: String,
+    pub symbol: Option<String>,
+    pub query: Option<String>,
+    pub semantic: bool,
+    pub depth: Option<String>,
+    pub limit: Option<String>,
+    pub max_bytes: Option<String>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -446,10 +461,66 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             }
             Ok(Command::Impact(parsed))
         }
+        "context" => parse_context_args(args).map(Command::Context),
         "knowledge" => match args.get(1).map(String::as_str) {
             Some(sub) => parse_knowledge_op(sub, args).map(|op| Command::Knowledge { op }),
             None => Err(crate::usage()),
         },
+        _ => Err(crate::usage()),
+    }
+}
+
+fn parse_context_args(args: &[String]) -> Result<ContextArgs, String> {
+    let mut repo = None;
+    let mut path = None;
+    let mut line = None;
+    let mut col = None;
+    let mut symbol = None;
+    let mut query = None;
+    let mut semantic = false;
+    let mut depth = None;
+    let mut limit = None;
+    let mut max_bytes = None;
+    let mut i = 1;
+    while i < args.len() {
+        if args[i] == "--semantic" {
+            semantic = true;
+            i += 1;
+        } else if let Some(v) = take_value(args, &mut i, "--repo") {
+            repo = Some(v);
+        } else if let Some(v) = take_value(args, &mut i, "--path") {
+            path = Some(v);
+        } else if let Some(v) = take_value(args, &mut i, "--line") {
+            line = Some(v);
+        } else if let Some(v) = take_value(args, &mut i, "--col") {
+            col = Some(v);
+        } else if let Some(v) = take_value(args, &mut i, "--symbol") {
+            symbol = Some(v);
+        } else if let Some(v) = take_value(args, &mut i, "--query") {
+            query = Some(v);
+        } else if let Some(v) = take_value(args, &mut i, "--depth") {
+            depth = Some(v);
+        } else if let Some(v) = take_value(args, &mut i, "--limit") {
+            limit = Some(v);
+        } else if let Some(v) = take_value(args, &mut i, "--max-bytes") {
+            max_bytes = Some(v);
+        } else {
+            return Err(crate::usage());
+        }
+    }
+    match (repo, path, line, col) {
+        (Some(repo), Some(path), Some(line), Some(col)) => Ok(ContextArgs {
+            repo,
+            path,
+            line,
+            col,
+            symbol,
+            query,
+            semantic,
+            depth,
+            limit,
+            max_bytes,
+        }),
         _ => Err(crate::usage()),
     }
 }

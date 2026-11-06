@@ -2,7 +2,7 @@
 //! M8 CP1/CP3/CP4/CP5/CP6: MCP stdio server. CP1 serves initialize; CP3
 //! registers the first read-only tools; CP4 adds the graph tools (callers,
 //! callees, trace, impact); CP5 adds the knowledge tools (search, show,
-//! related); CP6 adds the composed `riltra_health` tool — thirteen tools total
+//! related); CP6 adds the composed `riltra_health` tool — fourteen tools total
 //! (design gate §3) through the rmcp tool macros. Tool calls
 //! reuse the CLI's response formatters byte-for-byte, and the index read path
 //! (`store::open_read`) and the knowledge read path
@@ -22,8 +22,8 @@ use serde::Deserialize;
 
 use crate::knowledge_store_absent;
 use crate::{
-    doctor, git, ignore, index, knowledge, knowledge_binding, knowledge_store, paths, registry,
-    response, store,
+    context, doctor, git, ignore, index, knowledge, knowledge_binding, knowledge_store, paths,
+    registry, response, store,
 };
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -117,6 +117,32 @@ struct ImpactInput {
     limit: Option<usize>,
     /// Paths to skip before returning results (default 0).
     offset: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(crate = "rmcp::schemars")]
+struct ContextInput {
+    /// Registered repository name.
+    repo: String,
+    /// Repository-relative path of the anchor position.
+    path: String,
+    /// 1-based line of the anchor position.
+    line: u32,
+    /// 1-based byte column of the anchor position.
+    col: u32,
+    /// Optional exact SCIP symbol identity to check against the position.
+    symbol: Option<String>,
+    /// Reserved search text. The current operation reports it as not_run.
+    query: Option<String>,
+    /// Reserved semantic retrieval request. The current operation reports it as not_run.
+    semantic: Option<bool>,
+    /// Maximum graph depth (default 3, range 1-6).
+    depth: Option<usize>,
+    /// Maximum paths inspected for context (default 20, range 1-100).
+    limit: Option<usize>,
+    /// Maximum final JSON bytes (default 32768, range 8192-131072).
+    max_bytes: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -358,6 +384,20 @@ impl RiltraMcp {
         Parameters(input): Parameters<ImpactInput>,
     ) -> CallToolResult {
         blocking(move || impact_doc(&input)).await
+    }
+
+    #[tool(
+        name = "riltra_context",
+        description = "Read bounded caller-to-anchor graph context from one pinned code-index snapshot. Distances are limited to the inspected subgraph. Optional query and semantic inputs are reported as not_run until their follow-up stages. When to call: to inspect nearby graph evidence with stable local distances.",
+        annotations(
+            title = "Read graph context",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn riltra_context(&self, Parameters(input): Parameters<ContextInput>) -> CallToolResult {
+        blocking(move || context_doc(&input)).await
     }
 
     #[tool(
@@ -1094,6 +1134,87 @@ fn impact_doc(input: &ImpactInput) -> CallToolResult {
     )
 }
 
+fn context_doc(input: &ContextInput) -> CallToolResult {
+    if let Err(e) = graph_anchor(input.line, input.col) {
+        return e;
+    }
+    let depth = match graph_depth(input.depth) {
+        Ok(depth) => depth,
+        Err(e) => return e,
+    };
+    let limit = input.limit.unwrap_or(context::DEFAULT_LIMIT);
+    if !(1..=context::MAX_LIMIT).contains(&limit) {
+        return tool_error(
+            "invalid_input",
+            &format!("--limit must be between 1 and {}", context::MAX_LIMIT),
+        );
+    }
+    let max_bytes = input.max_bytes.unwrap_or(context::DEFAULT_MAX_BYTES);
+    if !(context::MIN_MAX_BYTES..=context::MAX_MAX_BYTES).contains(&max_bytes) {
+        return tool_error(
+            "invalid_input",
+            &format!(
+                "--max-bytes must be between {} and {}",
+                context::MIN_MAX_BYTES,
+                context::MAX_MAX_BYTES
+            ),
+        );
+    }
+    let (home, canon) = match repo_root(&input.repo) {
+        Ok(value) => value,
+        Err(e) => return e,
+    };
+    let request = context::ContextRequest {
+        path: &input.path,
+        line: input.line,
+        col: input.col,
+        symbol: input.symbol.as_deref(),
+        query: input.query.as_deref(),
+        semantic: input.semantic.unwrap_or(false),
+        depth,
+        limit,
+        max_bytes,
+    };
+    if let Err(e) = context::validate_request(&canon, &request) {
+        return context_query_error(e);
+    }
+    match store::open_read(&store::db_path(&home, &input.repo)) {
+        store::IndexRead::Missing => missing_index(),
+        store::IndexRead::Outdated(version) => {
+            tool_error("schema_outdated", &outdated_message(&input.repo, version))
+        }
+        store::IndexRead::Ahead(version) => tool_error(
+            "schema_ahead",
+            &format!(
+                "database schema v{version} is newer than supported v{}",
+                store::SCHEMA_VERSION
+            ),
+        ),
+        store::IndexRead::Error(message) => tool_error("store_error", &message),
+        store::IndexRead::Ready(mut conn) => {
+            let result = match context::query_conn(&mut conn, &input.repo, &canon, &request) {
+                Ok(result) => result,
+                Err(e) => return context_query_error(e),
+            };
+            match response::context_query_json(&result) {
+                Ok(value) => doc(&value),
+                Err(e) => context_query_error(e),
+            }
+        }
+    }
+}
+
+fn context_query_error(message: String) -> CallToolResult {
+    if message.starts_with("invalid context bounds")
+        || message.starts_with("context query")
+        || message.starts_with("context response envelope")
+    {
+        tool_error("invalid_input", &message)
+    } else {
+        graph_query_error(message)
+    }
+}
+
 // --- semantic tool ------------------------------------------------------------
 
 /// The language server executable: the operator's configuration, never the
@@ -1528,6 +1649,7 @@ fn health_doc() -> CallToolResult {
                 "riltra_code_search",
                 "riltra_code_semantic",
                 "riltra_code_trace",
+                "riltra_context",
                 "riltra_health",
                 "riltra_knowledge_at_anchor",
                 "riltra_knowledge_related",
@@ -1551,6 +1673,15 @@ fn health_doc() -> CallToolResult {
                 "depth_max": crate::edges::TRACE_MAX_DEPTH,
                 "default_limit": index::DEFAULT_SEARCH_LIMIT,
                 "max_limit": index::MAX_SEARCH_LIMIT,
+            },
+            "context": {
+                "depth_default": crate::context::DEFAULT_DEPTH,
+                "depth_max": crate::edges::TRACE_MAX_DEPTH,
+                "default_limit": crate::context::DEFAULT_LIMIT,
+                "max_limit": crate::context::MAX_LIMIT,
+                "max_bytes_default": crate::context::DEFAULT_MAX_BYTES,
+                "max_bytes_min": crate::context::MIN_MAX_BYTES,
+                "max_bytes_max": crate::context::MAX_MAX_BYTES,
             },
         },
         "repo_count": reg.repos.len(),

@@ -195,6 +195,20 @@ Notes:
 Used by the CI `security` job and the optional local hooks (`security/scan.sh`,
 `.githooks/`); it is not a build dependency and no code is vendored.
 
+## R1 addition: bounded graph context (2026-11-06)
+
+| Package | Version | License | Origin |
+|---|---|---|---|
+| petgraph | 0.8.3 | MIT OR Apache-2.0 | https://github.com/petgraph/petgraph (crates.io) |
+| fixedbitset | 0.5.7 | MIT OR Apache-2.0 | https://github.com/petgraph/fixedbitset (transitive, crates.io) |
+| foldhash | 0.1.5 | Zlib | https://github.com/orlp/foldhash (transitive, crates.io) |
+| hashbrown | 0.15.5 | MIT OR Apache-2.0 | https://github.com/rust-lang/hashbrown (transitive, crates.io) |
+
+`petgraph` supplies Dijkstra over the bounded subgraph selected from the
+existing code index. It has default features disabled; the CLI remains local
+and read-only for context queries. The package is permissively licensed and
+is included in the generated locked-graph SBOM.
+
 ## Pilot tooling: clangd and CMake (clangd semantic provider pilot, 2026-10-21)
 
 | Package | Version | License | Origin | Redistributable? |

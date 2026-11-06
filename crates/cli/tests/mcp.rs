@@ -184,7 +184,7 @@ fn mcp_initialize_handshake_reports_identity() {
 }
 
 #[test]
-fn mcp_tools_list_advertises_the_thirteen_tools() {
+fn mcp_tools_list_advertises_the_fourteen_tools() {
     let h = home("tools");
     let mut s = ready(&h);
     s.send(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#);
@@ -205,6 +205,7 @@ fn mcp_tools_list_advertises_the_thirteen_tools() {
             "riltra_code_search",
             "riltra_code_semantic",
             "riltra_code_trace",
+            "riltra_context",
             "riltra_health",
             "riltra_knowledge_at_anchor",
             "riltra_knowledge_related",
@@ -213,7 +214,7 @@ fn mcp_tools_list_advertises_the_thirteen_tools() {
             "riltra_repo_list",
             "riltra_repo_status"
         ],
-        "the server advertises exactly the thirteen tools"
+        "the server advertises exactly the fourteen tools"
     );
     assert!(
         !names.iter().any(|n| n.contains("write")),
@@ -292,6 +293,7 @@ fn mcp_tools_list_advertises_the_thirteen_tools() {
         "riltra_code_search",
         "riltra_code_semantic",
         "riltra_code_trace",
+        "riltra_context",
         "riltra_knowledge_at_anchor",
         "riltra_knowledge_related",
         "riltra_knowledge_search",
@@ -391,6 +393,38 @@ fn mcp_tools_list_advertises_the_thirteen_tools() {
         assert_eq!(keys, expected, "{tool}: properties: {schema}");
         assert_eq!(schema["additionalProperties"], false, "{tool}: {schema}");
     }
+    let context_schema = &find("riltra_context")["inputSchema"];
+    let mut context_required: Vec<&str> = context_schema["required"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap())
+        .collect();
+    context_required.sort_unstable();
+    assert_eq!(context_required, ["col", "line", "path", "repo"]);
+    let mut context_fields: Vec<&str> = context_schema["properties"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    context_fields.sort_unstable();
+    assert_eq!(
+        context_fields,
+        [
+            "col",
+            "depth",
+            "limit",
+            "line",
+            "max_bytes",
+            "path",
+            "query",
+            "repo",
+            "semantic",
+            "symbol"
+        ]
+    );
+    assert_eq!(context_schema["additionalProperties"], false);
     // CP5 knowledge tools: search requires only repo (text and/or evidence
     // path), show/related require repo+id; show takes no generation, related
     // defaults direction to outbound; unknown parameters are rejected.
@@ -742,6 +776,7 @@ fn t1_health_composition_matches_cli_and_creates_nothing() {
             "riltra_code_search",
             "riltra_code_semantic",
             "riltra_code_trace",
+            "riltra_context",
             "riltra_health",
             "riltra_knowledge_at_anchor",
             "riltra_knowledge_related",
@@ -750,7 +785,7 @@ fn t1_health_composition_matches_cli_and_creates_nothing() {
             "riltra_repo_list",
             "riltra_repo_status"
         ],
-        "the health document must list the thirteen tools"
+        "the health document must list the fourteen tools"
     );
     assert_eq!(d["repo_count"], json!(2));
     let (code, _) = s.finish();
@@ -2299,6 +2334,102 @@ fn graph_doc(s: &mut Session, id: i64, tool: &str, args: &Value) -> Value {
 fn assert_graph_parity(cfg: &Path, got: &Value, cli: &[&str]) {
     let expected = cli_json(cfg, cli);
     assert_eq!(got, &expected, "MCP/CLI parity for {cli:?}");
+}
+
+#[test]
+fn r1_context_mcp_matches_cli_and_keeps_the_index_read_only() {
+    let h = home("r1-context-parity");
+    let r = home("r1-context-parity-repo");
+    let lines = graph_repo(&h, &r, "g", &[vec![1], vec![2], vec![]]);
+    let db = h.join("index").join("g.db");
+    let before = std::fs::read(&db).unwrap();
+    let mut s = ready(&h);
+    let line = lines[2].to_string();
+    let args = json!({
+        "repo": "g",
+        "path": "graph.py",
+        "line": lines[2],
+        "col": 6,
+        "query": "why is this called",
+        "semantic": true,
+        "max_bytes": 8192,
+    });
+    let d = graph_doc(&mut s, 2, "riltra_context", &args);
+    assert_graph_parity(
+        &h,
+        &d,
+        &[
+            "context",
+            "--repo",
+            "g",
+            "--path",
+            "graph.py",
+            "--line",
+            &line,
+            "--col",
+            "6",
+            "--query",
+            "why is this called",
+            "--semantic",
+            "--max-bytes",
+            "8192",
+        ],
+    );
+    assert_eq!(d["distance_scope"], "inspected_subgraph", "{d}");
+    assert_eq!(d["impact"]["verdict"], "HIGH", "{d}");
+    assert_eq!(d["query"]["status"], "not_run", "{d}");
+    assert_eq!(d["semantic"]["status"], "not_run", "{d}");
+    let mut distances: Vec<u64> = d["graph"]["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|node| node["distance"].as_u64().unwrap())
+        .collect();
+    distances.sort_unstable();
+    assert_eq!(distances, [0, 1, 2], "{d}");
+    assert_eq!(
+        std::fs::read(&db).unwrap(),
+        before,
+        "context must be read-only"
+    );
+
+    let bad = call_tool(
+        &mut s,
+        3,
+        "riltra_context",
+        &json!({"repo":"g","path":"../outside","line":1,"col":1}),
+    );
+    assert!(is_error(&bad), "escaping path must be refused: {bad}");
+    assert_eq!(bad["structuredContent"]["kind"], "invalid_input", "{bad}");
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn r1_context_missing_index_is_a_read_only_no_index_error() {
+    let h = home("r1-context-no-index");
+    let r = home("r1-context-no-index-repo");
+    std::fs::create_dir_all(&r).unwrap();
+    std::fs::write(r.join("graph.py"), "def f0():\n    pass\n").unwrap();
+    init_repo(&h, &r, "g");
+    let mut s = ready(&h);
+    let result = call_tool(
+        &mut s,
+        2,
+        "riltra_context",
+        &json!({"repo":"g","path":"graph.py","line":1,"col":6}),
+    );
+    assert!(
+        is_error(&result),
+        "missing index must be an error: {result}"
+    );
+    assert_eq!(result["structuredContent"]["kind"], "no_index", "{result}");
+    assert!(
+        !h.join("index").exists(),
+        "MCP context must not create an index directory"
+    );
+    let (code, _) = s.finish();
+    assert_eq!(code, 0);
 }
 
 // --- T2: callers / callees ---------------------------------------------------

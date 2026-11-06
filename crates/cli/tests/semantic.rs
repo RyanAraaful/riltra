@@ -30,12 +30,14 @@ fn new_dependencies_are_audited() {
     // protobuf 3.7.2 MIT, protobuf-support 3.7.2 MIT. M8 CP1 2026-10-18,
     // owner decision D1: rmcp 3.5.1 Apache-2.0, tokio 1.53.3 MIT.
     // M8 CP3 2026-10-18: rmcp `macros` feature enabled — rmcp-macros 3.5.1
-    // Apache-2.0, same rust-sdk origin; no other new packages.)
+    // Apache-2.0, same rust-sdk origin. R1 2026-11-06: petgraph 0.8.3
+    // MIT OR Apache-2.0, used only for bounded graph context.)
     for want in [
         "serde_json v1.0.154 [MIT OR Apache-2.0]",
         "protobuf v3.7.2 [MIT]",
         "rmcp v3.5.1 [Apache-2.0]",
         "tokio v1.53.3 [MIT]",
+        "petgraph v0.8.3 [MIT OR Apache-2.0]",
         "rmcp-macros v3.5.1 (proc-macro) [Apache-2.0]",
     ] {
         assert!(

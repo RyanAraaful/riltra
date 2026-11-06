@@ -8,7 +8,7 @@
 
 use std::path::Path;
 
-use crate::{git, ignore, index, json, knowledge, knowledge_store, semantic, store, syntax};
+use crate::{edges, git, ignore, index, json, knowledge, knowledge_store, semantic, store, syntax};
 
 /// One snapshot identity block, shared by search and index-status output.
 pub(crate) fn snapshot_json(snapshot: &store::Snapshot) -> String {
@@ -214,7 +214,7 @@ fn edge_strings(values: &[String]) -> String {
     )
 }
 
-fn edge_endpoint_json(endpoint: &Option<store::EdgeEndpoint>) -> String {
+pub(crate) fn edge_endpoint_json(endpoint: &Option<store::EdgeEndpoint>) -> String {
     match endpoint {
         Some(store::EdgeEndpoint::Scip { import_id, symbol_uri, doc }) => format!("{{\"type\":\"scip\",\"import_id\":{import_id},\"symbol_uri\":{},\"doc\":{},\"path\":null,\"byte_start\":null,\"byte_end\":null}}", edge_string(symbol_uri), edge_optional(doc.as_deref())),
         Some(store::EdgeEndpoint::SyntaxDef { path, byte_start, byte_end }) => format!("{{\"type\":\"syntax_def\",\"import_id\":null,\"symbol_uri\":null,\"doc\":null,\"path\":{},\"byte_start\":{byte_start},\"byte_end\":{byte_end}}}", edge_string(path)),
@@ -222,7 +222,7 @@ fn edge_endpoint_json(endpoint: &Option<store::EdgeEndpoint>) -> String {
     }
 }
 
-fn edge_hit_json(hit: &index::EdgeHitOut) -> String {
+pub(crate) fn edge_hit_json(hit: &index::EdgeHitOut) -> String {
     let e = &hit.edge;
     let imports = hit.evidence.imports.iter().map(|(id, i)| format!("{{\"id\":{id},\"provider\":{},\"version\":{},\"artifact_id\":{},\"source_revision\":{},\"content_identity\":{}}}", edge_string(&i.provider_name), edge_string(&i.provider_version), edge_string(&i.artifact_id), edge_string(&i.source_revision), edge_string(&i.content_identity))).collect::<Vec<_>>().join(",");
     // Legacy convenience fields retain only a UNIQUE proven import, never an
@@ -257,7 +257,7 @@ pub(crate) fn edge_query_json(o: &index::EdgeQueryOut) -> String {
         edge_string(&o.freshness), edge_strings(&o.freshness_reasons), edge_string(&o.verification), edge_string(&o.completeness.status), o.completeness.covered, o.completeness.total, edge_strings(&o.completeness.unresolved), o.truncated, o.limit, o.offset, edge_number(o.next_offset))
 }
 
-fn trace_anchor_json(anchor: &index::EdgeAnchor) -> String {
+pub(crate) fn trace_anchor_json(anchor: &index::EdgeAnchor) -> String {
     format!("{{\"kind\":{},\"path\":{},\"line\":{},\"col\":{},\"symbol_uri\":{},\"import_id\":{},\"precision\":{},\"anchor_uncertainty\":{},\"span\":{},\"endpoint\":{}}}",edge_string(anchor.kind.as_str()),edge_string(&anchor.path),anchor.line1,anchor.col1,edge_optional(anchor.symbol_uri.as_deref()),edge_number(anchor.import_id),edge_string(&anchor.precision),edge_optional(anchor.uncertainty.as_deref()),edge_span(anchor.span_bytes),edge_endpoint_json(&index::anchor_endpoint(anchor)))
 }
 
@@ -306,6 +306,213 @@ pub(crate) fn trace_query_json(o: &index::TraceQueryOut) -> String {
         .join(",");
     format!("{{{verdict}\"schema_version\":1,\"repo\":{},\"snapshot\":{{\"id\":{},\"nonce\":{},\"revision\":{}}},\"direction\":\"{direction}\",\"anchor\":{},\"destination\":{},\"freshness\":{{\"status\":{},\"reasons\":{}}},\"verification\":{},\"completeness\":{{\"status\":{},\"covered\":{},\"total\":{},\"total_exact\":{},\"denominator\":{{{denominator}}},\"unresolved\":{}}},\"paths\":[{paths}],\"bridges\":[{bridges}],\"visits\":{{\"nodes\":{},\"edges\":{}}},\"budgets\":{{\"depth\":{},\"max_depth\":6,\"nodes\":500,\"edges\":3000,\"paths\":1000,\"mappings\":500,\"time_ms\":2000}},\"limits\":{{\"limit\":{},\"offset\":{},\"next_offset\":{}}},\"cycle\":{},\"truncated\":{},\"unresolved\":{},\"disclaimer\":\"{disclaimer}\"}}",
         edge_string(&o.repo),o.snapshot.id,edge_string(&o.snapshot.nonce),edge_string(&o.revision),trace_anchor_json(&o.anchor),o.destination.as_ref().map(trace_anchor_json).unwrap_or_else(||"null".to_string()),edge_string(&o.freshness),edge_strings(&o.freshness_reasons),edge_string(&o.verification),edge_string(&o.completeness.status),o.completeness.covered,o.completeness.total,o.total_exact,edge_strings(&o.completeness.unresolved),o.nodes,o.edge_visits,o.depth,o.limit,o.offset,edge_number(o.next_offset),o.cycle,o.truncated,edge_strings(&o.unresolved))
+}
+
+pub(crate) fn context_query_json(result: &crate::context::ContextResult) -> Result<String, String> {
+    let trace = &result.trace;
+    let mut selected: std::collections::BTreeSet<_> = result
+        .graph
+        .iter()
+        .map(|node| edge_endpoint_json(&Some(node.endpoint.clone())))
+        .collect();
+    let mut bridge_targets =
+        std::collections::BTreeMap::<String, std::collections::BTreeSet<String>>::new();
+    for bridge in &trace.bridges {
+        let syntax = edge_endpoint_json(&Some(bridge.syntax.clone()));
+        let semantic = edge_endpoint_json(&Some(bridge.semantic.clone()));
+        bridge_targets.entry(syntax).or_default().insert(semantic);
+    }
+    let bridge_targets: std::collections::BTreeMap<_, _> = bridge_targets
+        .into_iter()
+        .filter_map(|(syntax, semantics)| {
+            (semantics.len() == 1).then(|| (syntax, semantics.into_iter().next().unwrap()))
+        })
+        .collect();
+    for (syntax, semantic) in &bridge_targets {
+        if selected.contains(semantic) {
+            selected.insert(syntax.clone());
+        }
+    }
+    let node_distances: std::collections::BTreeMap<_, _> = result
+        .graph
+        .iter()
+        .map(|node| {
+            (
+                edge_endpoint_json(&Some(node.endpoint.clone())),
+                node.distance,
+            )
+        })
+        .collect();
+    let canonical_identity = |endpoint: &store::EdgeEndpoint| {
+        let identity = edge_endpoint_json(&Some(endpoint.clone()));
+        bridge_targets.get(&identity).cloned().unwrap_or(identity)
+    };
+    let mut all_edges = std::collections::BTreeSet::new();
+    let mut visible_edges =
+        std::collections::BTreeMap::<String, (Option<usize>, String, serde_json::Value)>::new();
+    for hit in trace.paths.iter().flat_map(|path| &path.edges) {
+        let encoded = edge_hit_json(hit);
+        let value: serde_json::Value = serde_json::from_str(&encoded)
+            .map_err(|e| format!("context edge assembly failed: {e}"))?;
+        all_edges.insert(encoded.clone());
+        let touches_selected = hit
+            .edge
+            .caller
+            .as_ref()
+            .is_some_and(|endpoint| selected.contains(&canonical_identity(endpoint)))
+            || hit
+                .edge
+                .callee
+                .as_ref()
+                .is_some_and(|endpoint| selected.contains(&canonical_identity(endpoint)));
+        if touches_selected {
+            let identity = hit
+                .edge
+                .caller
+                .as_ref()
+                .or(hit.edge.callee.as_ref())
+                .map(canonical_identity)
+                .unwrap_or_default();
+            let distance = node_distances.get(&identity).copied().flatten();
+            visible_edges
+                .entry(encoded)
+                .or_insert((distance, identity, value));
+        }
+    }
+    let mut visible_edges: Vec<_> = visible_edges
+        .into_iter()
+        .map(|(encoded, (distance, identity, value))| {
+            (distance.unwrap_or(usize::MAX), identity, encoded, value)
+        })
+        .collect();
+    visible_edges.sort_by(|a, b| (&a.0, &a.1, &a.2).cmp(&(&b.0, &b.1, &b.2)));
+    let mut edge_values: Vec<_> = visible_edges
+        .into_iter()
+        .take(result.limit)
+        .map(|(_, _, _, value)| value)
+        .collect();
+    let mut omitted_edges = all_edges.len().saturating_sub(edge_values.len());
+    let mut nodes: Vec<_> = result
+        .graph
+        .iter()
+        .map(|node| {
+            serde_json::json!({
+                "identity": serde_json::from_str::<serde_json::Value>(
+                    &edge_endpoint_json(&Some(node.endpoint.clone()))
+                ).expect("endpoint serializer emits valid JSON"),
+                "distance": node.distance,
+            })
+        })
+        .collect();
+    let bridges: Vec<_> = trace
+        .bridges
+        .iter()
+        .map(|bridge| {
+            serde_json::json!({
+                "semantic": serde_json::from_str::<serde_json::Value>(
+                    &edge_endpoint_json(&Some(bridge.semantic.clone()))
+                ).expect("endpoint serializer emits valid JSON"),
+                "syntax": serde_json::from_str::<serde_json::Value>(
+                    &edge_endpoint_json(&Some(bridge.syntax.clone()))
+                ).expect("endpoint serializer emits valid JSON"),
+                "definition_span": [bridge.definition_span.0, bridge.definition_span.1],
+                "digest": bridge.digest,
+            })
+        })
+        .collect();
+    let mut omitted_nodes = result.omitted_nodes;
+    let context_limit_omitted_edges = omitted_edges;
+    let context_limit_omitted_nodes = omitted_nodes;
+    let mut byte_omitted_edges = 0usize;
+    let mut byte_omitted_nodes = 0usize;
+    loop {
+        let truncated = trace.truncated || omitted_edges > 0 || omitted_nodes > 0;
+        let mut reasons = trace.unresolved.clone();
+        if context_limit_omitted_edges > 0 || context_limit_omitted_nodes > 0 {
+            reasons.push("context-limit".to_string());
+        }
+        if byte_omitted_edges > 0 || byte_omitted_nodes > 0 {
+            reasons.push("output-byte-budget".to_string());
+        }
+        reasons.sort();
+        reasons.dedup();
+        let value = serde_json::json!({
+            "schema_version": 1,
+            "operation": "context",
+            "repo": &trace.repo,
+            "snapshot": {
+                "id": trace.snapshot.id,
+                "nonce": &trace.snapshot.nonce,
+                "revision": &trace.revision,
+            },
+            "freshness": {"status": &trace.freshness, "reasons": &trace.freshness_reasons},
+            "verification": &trace.verification,
+            "anchor": serde_json::from_str::<serde_json::Value>(&trace_anchor_json(&trace.anchor))
+                .expect("anchor serializer emits valid JSON"),
+            "distance_scope": "inspected_subgraph",
+            "impact": {
+                "verdict": trace.impact_verdict,
+                "completeness": {
+                    "status": &trace.completeness.status,
+                    "covered": trace.completeness.covered,
+                    "total": trace.completeness.total,
+                    "total_exact": trace.total_exact,
+                    "denominator": &trace.completeness.denominator,
+                    "unresolved": &trace.completeness.unresolved,
+                }
+            },
+            "graph": {
+                "nodes": &nodes,
+                "edges": &edge_values,
+                "bridges": &bridges,
+                "visits": {"nodes": trace.nodes, "edges": trace.edge_visits},
+                "truncated": trace.truncated || omitted_edges > 0 || omitted_nodes > 0,
+                "unresolved": &reasons,
+            },
+            "query": {
+                "requested": result.query_requested,
+                "status": if result.query_requested { "not_run" } else { "not_requested" },
+                "reason": if result.query_requested { Some("reserved_for_follow_up") } else { None },
+            },
+            "semantic": {
+                "requested": result.semantic_requested,
+                "status": if result.semantic_requested { "not_run" } else { "not_requested" },
+                "reason": if result.semantic_requested { Some("reserved_for_follow_up") } else { None },
+            },
+            "budgets": {
+                "depth": trace.depth,
+                "max_depth": edges::TRACE_MAX_DEPTH,
+                "nodes": edges::TRACE_MAX_NODES,
+                "edges": edges::TRACE_MAX_EDGES,
+                "paths": edges::TRACE_MAX_PATHS,
+                "mappings": edges::TRACE_MAX_NODES,
+                "time_ms": edges::TRACE_TIME_MS,
+            },
+            "limits": {"limit": result.limit, "max_bytes": result.max_bytes},
+            "truncation": {
+                "truncated": truncated,
+                "max_bytes": result.max_bytes,
+                "omitted_nodes": omitted_nodes,
+                "omitted_edges": omitted_edges,
+            },
+        });
+        let encoded = serde_json::to_string(&value)
+            .map_err(|e| format!("context response assembly failed: {e}"))?;
+        if encoded.len() <= result.max_bytes {
+            return Ok(encoded);
+        }
+        if !edge_values.is_empty() {
+            edge_values.pop();
+            omitted_edges += 1;
+            byte_omitted_edges += 1;
+        } else if nodes.len() > 1 {
+            nodes.pop();
+            omitted_nodes += 1;
+            byte_omitted_nodes += 1;
+        } else {
+            return Err("context response envelope exceeds max_bytes".to_string());
+        }
+    }
 }
 
 // --- knowledge -------------------------------------------------------------
