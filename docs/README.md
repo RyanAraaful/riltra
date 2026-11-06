@@ -9,6 +9,7 @@ Where things are, and which documents are guidance and which are historical reco
 | [README](../README.md) | What Riltra is, how to install it, the commands, MCP setup, and its limits. |
 | [Agent setup guide](guide/agent-setup.md) | Connecting an AI coding agent: which tool to call, and how to read the labels. |
 | [Roadmap](../ROADMAP.md) | What is planned and what is not. |
+| [Hybrid architecture roadmap](hybrid-architecture-roadmap.md) | Owner-adopted architecture direction and acceptance gates for planned stages. |
 | [Changelog](../CHANGELOG.md) | What changed in each release. |
 | [Installing Riltra](../release/INSTALL.md) | Installing from a release archive. |
 | [Release candidate packaging](../release/README.md) | How archives are built, checked and verified. |

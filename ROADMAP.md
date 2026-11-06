@@ -1,8 +1,10 @@
 # Roadmap
 
-This roadmap says what Riltra is working toward and what it has decided not to build. It carries no dates: items move when evidence arrives, and the order inside a section is not a ranking. For what exists today, read the [README](README.md); for what has shipped, read the [changelog](CHANGELOG.md).
+This roadmap tracks product work and non-goals. The owner-adopted [hybrid architecture roadmap](docs/hybrid-architecture-roadmap.md) is the master for architecture direction; its future stages remain planned until separately approved and implemented. Items below carry no dates: they move when evidence arrives, and the order inside a section is not a ranking. For what exists today, read the [README](README.md); for what has shipped, read the [changelog](CHANGELOG.md).
 
 Riltra is pre-release, and its working rule is to claim only what the evidence supports. Most items below therefore end in something other people can check: a release, a published report, a fixed defect.
+
+The published `0.1.0` assets received one Phase B installer check on hosted Windows, Linux and macOS Intel x64 runners on 2026-11-04; see the [dated M10 amendment](docs/m10-phase-b-amendment-2026-11-04.md) for scope and limits. The earlier M10 consolidation remains unchanged as a historical record.
 
 ## Now: after the first pre-release
 
@@ -16,7 +18,7 @@ Riltra is pre-release, and its working rule is to claim only what the evidence s
 - **Skip build and vendor directories by default**, with a documented override. Today `.riltraignore` matches exact paths and directory prefixes only, from the repository root ([guide](docs/guide/agent-setup.md#excluding-paths)).
 - **Profile the fixed cost of re-indexing an unchanged repository**, then decide what to change.
 - **Add tests for non-ASCII source**, where graph columns count bytes.
-- **Add supply-chain checks to CI:** dependency advisory and license checks, workflow actions pinned by commit, automated update proposals, and a sign-off check on commits.
+- **Extend supply-chain checks:** CI already audits the locked Rust dependency graph against RustSec and checks dependency-license metadata and release-document drift. Workflow actions pinned by commit SHA, automated dependency update proposals, and CI enforcement of commit sign-off remain deferred; see the [hybrid architecture roadmap](docs/hybrid-architecture-roadmap.md#existing-checks-and-deferred-supply-chain-work).
 - **Document a reproducible way to produce a Rust SCIP index.** It stays opt-in: the producer runs the project's build code, so it is only for source you trust.
 
 ## Later: only with results and outside demand
@@ -30,7 +32,7 @@ Riltra is pre-release, and its working rule is to claim only what the evidence s
 ## Not planned
 
 - A network service: no HTTP server, daemon or file watcher.
-- Embeddings or vector search.
+- Embeddings or vector search for source code. The adopted architecture roadmap plans opt-in semantic retrieval for active engineering-knowledge records only; it is not implemented yet and does not change core or lexical-search behavior.
 - MCP tools that write.
 - A user interface or a graph database.
 - Telemetry.
