@@ -97,4 +97,4 @@ This repository is indexed by Riltra, a local code map reached through MCP tools
 
 ## Limits
 
-Which languages have which evidence, and what stays unmet, is in the README: [Language support](../../README.md#language-support) and [Known limitations](../../README.md#known-limitations). The [roadmap](../../ROADMAP.md) says what is planned.
+Which languages have which evidence, and what stays unmet, is in the README: [Language support](../../README.md#language-support) and [Known limitations](../../README.md#known-limitations). The [product roadmap](../../ROADMAP.md) tracks product work; the [hybrid architecture roadmap](../hybrid-architecture-roadmap.md) is the adopted architecture direction for future stages, not a claim that those stages are implemented.
