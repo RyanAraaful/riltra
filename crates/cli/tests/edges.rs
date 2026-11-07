@@ -61,6 +61,195 @@ fn do_index(home: &Path) -> String {
     out
 }
 
+#[test]
+fn r1_context_reports_scoped_impact_and_unrun_relevance() {
+    let h = home("context-chain");
+    let lines = trace_fixture(&h, &[vec![1], vec![2], vec![]]);
+    let anchor_line = lines[2].to_string();
+    let (code, out, err) = run(
+        &h,
+        &[
+            "context",
+            "--repo",
+            "sem",
+            "--path",
+            "graph.py",
+            "--line",
+            &anchor_line,
+            "--col",
+            "6",
+            "--depth",
+            "3",
+            "--limit",
+            "20",
+            "--query",
+            "why is this called",
+            "--semantic",
+        ],
+    );
+    assert_eq!(code, 0, "context failed: {err}");
+    let value: serde_json::Value = serde_json::from_str(&out).expect("context JSON");
+    assert_eq!(value["operation"], "context");
+    assert_eq!(value["distance_scope"], "inspected_subgraph");
+    assert_eq!(value["impact"]["verdict"], "HIGH");
+    assert_eq!(value["query"]["status"], "not_run");
+    assert_eq!(value["semantic"]["status"], "not_run");
+    let mut distances: Vec<usize> = value["graph"]["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|node| node["distance"].as_u64().unwrap() as usize)
+        .collect();
+    distances.sort_unstable();
+    assert_eq!(distances, [0, 1, 2]);
+    let (repeat_code, repeat, repeat_err) = run(
+        &h,
+        &[
+            "context",
+            "--repo",
+            "sem",
+            "--path",
+            "graph.py",
+            "--line",
+            &anchor_line,
+            "--col",
+            "6",
+            "--depth",
+            "3",
+            "--limit",
+            "20",
+            "--query",
+            "why is this called",
+            "--semantic",
+        ],
+    );
+    assert_eq!(repeat_code, 0, "{repeat_err}");
+    assert_eq!(out, repeat, "context JSON ordering must be deterministic");
+
+    let source = h.join("sem").join("graph.py");
+    let mut contents = std::fs::read_to_string(&source).unwrap();
+    contents.push_str("# changed after indexing\n");
+    std::fs::write(&source, contents).unwrap();
+    let (code, out, err) = run(
+        &h,
+        &[
+            "context",
+            "--repo",
+            "sem",
+            "--path",
+            "graph.py",
+            "--line",
+            &anchor_line,
+            "--col",
+            "6",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    let stale: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(stale["freshness"]["status"], "stale", "{stale}");
+    assert_eq!(stale["impact"]["verdict"], "UNKNOWN", "{stale}");
+    assert!(
+        stale["graph"]["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|edge| edge["verification"] == "Stale"),
+        "{stale}"
+    );
+}
+
+#[test]
+fn r1_context_empty_graph_keeps_anchor_and_unknown_coverage() {
+    let h = home("context-empty");
+    let lines = trace_fixture(&h, &[vec![]]);
+    let line = lines[0].to_string();
+    let (code, out, err) = run(
+        &h,
+        &[
+            "context", "--repo", "sem", "--path", "graph.py", "--line", &line, "--col", "6",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    let value: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(value["impact"]["verdict"], "UNKNOWN", "{value}");
+    assert_eq!(value["impact"]["completeness"]["status"], "partial");
+    assert_eq!(value["graph"]["nodes"].as_array().unwrap().len(), 1);
+    assert_eq!(value["graph"]["nodes"][0]["distance"], 0);
+    assert_eq!(value["graph"]["edges"], serde_json::json!([]));
+}
+
+#[test]
+fn r1_context_caps_final_escaped_json_and_reports_dropped_items() {
+    let h = home("context-byte-budget");
+    let mut graph = vec![vec![]];
+    graph.extend((0..80).map(|_| vec![0]));
+    let lines = trace_fixture(&h, &graph);
+    let line = lines[0].to_string();
+    let (code, out, err) = run(
+        &h,
+        &[
+            "context",
+            "--repo",
+            "sem",
+            "--path",
+            "graph.py",
+            "--line",
+            &line,
+            "--col",
+            "6",
+            "--limit",
+            "100",
+            "--max-bytes",
+            "8192",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    let value: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert!(
+        out.trim_end().len() <= 8192,
+        "{} JSON bytes",
+        out.trim_end().len()
+    );
+    assert_eq!(value["truncation"]["truncated"], true, "{value}");
+    assert!(value["truncation"]["omitted_edges"].as_u64().unwrap() > 0);
+    assert_eq!(
+        value["impact"]["verdict"], "HIGH",
+        "coverage stays independent of output pruning"
+    );
+}
+
+#[test]
+fn r1_context_rejects_reserved_query_and_bounds_without_creating_an_index() {
+    let h = home("context-read-only-missing");
+    repo_with(&h, "sem", &[("graph.py", "def f0():\n    pass\n")]);
+    for extra in [
+        vec!["--depth", "0"],
+        vec!["--depth", "7"],
+        vec!["--limit", "101"],
+        vec!["--max-bytes", "8191"],
+        vec!["--max-bytes", "131073"],
+        vec!["--query", "   "],
+    ] {
+        let mut args = vec![
+            "context", "--repo", "sem", "--path", "graph.py", "--line", "1", "--col", "6",
+        ];
+        args.extend(extra);
+        assert_eq!(run(&h, &args).0, 2, "{args:?}");
+    }
+    let (code, _, err) = run(
+        &h,
+        &[
+            "context", "--repo", "sem", "--path", "graph.py", "--line", "1", "--col", "6",
+        ],
+    );
+    assert_eq!(code, 3, "{err}");
+    assert!(err.contains("no snapshot"), "{err}");
+    assert!(
+        !h.join("index").exists(),
+        "read-only context must not create an index"
+    );
+}
+
 // Minimal proto3 writer for exactly the fields the importer reads (field
 // numbers pinned by scip.proto; same shape as tests/semantic.rs).
 fn varint(mut v: u64, out: &mut Vec<u8>) {

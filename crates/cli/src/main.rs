@@ -9,6 +9,7 @@
 
 mod args;
 mod backup;
+mod context;
 mod doctor;
 mod edges;
 mod git;
@@ -52,7 +53,7 @@ pub(crate) fn usage() -> String {
   {NAME} semantic query --repo <name> --path <rel> --line <n> --col <n> [--refs] [--lsp-server <abs-path>]
   {NAME} callers --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--limit <n>] [--offset <n>]
   {NAME} callees --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--limit <n>] [--offset <n>]
-  {NAME} trace --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--to <path:line:col>] [--depth <n>] [--limit <n>] [--offset <n>]\n  {NAME} impact --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--depth <n>] [--limit <n>] [--offset <n>]\n  {NAME} knowledge create --repo <name> --input -\n  {NAME} knowledge show --repo <name> --id <id> [--revision <n>]\n  {NAME} knowledge update --repo <name> --id <id> --expected-revision <n> --input -\n  {NAME} knowledge history --repo <name> --id <id> [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge search --repo <name> [--query <text>] [--path <rel>] [--kind <kind>] [--include-archived] [--include-superseded] [--include-retracted] [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge link --repo <name> --input -\n  {NAME} knowledge unlink --repo <name> --relation <id> --input -\n  {NAME} knowledge bind --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] --input -\n  {NAME} knowledge unbind --repo <name> --binding <id> --input -\n  {NAME} knowledge at --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge related --repo <name> --id <id> [--revision <n>] [--direction inbound|outbound] [--include-retracted] [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge export --repo <name> [--format jsonl|md] [--out <path>]\n  {NAME} knowledge import --repo <name> --file <path>\n  {NAME} knowledge backup --repo <name> --out <path>\n  {NAME} knowledge restore --repo <name> --file <path> [--overwrite]\n  {NAME} knowledge verify --repo <name>\n  {NAME} mcp\n\nCommands:\n  status       Print deterministic bootstrap status as JSON\n  init         Register a local repository root\n  repo list    List registered repositories as JSON\n  repo status  Git/worktree fingerprint of a registered repository\n  doctor       Path-security and repository health checks as JSON\n  scan         Syntax facts (definitions/imports/calls) as JSON\n  index        Build the durable code index for a repository\n  index status Report index freshness (fresh/stale/unknown) as JSON\n  search       Search indexed symbols as JSON\n  semantic import Import a SCIP index against the live snapshot as JSON\n  semantic status Per-provider binding verification as JSON\n  semantic query Single-hop definition/reference lookup as JSON\n  callers Direct callers of the anchored identity as JSON\n  callees Direct callees of the anchored identity as JSON\n  trace Bounded plausible static paths with per-hop evidence\n  impact Conservative inbound impact with evidence and UNKNOWN default\n  mcp Serve the MCP stdio interface\n"
+  {NAME} trace --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--to <path:line:col>] [--depth <n>] [--limit <n>] [--offset <n>]\n  {NAME} impact --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--depth <n>] [--limit <n>] [--offset <n>]\n  {NAME} context --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--query <text>] [--semantic] [--depth <n>] [--limit <n>] [--max-bytes <n>]\n  {NAME} knowledge create --repo <name> --input -\n  {NAME} knowledge show --repo <name> --id <id> [--revision <n>]\n  {NAME} knowledge update --repo <name> --id <id> --expected-revision <n> --input -\n  {NAME} knowledge history --repo <name> --id <id> [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge search --repo <name> [--query <text>] [--path <rel>] [--kind <kind>] [--include-archived] [--include-superseded] [--include-retracted] [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge link --repo <name> --input -\n  {NAME} knowledge unlink --repo <name> --relation <id> --input -\n  {NAME} knowledge bind --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] --input -\n  {NAME} knowledge unbind --repo <name> --binding <id> --input -\n  {NAME} knowledge at --repo <name> --path <rel> --line <n> --col <n> [--symbol <uri>] [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge related --repo <name> --id <id> [--revision <n>] [--direction inbound|outbound] [--include-retracted] [--limit <n>] [--offset <n>] [--generation <n>]\n  {NAME} knowledge export --repo <name> [--format jsonl|md] [--out <path>]\n  {NAME} knowledge import --repo <name> --file <path>\n  {NAME} knowledge backup --repo <name> --out <path>\n  {NAME} knowledge restore --repo <name> --file <path> [--overwrite]\n  {NAME} knowledge verify --repo <name>\n  {NAME} mcp\n\nCommands:\n  status       Print deterministic bootstrap status as JSON\n  init         Register a local repository root\n  repo list    List registered repositories as JSON\n  repo status  Git/worktree fingerprint of a registered repository\n  doctor       Path-security and repository health checks as JSON\n  scan         Syntax facts (definitions/imports/calls) as JSON\n  index        Build the durable code index for a repository\n  index status Report index freshness (fresh/stale/unknown) as JSON\n  search       Search indexed symbols as JSON\n  semantic import Import a SCIP index against the live snapshot as JSON\n  semantic status Per-provider binding verification as JSON\n  semantic query Single-hop definition/reference lookup as JSON\n  callers Direct callers of the anchored identity as JSON\n  callees Direct callees of the anchored identity as JSON\n  trace Bounded plausible static paths with per-hop evidence\n  impact Conservative inbound impact with evidence and UNKNOWN default\n  context Bounded graph context with caller-to-anchor distances\n  mcp Serve the MCP stdio interface\n"
     )
 }
 
@@ -596,6 +597,7 @@ fn dispatch(cmd: Command, out: &mut String, err: &mut String) -> i32 {
         Command::Edge { op } => cmd_edge(op, out, err),
         Command::Trace(args) => cmd_trace(args, out, err),
         Command::Impact(args) => cmd_graph(args, out, err, true),
+        Command::Context(args) => cmd_context(args, out, err),
         Command::Knowledge { op } => cmd_knowledge(op, out, err),
         Command::Mcp => mcp::run(),
     }
@@ -832,6 +834,108 @@ fn cmd_graph(args: args::TraceArgs, out: &mut String, err: &mut String, impact: 
         Err(e) => {
             err.push_str(&format!("error: {e}\n"));
             3
+        }
+    }
+}
+
+fn cmd_context(args: args::ContextArgs, out: &mut String, err: &mut String) -> i32 {
+    let parsed = (|| {
+        let line = trace_position(&args.line, "--line")?;
+        let col = trace_position(&args.col, "--col")?;
+        let depth = parse_count(args.depth.as_deref(), context::DEFAULT_DEPTH, "depth")?;
+        if !(1..=edges::TRACE_MAX_DEPTH).contains(&depth) {
+            return Err("--depth must be between 1 and 6".to_string());
+        }
+        let limit = parse_count(args.limit.as_deref(), context::DEFAULT_LIMIT, "limit")?;
+        if !(1..=context::MAX_LIMIT).contains(&limit) {
+            return Err(format!(
+                "--limit must be between 1 and {}",
+                context::MAX_LIMIT
+            ));
+        }
+        let max_bytes = parse_count(
+            args.max_bytes.as_deref(),
+            context::DEFAULT_MAX_BYTES,
+            "max-bytes",
+        )?;
+        if !(context::MIN_MAX_BYTES..=context::MAX_MAX_BYTES).contains(&max_bytes) {
+            return Err(format!(
+                "--max-bytes must be between {} and {}",
+                context::MIN_MAX_BYTES,
+                context::MAX_MAX_BYTES
+            ));
+        }
+        Ok((line, col, depth, limit, max_bytes))
+    })();
+    let (line, col, depth, limit, max_bytes) = match parsed {
+        Ok(values) => values,
+        Err(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            return 2;
+        }
+    };
+    let request = context::ContextRequest {
+        path: &args.path,
+        line,
+        col,
+        symbol: args.symbol.as_deref(),
+        query: args.query.as_deref(),
+        semantic: args.semantic,
+        depth,
+        limit,
+        max_bytes,
+    };
+    let (root, _) = match resolve_recorded_root(&args.repo, err) {
+        Ok(paths) => paths,
+        Err(code) => return code,
+    };
+    if let Err(e) = context::validate_request(Path::new(&root), &request) {
+        err.push_str(&format!("error: {e}\n"));
+        return if e.starts_with("invalid context bounds") || e.starts_with("context query") {
+            2
+        } else {
+            3
+        };
+    }
+    match store::open_read(&store::db_path(&paths::config_dir(), &args.repo)) {
+        store::IndexRead::Missing => {
+            err.push_str("error: no snapshot: index the repository first\n");
+            3
+        }
+        store::IndexRead::Outdated(version) => {
+            err.push_str(&format!("error: index schema v{version} is outdated\n"));
+            3
+        }
+        store::IndexRead::Ahead(version) => {
+            err.push_str(&format!(
+                "error: database schema v{version} is newer than supported v{}\n",
+                store::SCHEMA_VERSION
+            ));
+            3
+        }
+        store::IndexRead::Error(e) => {
+            err.push_str(&format!("error: {e}\n"));
+            3
+        }
+        store::IndexRead::Ready(mut conn) => {
+            let result =
+                match context::query_conn(&mut conn, &args.repo, Path::new(&root), &request) {
+                    Ok(result) => result,
+                    Err(e) => {
+                        err.push_str(&format!("error: {e}\n"));
+                        return 3;
+                    }
+                };
+            match response::context_query_json(&result) {
+                Ok(value) => {
+                    *out = value + "\n";
+                    0
+                }
+                Err(e) => {
+                    err.push_str(&format!("error: {e}\n"));
+                    3
+                }
+            }
         }
     }
 }
