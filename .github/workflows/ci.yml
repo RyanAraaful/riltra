@@ -137,6 +137,27 @@ jobs:
         run: cargo test --locked --no-default-features --features semantic-knowledge --bin riltra inference::tests
       - name: Test deterministic MCP JSON with optional feature graph
         run: cargo test --locked --no-default-features --features semantic-knowledge --bin riltra mcp_structured_json_is_recursively_sorted_for_core_byte_compatibility
+      - name: Test deterministic JSON key ordering with optional feature graph
+        shell: bash
+        run: |
+          set -euo pipefail
+          test_name='json::tests::sorts_nested_json_objects_without_reordering_arrays'
+          cargo test --locked --no-default-features --features semantic-knowledge --bin riltra "$test_name" -- --list | tr -d '\r' | grep -Fx "$test_name: test"
+          cargo test --locked --no-default-features --features semantic-knowledge --bin riltra "$test_name" -- --include-ignored --exact
+      - name: Test deterministic LSP JSON ordering with optional feature graph
+        shell: bash
+        run: |
+          set -euo pipefail
+          test_name='lsp::tests::framing_uses_sorted_object_keys_with_nested_values'
+          cargo test --locked --no-default-features --features semantic-knowledge --bin riltra "$test_name" -- --list | tr -d '\r' | grep -Fx "$test_name: test"
+          cargo test --locked --no-default-features --features semantic-knowledge --bin riltra "$test_name" -- --include-ignored --exact
+      - name: Test deterministic context JSON ordering with optional feature graph
+        shell: bash
+        run: |
+          set -euo pipefail
+          test_name='r1_context_reports_scoped_impact_and_unrun_relevance'
+          cargo test --locked --no-default-features --features semantic-knowledge --test edges "$test_name" -- --list | tr -d '\r' | grep -Fx "$test_name: test"
+          cargo test --locked --no-default-features --features semantic-knowledge --test edges "$test_name" -- --include-ignored --exact
       - name: Test deterministic MCP tool schemas with optional feature graph
         run: cargo test --locked --no-default-features --features semantic-knowledge --bin riltra tool_schemas_keep_core_key_order
       - name: Test advertised MCP schema order with optional feature graph
@@ -163,6 +184,10 @@ jobs:
         env:
           CARGO_NET_OFFLINE: "true"
         run: cargo run --locked --no-default-features --features semantic-knowledge --example release_docs -- --check
+      - name: Test release document failure paths with optional feature graph
+        env:
+          CARGO_NET_OFFLINE: "true"
+        run: cargo test --locked --no-default-features --features semantic-knowledge --example release_docs
 
   # Phase A of M10 Task 5: a native archive from this commit, installed and
   # checked on each native x64 runner. It complements the `check` matrix and
