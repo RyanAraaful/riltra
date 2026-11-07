@@ -129,6 +129,10 @@ jobs:
           [[ "$("$root/bin/protoc" --version)" == 'libprotoc 33.5' ]]
       - name: Check all optional-feature targets
         run: cargo check --locked --no-default-features --features semantic-knowledge --all-targets
+      - name: Lint all optional-feature targets
+        env:
+          CARGO_NET_OFFLINE: "true"
+        run: cargo clippy --locked --no-default-features --features semantic-knowledge --all-targets -- -D warnings
       - name: Test local asset validation and embedding contract
         run: cargo test --locked --no-default-features --features semantic-knowledge --bin riltra inference::tests
       - name: Test deterministic MCP JSON with optional feature graph
@@ -137,10 +141,28 @@ jobs:
         run: cargo test --locked --no-default-features --features semantic-knowledge --bin riltra tool_schemas_keep_core_key_order
       - name: Test advertised MCP schema order with optional feature graph
         run: cargo test --locked --no-default-features --features semantic-knowledge --test mcp mcp_tools_list_advertises_the_fourteen_tools
-      - name: Test core and optional dependency audits offline
+      - name: Verify and test both dependency audits offline
+        shell: bash
         env:
           CARGO_NET_OFFLINE: "true"
-        run: cargo test --locked --no-default-features --features semantic-knowledge --test semantic new_
+        run: |
+          set -euo pipefail
+          audit_args=(--locked --no-default-features --features semantic-knowledge --test semantic)
+          listed="$(cargo test "${audit_args[@]}" -- --list)"
+          for name in \
+            new_dependencies_are_audited_for_core_graph \
+            new_semantic_dependencies_are_audited_for_feature_graph; do
+            if ! printf '%s\n' "$listed" | tr -d '\r' | grep -Fqx "$name: test"; then
+              echo "required dependency-audit test is missing or ignored: $name" >&2
+              exit 1
+            fi
+          done
+          cargo test "${audit_args[@]}" new_dependencies_are_audited_for_core_graph -- --exact --include-ignored
+          cargo test "${audit_args[@]}" new_semantic_dependencies_are_audited_for_feature_graph -- --exact --include-ignored
+      - name: Check release documents with optional feature graph
+        env:
+          CARGO_NET_OFFLINE: "true"
+        run: cargo run --locked --no-default-features --features semantic-knowledge --example release_docs -- --check
 
   # Phase A of M10 Task 5: a native archive from this commit, installed and
   # checked on each native x64 runner. It complements the `check` matrix and

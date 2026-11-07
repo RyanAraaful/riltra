@@ -23,10 +23,12 @@ use rmcp::schemars::JsonSchema;
 use rmcp::{serve_server, tool, tool_handler, tool_router, ServerHandler};
 use serde::Deserialize;
 
+#[cfg(feature = "semantic-knowledge")]
+use crate::json;
 use crate::knowledge_store_absent;
 use crate::{
-    context, doctor, git, ignore, index, json, knowledge, knowledge_binding, knowledge_store,
-    paths, registry, response, store,
+    context, doctor, git, ignore, index, knowledge, knowledge_binding, knowledge_store, paths,
+    registry, response, store,
 };
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -531,20 +533,26 @@ impl ServerHandler for RiltraMcp {
 
 /// The optional semantic graph enables serde_json's `preserve_order`, while
 /// the core build's default map sorts Schemars properties alphabetically.
-/// Keep the advertised schemas byte-compatible by normalizing both schemas
-/// at the `tools/list` boundary.
+/// Normalize advertised schemas for that graph; the core build already keeps
+/// the same order without cloning them.
 fn sorted_tool_definitions() -> Vec<Tool> {
-    let mut tools = RiltraMcp::tool_router().list_all();
-    for tool in &mut tools {
-        tool.input_schema = std::sync::Arc::new(sorted_schema(tool.input_schema.as_ref()));
-        tool.output_schema = tool
-            .output_schema
-            .as_ref()
-            .map(|schema| std::sync::Arc::new(sorted_schema(schema.as_ref())));
-    }
+    let tools = RiltraMcp::tool_router().list_all();
+    #[cfg(feature = "semantic-knowledge")]
+    let tools = {
+        let mut tools = tools;
+        for tool in &mut tools {
+            tool.input_schema = std::sync::Arc::new(sorted_schema(tool.input_schema.as_ref()));
+            tool.output_schema = tool
+                .output_schema
+                .as_ref()
+                .map(|schema| std::sync::Arc::new(sorted_schema(schema.as_ref())));
+        }
+        tools
+    };
     tools
 }
 
+#[cfg(feature = "semantic-knowledge")]
 fn sorted_schema(schema: &rmcp::model::JsonObject) -> rmcp::model::JsonObject {
     let mut value = serde_json::Value::Object(schema.clone());
     json::sort_value_keys(&mut value);
@@ -576,15 +584,25 @@ fn doc(json_text: &str) -> CallToolResult {
     }
 }
 
-fn structured_doc(mut value: serde_json::Value) -> CallToolResult {
-    json::sort_value_keys(&mut value);
+fn structured_doc(value: serde_json::Value) -> CallToolResult {
+    #[cfg(feature = "semantic-knowledge")]
+    let value = {
+        let mut value = value;
+        json::sort_value_keys(&mut value);
+        value
+    };
     CallToolResult::structured(value)
 }
 
 /// A classified refusal: `{"kind": ..., "message": ...}` with CLI message text.
 fn tool_error(kind: &str, message: &str) -> CallToolResult {
-    let mut value = serde_json::json!({"kind": kind, "message": message});
-    json::sort_value_keys(&mut value);
+    let value = serde_json::json!({"kind": kind, "message": message});
+    #[cfg(feature = "semantic-knowledge")]
+    let value = {
+        let mut value = value;
+        json::sort_value_keys(&mut value);
+        value
+    };
     CallToolResult::structured_error(value)
 }
 
@@ -1675,7 +1693,7 @@ fn health_doc() -> CallToolResult {
         Ok(value) => value,
         Err(e) => return tool_error("store_error", &e),
     };
-    let mut value = serde_json::json!({
+    let value = serde_json::json!({
         "operation": "health",
         "status": status,
         "doctor": doctor,
@@ -1745,7 +1763,12 @@ fn health_doc() -> CallToolResult {
         },
         "repo_count": reg.repos.len(),
     });
-    json::sort_value_keys(&mut value);
+    #[cfg(feature = "semantic-knowledge")]
+    let value = {
+        let mut value = value;
+        json::sort_value_keys(&mut value);
+        value
+    };
     let text = match serde_json::to_string(&value) {
         Ok(text) => text,
         Err(e) => {

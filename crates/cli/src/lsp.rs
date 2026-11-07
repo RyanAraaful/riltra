@@ -57,9 +57,15 @@ pub struct LspEvidence {
 
 /// Encode one JSON-RPC message with Content-Length framing.
 pub fn encode_message(body: &Value) -> Result<Vec<u8>, String> {
-    let mut body = body.clone();
-    crate::json::sort_value_keys(&mut body);
-    let text = serde_json::to_string(&body).map_err(|e| format!("cannot encode request: {e}"))?;
+    #[cfg(feature = "semantic-knowledge")]
+    let text = {
+        let mut sorted_body = body.clone();
+        crate::json::sort_value_keys(&mut sorted_body);
+        serde_json::to_string(&sorted_body)
+    };
+    #[cfg(not(feature = "semantic-knowledge"))]
+    let text = serde_json::to_string(body);
+    let text = text.map_err(|e| format!("cannot encode request: {e}"))?;
     let mut out = format!("Content-Length: {}\r\n\r\n", text.len()).into_bytes();
     out.extend_from_slice(text.as_bytes());
     Ok(out)

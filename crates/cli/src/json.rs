@@ -24,6 +24,7 @@ pub fn escape(s: &str) -> String {
 
 /// Recursively match serde_json's default BTreeMap key ordering, even when an
 /// optional dependency enables the `preserve_order` feature for the binary.
+#[cfg(feature = "semantic-knowledge")]
 pub fn sort_value_keys(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::Object(object) => {
@@ -45,7 +46,9 @@ pub fn sort_value_keys(value: &mut serde_json::Value) {
 
 #[cfg(test)]
 mod tests {
-    use super::{escape, sort_value_keys};
+    use super::escape;
+    #[cfg(feature = "semantic-knowledge")]
+    use super::sort_value_keys;
 
     #[test]
     fn escapes_quote_backslash_and_newline() {
@@ -70,6 +73,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "semantic-knowledge")]
     #[test]
     fn sorts_nested_json_objects_without_reordering_arrays() {
         let mut value = serde_json::json!({

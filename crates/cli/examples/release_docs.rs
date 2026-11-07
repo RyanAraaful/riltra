@@ -218,7 +218,7 @@ fn sbom(meta: &Value, packages: &[Package]) -> String {
         .filter(|p| !p.workspace)
         .map(|p| component(p, "library"))
         .collect();
-    let document = json!({
+    let mut document = json!({
         "bomFormat": "CycloneDX",
         "specVersion": "1.5",
         "version": 1,
@@ -226,7 +226,29 @@ fn sbom(meta: &Value, packages: &[Package]) -> String {
         "components": components,
         "dependencies": dependencies,
     });
+    sort_json_keys(&mut document);
     serde_json::to_string_pretty(&document).expect("serialize SBOM") + "\n"
+}
+
+/// Feature unification can enable serde_json's `preserve_order`, so normalize
+/// every object before emitting the release SBOM.
+fn sort_json_keys(value: &mut Value) {
+    match value {
+        Value::Object(object) => {
+            let mut entries: Vec<_> = std::mem::take(object).into_iter().collect();
+            for (_, child) in &mut entries {
+                sort_json_keys(child);
+            }
+            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+            object.extend(entries);
+        }
+        Value::Array(items) => {
+            for item in items {
+                sort_json_keys(item);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// The MIT license text, for a package whose published crate carries no
@@ -579,7 +601,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use super::{third_party_licenses, Package};
+    use super::{sbom, third_party_licenses, Package};
 
     static NEXT_TEMP_DIR: AtomicU64 = AtomicU64::new(0);
 
@@ -615,6 +637,49 @@ mod tests {
             dir,
             workspace: false,
         }
+    }
+
+    fn assert_json_keys_sorted(value: &serde_json::Value) {
+        match value {
+            serde_json::Value::Object(object) => {
+                let keys: Vec<_> = object.keys().map(String::as_str).collect();
+                assert!(
+                    keys.windows(2).all(|pair| pair[0] <= pair[1]),
+                    "JSON object keys are not sorted: {keys:?}"
+                );
+                for value in object.values() {
+                    assert_json_keys_sorted(value);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    assert_json_keys_sorted(item);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn sbom_json_keys_are_sorted_under_preserve_order() {
+        let temp = TempDir::new();
+        let mut root = package("riltra", temp.0.join("riltra"));
+        root.workspace = true;
+        let dependency = package("example-dep", temp.0.join("example-dep"));
+        let root_id = root.id.clone();
+        let dependency_id = dependency.id.clone();
+        let metadata = serde_json::json!({
+            "resolve": {
+                "nodes": [
+                    { "id": root_id, "deps": [{ "pkg": dependency_id }] },
+                    { "id": dependency_id, "deps": [] },
+                ],
+            },
+        });
+
+        let document = sbom(&metadata, &[root, dependency]);
+        let parsed: serde_json::Value = serde_json::from_str(&document).unwrap();
+        assert_json_keys_sorted(&parsed);
     }
 
     #[test]
