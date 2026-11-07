@@ -22,6 +22,10 @@ Apache-2.0.
 - SPDX header `SPDX-License-Identifier: Apache-2.0` on new source files.
 - `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, `cargo test`
   must pass before pushing.
+- On a fresh checkout, run `cargo fetch --locked` before `cargo test`. The
+  dependency-audit tests invoke nested `cargo tree --offline` commands and need
+  the locked registry sources cached, including platform-specific packages.
+  This fetch is build/test tooling only; Riltra's core runtime remains offline.
 - No network access in core paths; provider integrations are explicit
   opt-in only.
 - New dependencies need a `docs/licensing.md` entry (package, version,

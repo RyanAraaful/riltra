@@ -17,13 +17,19 @@ fn cargo_tree(extra_args: &[&str]) -> String {
     ];
     args.extend(extra_args);
     let out = std::process::Command::new("cargo")
-        .args(args)
+        .args(&args)
         .output()
         .expect("cargo tree must run");
-    assert!(out.status.success(), "cargo tree failed");
+    assert!(
+        out.status.success(),
+        "cargo {args:?} failed with {}:\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
+#[cfg(feature = "semantic-knowledge")]
 fn feature_tree() -> String {
     let out = std::process::Command::new("cargo")
         .args([
@@ -39,7 +45,12 @@ fn feature_tree() -> String {
         ])
         .output()
         .expect("cargo feature tree must run");
-    assert!(out.status.success(), "cargo feature tree failed");
+    assert!(
+        out.status.success(),
+        "cargo feature tree failed with {}:\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
@@ -99,6 +110,25 @@ fn tree_has_package(tree: &str, name: &str) -> bool {
     })
 }
 
+fn assert_reviewed_tree(name: &str, tree: &str, optional: bool) {
+    let mut bad = Vec::new();
+    for line in tree.lines() {
+        let Some((package, expression)) = line.rsplit_once(" [") else {
+            continue;
+        };
+        let Some(expression) = expression.strip_suffix(']') else {
+            continue;
+        };
+        let mut package = package.split_whitespace();
+        let package_name = package.next().unwrap_or("");
+        let version = package.next().unwrap_or("").strip_prefix('v').unwrap_or("");
+        if !license_is_reviewed(package_name, version, expression, optional) {
+            bad.push(line.to_string());
+        }
+    }
+    assert!(bad.is_empty(), "unreviewed {name} licenses: {bad:?}");
+}
+
 #[test]
 fn package_audit_matches_a_cargo_tree_package_name_exactly() {
     assert!(tree_has_package("libloading v0.8.9 [MIT]", "libloading"));
@@ -132,7 +162,7 @@ fn license_audit_requires_a_reviewed_complete_expression() {
 }
 
 #[test]
-fn new_dependencies_are_audited_for_core_and_semantic_feature_graphs() {
+fn new_dependencies_are_audited_for_core_graph() {
     let core = cargo_tree(&[]);
     for want in [
         "serde_json v1.0.154 [MIT OR Apache-2.0]",
@@ -163,6 +193,12 @@ fn new_dependencies_are_audited_for_core_and_semantic_feature_graphs() {
         );
     }
 
+    assert_reviewed_tree("core", &core, false);
+}
+
+#[cfg(feature = "semantic-knowledge")]
+#[test]
+fn new_semantic_dependencies_are_audited_for_feature_graph() {
     let semantic = cargo_tree(&["--features", "semantic-knowledge"]);
     for want in [
         "fastembed v7.6.0 [Apache-2.0]",
@@ -177,27 +213,7 @@ fn new_dependencies_are_audited_for_core_and_semantic_feature_graphs() {
             "missing reviewed optional dependency: {want}"
         );
     }
-    for (name, tree, optional) in [
-        ("core", core.as_str(), false),
-        ("semantic", semantic.as_str(), true),
-    ] {
-        let mut bad = Vec::new();
-        for line in tree.lines() {
-            let Some((package, expression)) = line.rsplit_once(" [") else {
-                continue;
-            };
-            let Some(expression) = expression.strip_suffix(']') else {
-                continue;
-            };
-            let mut package = package.split_whitespace();
-            let package_name = package.next().unwrap_or("");
-            let version = package.next().unwrap_or("").strip_prefix('v').unwrap_or("");
-            if !license_is_reviewed(package_name, version, expression, optional) {
-                bad.push(line.to_string());
-            }
-        }
-        assert!(bad.is_empty(), "unreviewed {name} licenses: {bad:?}");
-    }
+    assert_reviewed_tree("semantic", &semantic, true);
 
     let features = feature_tree();
     assert!(features.contains("fastembed feature \"ort-load-dynamic\""));

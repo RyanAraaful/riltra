@@ -50,10 +50,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      # Cargo's offline dependency audit can need package sources for
+      # platform-specific lockfile entries. Provision them here; this is CI
+      # build tooling only, and Riltra core remains network-free at runtime.
+      - name: Fetch locked sources for dependency audit
+        run: cargo fetch --locked
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo check --locked
-      - run: cargo test --locked
+      - name: Test core suite and offline dependency audit
+        env:
+          CARGO_NET_OFFLINE: "true"
+        run: cargo test --locked
       - run: cargo run -q -p riltra -- --help
       - run: cargo run -q -p riltra -- --version
       - run: cargo run -q -p riltra -- status
@@ -77,6 +85,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Fetch locked sources for offline optional dependency audit
+        run: cargo fetch --locked
       - name: Install pinned protoc (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -127,8 +137,10 @@ jobs:
         run: cargo test --locked --no-default-features --features semantic-knowledge --bin riltra tool_schemas_keep_core_key_order
       - name: Test advertised MCP schema order with optional feature graph
         run: cargo test --locked --no-default-features --features semantic-knowledge --test mcp mcp_tools_list_advertises_the_fourteen_tools
-      - name: Test core and optional dependency audits
-        run: cargo test --locked --no-default-features --test semantic new_dependencies_are_audited_for_core_and_semantic_feature_graphs
+      - name: Test core and optional dependency audits offline
+        env:
+          CARGO_NET_OFFLINE: "true"
+        run: cargo test --locked --no-default-features --features semantic-knowledge --test semantic new_
 
   # Phase A of M10 Task 5: a native archive from this commit, installed and
   # checked on each native x64 runner. It complements the `check` matrix and
