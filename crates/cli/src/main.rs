@@ -15,6 +15,9 @@ mod edges;
 mod git;
 mod ignore;
 mod index;
+#[cfg(feature = "semantic-knowledge")]
+#[allow(dead_code)] // The loader is consumed by the following optional vector-lifecycle task.
+mod inference;
 mod json;
 mod knowledge;
 mod knowledge_binding;

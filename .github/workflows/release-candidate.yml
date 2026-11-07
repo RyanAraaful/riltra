@@ -60,6 +60,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Fetch locked sources for complete SBOM and notices
+        run: cargo fetch --locked
       - name: Release build
         run: cargo build --release --locked -p riltra
       - name: Release documents match the locked dependency graph

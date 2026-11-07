@@ -496,6 +496,12 @@ pub(crate) fn context_query_json(result: &crate::context::ContextResult) -> Resu
                 "omitted_edges": omitted_edges,
             },
         });
+        #[cfg(feature = "semantic-knowledge")]
+        let value = {
+            let mut value = value;
+            crate::json::sort_value_keys(&mut value);
+            value
+        };
         let encoded = serde_json::to_string(&value)
             .map_err(|e| format!("context response assembly failed: {e}"))?;
         if encoded.len() <= result.max_bytes {

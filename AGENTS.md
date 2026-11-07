@@ -40,6 +40,8 @@ Use stable Rust and Git. From the repository root:
 
 CI checks Windows, Linux, and macOS. Set `RILTRA_HOME` to a scratch directory when manually running commands that create registries or databases.
 
+On a fresh checkout, run `cargo fetch --locked` before `cargo test`: the dependency-audit integration tests invoke nested `cargo tree --offline` commands and need the locked registry sources cached, including platform-specific packages. This fetch is build/test tooling only; Riltra's core runtime remains offline. Repeat the fetch before running those tests with Cargo offline mode if the cache is incomplete.
+
 ## Coding Style & Testing
 
 Follow Rust 2021 conventions and rustfmt: four-space indentation, `snake_case` functions and modules, and `CamelCase` types. Add `// SPDX-License-Identifier: Apache-2.0` to new source files. Keep unit tests inline and integration tests in the relevant `crates/cli/tests/*.rs` target; use descriptive test names. Tests use Rust's built-in test framework and isolated temporary homes. Update fixtures and goldens deliberately, reviewing byte-exact output changes. No numeric coverage threshold is specified.

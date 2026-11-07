@@ -300,7 +300,7 @@ clean-install smoke and writes their checksums; see
 ## Documentation
 
 - [Roadmap](ROADMAP.md): what is planned, and what is not.
-- [Hybrid architecture roadmap](docs/hybrid-architecture-roadmap.md): adopted architecture direction and acceptance gates; planned stages are not yet implemented.
+- [Hybrid architecture roadmap](docs/hybrid-architecture-roadmap.md): adopted architecture direction, dated implementation status, and acceptance gates.
 - [Changelog](CHANGELOG.md): notable changes per release.
 - [Agent setup guide](docs/guide/agent-setup.md): when an agent should call
   Riltra and how to read its answers.

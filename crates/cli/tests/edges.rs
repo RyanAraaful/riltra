@@ -61,6 +61,27 @@ fn do_index(home: &Path) -> String {
     out
 }
 
+fn assert_json_keys_are_sorted(value: &serde_json::Value) {
+    match value {
+        serde_json::Value::Object(object) => {
+            let keys: Vec<_> = object.keys().map(String::as_str).collect();
+            assert!(
+                keys.windows(2).all(|pair| pair[0] <= pair[1]),
+                "JSON object keys are not sorted: {keys:?}"
+            );
+            for value in object.values() {
+                assert_json_keys_are_sorted(value);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                assert_json_keys_are_sorted(item);
+            }
+        }
+        _ => {}
+    }
+}
+
 #[test]
 fn r1_context_reports_scoped_impact_and_unrun_relevance() {
     let h = home("context-chain");
@@ -89,6 +110,7 @@ fn r1_context_reports_scoped_impact_and_unrun_relevance() {
     );
     assert_eq!(code, 0, "context failed: {err}");
     let value: serde_json::Value = serde_json::from_str(&out).expect("context JSON");
+    assert_json_keys_are_sorted(&value);
     assert_eq!(value["operation"], "context");
     assert_eq!(value["distance_scope"], "inspected_subgraph");
     assert_eq!(value["impact"]["verdict"], "HIGH");

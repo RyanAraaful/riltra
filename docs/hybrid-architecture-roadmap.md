@@ -1,6 +1,6 @@
 # Hybrid architecture roadmap
 
-**Status:** Owner-adopted on 2026-11-06. This is the master architecture direction for planned work; it does not claim that the planned stages are implemented or authorize them as one continuous change.
+**Status:** Owner-adopted on 2026-11-06. Dated implementation status is recorded below; each stage still has its own acceptance and owner gates.
 
 This roadmap adopts the architecture proposal dated 2026-11-05 and replaces conflicting earlier direction only where stated below. The current product contract and source remain authoritative for implemented behavior. M8–M10 records and pilot evidence remain historical; this document does not rewrite them.
 
@@ -19,19 +19,23 @@ Correctness, provenance, freshness, repository isolation and explicit uncertaint
 - Keep the Rust modular monolith and existing CLI/MCP application boundaries.
 - Preserve the existing code-index SQLite store and knowledge SQLite store as separate canonical stores for their domains, including their schemas, migrations, export/import and revision contracts. Do not merge or replace them.
 - Keep Tree-sitter, SCIP and opt-in LSP at their existing evidence boundaries. Syntax name matches do not become semantic identity by ranking.
-- Keep FTS5 as lexical search. Petgraph is planned for bounded graph computation over selected existing evidence; it is not a graph store or an authority for symbol identity.
-- Optional semantic retrieval is limited to active engineering-knowledge records. FastEmbed and LanceDB are planned as an optional inference and derived-index path; SQLite remains canonical. Source-code embedding, hosted inference, automatic model downloads and a second model are out of scope.
+- Keep FTS5 as lexical search. Petgraph is used for bounded graph computation over selected existing evidence; it is not a graph store or an authority for symbol identity.
+- Optional semantic retrieval is limited to active engineering-knowledge records. R2a adds FastEmbed local inference and the default-off LanceDB dependency preflight; derived-index lifecycle is R2b, and semantic search/fallback is R2c. SQLite remains canonical. Source-code embedding, hosted inference, automatic model downloads and a second model are out of scope.
 - New query paths, including CLI context and MCP reads, must be read-only: they do not create or migrate stores, create locks or caches, download assets, or run providers implicitly. Explicit maintenance commands may update only derived state and must leave canonical records unchanged.
 - Preserve existing CLI/MCP names, exit codes, persisted data, deterministic JSON and key ordering. Lexical queries without an opt-in semantic flag must retain their current output contract.
 - Core operations remain offline and usable without optional semantic components. Official packages remain core-only unless a later distribution decision explicitly changes that contract.
 
 ## Planned components and pins
 
-| Component | Planned use | Initial pin | Status |
+| Component | Planned use | Initial pin | Status at adoption (2026-11-06) |
 |---|---|---:|---|
 | [Petgraph](https://crates.io/crates/petgraph/0.8.3) | Bounded graph computation | 0.8.3 | Planned; not added |
 | [FastEmbed](https://crates.io/crates/fastembed/7.6.0) | CPU inference for engineering knowledge | 7.6.0 | Optional; not added |
 | [LanceDB](https://crates.io/crates/lancedb/0.41.0) | Rebuildable vector index for engineering knowledge | 0.41.0 | Optional; not added |
+
+### Dated implementation status — 2026-11-07
+
+The status column above preserves the 2026-11-06 adoption snapshot. Since then, Petgraph 0.8.3 was added for R1, which merged through PR #44 at master revision `416bbd13`. FastEmbed 7.6.0 local inference and the default-off LanceDB 0.41.0 dependency preflight are included on open PR #45; R2a is pending merge and acceptance. PR #45 does not implement vector-index lifecycle or semantic search: R2b, R2c, R3 and R4 remain planned. This amendment updates status only; stage acceptance criteria and historical evidence remain unchanged.
 
 The single planned model is [`intfloat/multilingual-e5-small`](https://huggingface.co/intfloat/multilingual-e5-small): 384 dimensions, CPU inference, mean pooling, L2 normalization, `query:` / `passage:` prefixes, and at most 512 input tokens. Before implementation, its model, tokenizer and configuration revision and SHA-256 values, plus the local ONNX runtime ABI and checksums, must be pinned and verified. Assets are provisioned explicitly; build and query paths do not download them. Verify model-asset and crate licenses, transitive dependencies, native builds and platform compatibility before introducing optional components. These are initial pins; dependent tasks must resolve the exact manifests and feature graph against the supported toolchain and CI targets, and document any smallest necessary pin correction before implementation.
 
@@ -45,11 +49,15 @@ Stages remain proposals until their own scope is approved. Completion of a stage
 
 ### R1 — Bounded graph context
 
+**Status: implemented and merged through PR #44 (master revision `416bbd13`; 2026-11-07).**
+
 Use Petgraph 0.8.3 for one bounded graph-context operation over evidence read from the existing code-index store and a pinned snapshot. Add optional CLI and read-only MCP surfaces without changing existing queries. Preserve direction, scoped identity, owner bridges, stale and candidate labels, and traversal limits. Distances are local to the inspected subgraph, not repository-wide shortest paths. Acceptance covers cycles, duplicates and same-name identities, candidate shortcuts, empty/stale inputs, budgets, deterministic output, path confinement, read-only behavior, and CLI/MCP parity.
 
 ### R2 — Optional semantic knowledge retrieval
 
 **R2a — Local inference and dependencies:** add a default-off Cargo feature with the pins above. Verify provisioned assets and runtime compatibility without network access or automatic cache creation. The core build and query path must work without model/runtime assets.
+
+**Status as of 2026-11-07:** implementation is on open PR #45 and is pending merge and acceptance.
 
 **R2b — Derived index lifecycle:** provide explicit build, status and clear operations under the existing Riltra home. Build from one consistent active-knowledge snapshot; bind rows to repository identity, record revision, content digest and model fingerprint. Publish complete immutable generations atomically; changed source, interrupted builds or invalid paths must not replace the current generation or modify canonical knowledge. Readers and clear must be safe on Windows as well as Unix.
 

@@ -10,8 +10,9 @@
 //!     release/sbom.cdx.json must equal a freshly generated one
 //! ```
 //!
-//! It needs only std and serde_json (already a dependency). The SBOM lists every package of the resolved
-//! graph for every platform, a superset of what one native build compiles.
+//! It needs only std and serde_json (already a dependency). Metadata enables
+//! every workspace feature, so the SBOM covers optional dependencies and all
+//! target packages. It is a superset of what the default core build links.
 //! Nothing here is part of the shipped binary.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -47,13 +48,20 @@ fn workspace_root() -> PathBuf {
         .expect("workspace root")
 }
 
-/// `cargo metadata` of the locked graph. It reads the manifest of every package
-/// for every platform, so a first run downloads the ones this host does not
-/// build (crates.io, checksummed by Cargo.lock; no build script runs).
+/// `cargo metadata` of the locked graph. All-feature metadata includes optional
+/// and target-specific packages. Release and installer jobs run `cargo fetch
+/// --locked` first so their license and notice files are locally available;
+/// this command runs no package build scripts and fetches no model/runtime.
 fn metadata(root: &Path) -> Value {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     let out = Command::new(cargo)
-        .args(["metadata", "--format-version", "1", "--locked"])
+        .args([
+            "metadata",
+            "--format-version",
+            "1",
+            "--locked",
+            "--all-features",
+        ])
         .current_dir(root)
         .output()
         .expect("cargo metadata must run");
@@ -143,13 +151,29 @@ fn packages(meta: &Value, lock: &BTreeMap<(String, String), Option<String>>) -> 
     out
 }
 
-fn sbom(meta: &Value, packages: &[Package]) -> String {
-    let by_id: BTreeMap<&str, &Package> = packages.iter().map(|p| (p.id.as_str(), p)).collect();
-    let licenses = |p: &Package| match (&p.license, &p.license_file) {
-        (Some(expression), _) => json!([{ "expression": expression }]),
+fn sbom_licenses(package: &Package) -> Value {
+    match (&package.license, &package.license_file) {
+        (Some(expression), _) => {
+            let bundled = bundled_source_license_ids(&package.name);
+            if bundled.is_empty() {
+                json!([{ "expression": expression }])
+            } else {
+                let crate_expression =
+                    if expression.contains(" AND ") || expression.contains(" OR ") {
+                        format!("({expression})")
+                    } else {
+                        expression.clone()
+                    };
+                json!([{ "expression": format!("{crate_expression} AND {}", bundled.join(" AND ")) }])
+            }
+        }
         (None, Some(file)) => json!([{ "license": { "name": format!("see {file}") } }]),
         (None, None) => json!([]),
-    };
+    }
+}
+
+fn sbom(meta: &Value, packages: &[Package]) -> String {
+    let by_id: BTreeMap<&str, &Package> = packages.iter().map(|p| (p.id.as_str(), p)).collect();
     let component = |p: &Package, kind: &str| {
         let mut c = json!({
             "type": kind,
@@ -157,7 +181,7 @@ fn sbom(meta: &Value, packages: &[Package]) -> String {
             "name": p.name,
             "version": p.version,
             "purl": p.purl(),
-            "licenses": licenses(p),
+            "licenses": sbom_licenses(p),
         });
         if let Some(checksum) = &p.checksum {
             c["hashes"] = json!([{ "alg": "SHA-256", "content": checksum }]);
@@ -194,7 +218,7 @@ fn sbom(meta: &Value, packages: &[Package]) -> String {
         .filter(|p| !p.workspace)
         .map(|p| component(p, "library"))
         .collect();
-    let document = json!({
+    let mut document = json!({
         "bomFormat": "CycloneDX",
         "specVersion": "1.5",
         "version": 1,
@@ -202,7 +226,29 @@ fn sbom(meta: &Value, packages: &[Package]) -> String {
         "components": components,
         "dependencies": dependencies,
     });
+    sort_json_keys(&mut document);
     serde_json::to_string_pretty(&document).expect("serialize SBOM") + "\n"
+}
+
+/// Feature unification can enable serde_json's `preserve_order`, so normalize
+/// every object before emitting the release SBOM.
+fn sort_json_keys(value: &mut Value) {
+    match value {
+        Value::Object(object) => {
+            let mut entries: Vec<_> = std::mem::take(object).into_iter().collect();
+            for (_, child) in &mut entries {
+                sort_json_keys(child);
+            }
+            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+            object.extend(entries);
+        }
+        Value::Array(items) => {
+            for item in items {
+                sort_json_keys(item);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// The MIT license text, for a package whose published crate carries no
@@ -235,6 +281,64 @@ struct LicenseBundle {
     supplied: Vec<String>,
     /// Packages for which no text could be produced at all.
     missing: Vec<String>,
+    /// Required bundled-source license files missing from a native crate.
+    problems: Vec<String>,
+}
+
+fn bundled_source_licenses(package_name: &str) -> &'static [&'static str] {
+    match package_name {
+        // These sys crates compile bundled native code with separate licenses.
+        "onig_sys" => &["oniguruma/COPYING"],
+        "lz4-sys" => &["liblz4/lib/LICENSE"],
+        _ => &[],
+    }
+}
+
+fn bundled_source_license_headers(package_name: &str) -> &'static [&'static str] {
+    match package_name {
+        // lz4-sys compiles this file, whose xxHash license is not in lib/LICENSE.
+        "lz4-sys" => &["liblz4/lib/xxhash.c"],
+        _ => &[],
+    }
+}
+
+fn xxhash_license_header(source: &str) -> Option<&str> {
+    let source = source.trim_start();
+    let end = source.find("*/")? + 2;
+    let header = &source[..end];
+    let normalized = header
+        .lines()
+        .map(|line| {
+            line.trim()
+                .trim_start_matches("/*")
+                .trim_start_matches('*')
+                .trim_end_matches("*/")
+                .trim()
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let required = [
+        "xxHash - Fast Hash algorithm",
+        "Copyright (C) 2012-2016, Yann Collet",
+        "BSD 2-Clause License",
+        "Redistribution and use in source and binary forms",
+        "Redistributions in binary form must reproduce",
+        "THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS",
+        "IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE",
+        "OF THE POSSIBILITY OF SUCH DAMAGE.",
+    ];
+    let missing: Vec<_> = required
+        .iter()
+        .filter(|required| !normalized.contains(**required))
+        .collect();
+    missing.is_empty().then_some(header)
+}
+
+fn bundled_source_license_ids(package_name: &str) -> &'static [&'static str] {
+    match package_name {
+        "onig_sys" | "lz4-sys" => &["BSD-2-Clause"],
+        _ => &[],
+    }
 }
 
 fn declares(license: &str, id: &str) -> bool {
@@ -245,8 +349,12 @@ fn third_party_licenses(root: &Path, packages: &[Package]) -> LicenseBundle {
     let apache = std::fs::read_to_string(root.join("LICENSE")).unwrap_or_default();
     let mut bundle = LicenseBundle {
         text: String::from(
-            "Third-party software included in this distribution
-             ===================================================
+            "Third-party software covered by the locked dependency inventory
+             ===============================================================
+
+             This inventory covers every package in Cargo.lock for all workspace
+             features and targets. Optional packages may not be linked in the
+             default core build; their notices are included as a superset.
 
              Each section names a package, its declared license expression and the
              license or notice files that the published crate carries. A package whose
@@ -257,8 +365,10 @@ fn third_party_licenses(root: &Path, packages: &[Package]) -> LicenseBundle {
         ),
         supplied: Vec::new(),
         missing: Vec::new(),
+        problems: Vec::new(),
     };
     for p in packages.iter().filter(|p| !p.workspace) {
+        let mut source_headers = Vec::new();
         let mut files: Vec<PathBuf> = std::fs::read_dir(&p.dir)
             .map(|rd| {
                 rd.filter_map(Result::ok)
@@ -278,6 +388,35 @@ fn third_party_licenses(root: &Path, packages: &[Package]) -> LicenseBundle {
             })
             .unwrap_or_default();
         files.sort();
+        for relative in bundled_source_licenses(&p.name) {
+            let path = p.dir.join(relative);
+            match std::fs::read_to_string(&path) {
+                Ok(_) => files.push(path),
+                Err(error) => bundle.problems.push(format!(
+                    "{} {} cannot read bundled-source license {}: {error}",
+                    p.name, p.version, relative
+                )),
+            }
+        }
+        for relative in bundled_source_license_headers(&p.name) {
+            let path = p.dir.join(relative);
+            match std::fs::read_to_string(&path) {
+                Ok(source) => match xxhash_license_header(&source) {
+                    Some(header) => {
+                        source_headers.push((relative.replace('\\', "/"), header.to_string()))
+                    }
+                    None => bundle.problems.push(format!(
+                        "{} {} cannot read bundled-source license header {}: unrecognized xxHash BSD-2-Clause header",
+                        p.name, p.version, relative
+                    )),
+                },
+                Err(error) => bundle.problems.push(format!(
+                    "{} {} cannot read bundled-source license header {}: {error}",
+                    p.name, p.version, relative
+                )),
+            }
+        }
+        files.sort();
         let license = p.license.as_deref().unwrap_or("");
         bundle.text.push_str(&format!(
             "-----
@@ -295,16 +434,29 @@ fn third_party_licenses(root: &Path, packages: &[Package]) -> LicenseBundle {
         let mut wrote = false;
         for file in files {
             if let Ok(text) = std::fs::read_to_string(&file) {
+                let relative = file.strip_prefix(&p.dir).unwrap_or(&file);
+                let display_path = relative
+                    .components()
+                    .map(|part| part.as_os_str().to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join("/");
                 bundle.text.push_str(&format!(
                     "
 [{}]
 {}
 ",
-                    file.file_name().and_then(|n| n.to_str()).unwrap_or("?"),
+                    display_path,
                     text.trim_end()
                 ));
                 wrote = true;
             }
+        }
+        for (relative, header) in source_headers {
+            bundle.text.push_str(&format!(
+                "\n[{relative} license header]\n{}\n",
+                header.trim_end()
+            ));
+            wrote = true;
         }
         if !wrote {
             let who = format!("{} {}", p.name, p.version);
@@ -380,6 +532,7 @@ fn main() {
 
     let sbom_text = sbom(&meta, &packages);
     let bundle = third_party_licenses(&root, &packages);
+    problems.extend(bundle.problems.iter().cloned());
     eprintln!(
         "release_docs: {} packages in the locked graph ({} third-party), {} without a license file in the crate (canonical text supplied)",
         packages.len(),
@@ -440,5 +593,250 @@ fn main() {
             eprintln!("usage: release_docs --out <dir> | --check");
             std::process::exit(2);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use super::{sbom, third_party_licenses, Package};
+
+    static NEXT_TEMP_DIR: AtomicU64 = AtomicU64::new(0);
+
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new() -> Self {
+            let id = NEXT_TEMP_DIR.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir()
+                .join(format!("riltra-release-docs-{}-{id}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn package(name: &str, dir: PathBuf) -> Package {
+        Package {
+            id: format!("registry+https://example.invalid/{name}@1.0.0"),
+            name: name.to_string(),
+            version: "1.0.0".to_string(),
+            license: Some("MIT".to_string()),
+            license_file: None,
+            repository: None,
+            authors: Vec::new(),
+            checksum: Some("0".repeat(64)),
+            dir,
+            workspace: false,
+        }
+    }
+
+    fn assert_json_keys_sorted(value: &serde_json::Value) {
+        match value {
+            serde_json::Value::Object(object) => {
+                let keys: Vec<_> = object.keys().map(String::as_str).collect();
+                assert!(
+                    keys.windows(2).all(|pair| pair[0] <= pair[1]),
+                    "JSON object keys are not sorted: {keys:?}"
+                );
+                for value in object.values() {
+                    assert_json_keys_sorted(value);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    assert_json_keys_sorted(item);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn sbom_json_keys_are_sorted_under_preserve_order() {
+        let temp = TempDir::new();
+        let mut root = package("riltra", temp.0.join("riltra"));
+        root.workspace = true;
+        let dependency = package("example-dep", temp.0.join("example-dep"));
+        let root_id = root.id.clone();
+        let dependency_id = dependency.id.clone();
+        let metadata = serde_json::json!({
+            "resolve": {
+                "nodes": [
+                    { "id": root_id, "deps": [{ "pkg": dependency_id }] },
+                    { "id": dependency_id, "deps": [] },
+                ],
+            },
+        });
+
+        let document = sbom(&metadata, &[root, dependency]);
+        let parsed: serde_json::Value = serde_json::from_str(&document).unwrap();
+        assert_json_keys_sorted(&parsed);
+    }
+
+    #[test]
+    fn native_sys_crates_include_the_bundled_code_licenses_in_notices() {
+        const XXHASH_HEADER: &str = "/* xxHash - Fast Hash algorithm\nCopyright (C) 2012-2016, Yann Collet\nBSD 2-Clause License\nRedistribution and use in source and binary forms\nRedistributions in binary form must reproduce\nTHIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS\nIN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE\nOF THE POSSIBILITY OF SUCH DAMAGE.\n*/";
+        let temp = TempDir::new();
+        let root = temp.0.join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("LICENSE"), "workspace Apache license").unwrap();
+
+        let cases = [
+            (
+                "onig_sys",
+                "oniguruma/COPYING",
+                "Oniguruma BSD-2-Clause source license",
+            ),
+            (
+                "lz4-sys",
+                "liblz4/lib/LICENSE",
+                "bundled LZ4 BSD-2-Clause source license",
+            ),
+        ];
+        let mut packages = Vec::new();
+        for (name, relative, text) in cases {
+            let dir = root.join(name);
+            std::fs::create_dir_all(dir.join(std::path::Path::new(relative).parent().unwrap()))
+                .unwrap();
+            std::fs::write(dir.join("LICENSE.md"), "crate MIT license").unwrap();
+            std::fs::write(dir.join(relative), text).unwrap();
+            if name == "lz4-sys" {
+                std::fs::write(dir.join("liblz4/lib/xxhash.c"), XXHASH_HEADER).unwrap();
+            }
+            packages.push(package(name, dir));
+        }
+
+        let bundle = third_party_licenses(&root, &packages);
+
+        assert!(bundle.text.contains("Optional packages may not be linked"));
+        assert!(bundle
+            .text
+            .contains("[oniguruma/COPYING]\nOniguruma BSD-2-Clause source license"));
+        assert!(bundle
+            .text
+            .contains("[liblz4/lib/LICENSE]\nbundled LZ4 BSD-2-Clause source license"));
+        assert!(bundle.text.contains("Copyright (C) 2012-2016, Yann Collet"));
+        assert!(bundle.problems.is_empty(), "{:?}", bundle.problems);
+    }
+
+    #[test]
+    fn lz4_notice_includes_compiled_xxhash_copyright_and_license_header() {
+        const XXHASH_HEADER: &str = r#"/*
+*  xxHash - Fast Hash algorithm
+*  Copyright (C) 2012-2016, Yann Collet
+*
+*  BSD 2-Clause License (http://www.opensource.org/licenses/bsd-license.php)
+*
+*  Redistribution and use in source and binary forms, with or without
+*  modification, are permitted provided that the following conditions are
+*  met:
+*
+*  * Redistributions of source code must retain the above copyright
+*  notice, this list of conditions and the following disclaimer.
+*  * Redistributions in binary form must reproduce the above
+*  copyright notice, this list of conditions and the following disclaimer
+*  in the documentation and/or other materials provided with the
+*  distribution.
+*
+*  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+*  "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+*  LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+*  A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+*  OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+*  SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+*  LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+*  DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+*  THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+*  (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+*  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+*/
+"#;
+        let temp = TempDir::new();
+        let root = temp.0.join("root");
+        let dir = root.join("lz4-sys");
+        std::fs::create_dir_all(dir.join("liblz4/lib")).unwrap();
+        std::fs::write(root.join("LICENSE"), "workspace Apache license").unwrap();
+        std::fs::write(dir.join("LICENSE.md"), "crate MIT license").unwrap();
+        std::fs::write(dir.join("liblz4/lib/LICENSE"), "LZ4 BSD-2-Clause license").unwrap();
+        std::fs::write(dir.join("liblz4/lib/xxhash.c"), XXHASH_HEADER).unwrap();
+
+        let bundle = third_party_licenses(&root, &[package("lz4-sys", dir)]);
+
+        assert!(
+            bundle.text.contains("Copyright (C) 2012-2016, Yann Collet"),
+            "problems: {:?}; text: {}",
+            bundle.problems,
+            bundle.text
+        );
+        assert!(bundle.text.contains("BSD 2-Clause License"));
+        assert!(bundle
+            .text
+            .contains("Redistributions in binary form must reproduce"));
+        assert!(bundle.text.contains("MERCHANTABILITY AND FITNESS FOR"));
+        assert!(bundle.problems.is_empty(), "{:?}", bundle.problems);
+    }
+
+    #[test]
+    fn missing_or_unrecognized_xxhash_license_header_fails_notice_generation() {
+        for source in [
+            None,
+            Some("/* xxHash source with no license */"),
+            Some("int xxhash_source;\n"),
+        ] {
+            let temp = TempDir::new();
+            let root = temp.0.join("root");
+            let dir = root.join("lz4-sys");
+            std::fs::create_dir_all(dir.join("liblz4/lib")).unwrap();
+            std::fs::write(root.join("LICENSE"), "workspace Apache license").unwrap();
+            std::fs::write(dir.join("LICENSE.md"), "crate MIT license").unwrap();
+            std::fs::write(dir.join("liblz4/lib/LICENSE"), "LZ4 BSD-2-Clause license").unwrap();
+            if let Some(source) = source {
+                std::fs::write(dir.join("liblz4/lib/xxhash.c"), source).unwrap();
+            }
+
+            let bundle = third_party_licenses(&root, &[package("lz4-sys", dir)]);
+
+            assert_eq!(bundle.problems.len(), 1);
+            assert!(bundle.problems[0].contains(
+                "lz4-sys 1.0.0 cannot read bundled-source license header liblz4/lib/xxhash.c"
+            ));
+        }
+    }
+
+    #[test]
+    fn missing_bundled_native_license_fails_notice_generation() {
+        let temp = TempDir::new();
+        let root = temp.0.join("root");
+        let dir = root.join("onig_sys");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(root.join("LICENSE"), "workspace Apache license").unwrap();
+        std::fs::write(dir.join("LICENSE.md"), "crate MIT license").unwrap();
+
+        let bundle = third_party_licenses(&root, &[package("onig_sys", dir)]);
+
+        assert_eq!(bundle.problems.len(), 1);
+        assert!(bundle.problems[0]
+            .contains("onig_sys 1.0.0 cannot read bundled-source license oniguruma/COPYING"));
+    }
+
+    #[test]
+    fn sbom_combines_crate_and_bundled_native_source_licenses() {
+        assert_eq!(
+            super::sbom_licenses(&package("onig_sys", PathBuf::new())),
+            serde_json::json!([{ "expression": "MIT AND BSD-2-Clause" }])
+        );
+        assert_eq!(
+            super::sbom_licenses(&package("lz4-sys", PathBuf::new())),
+            serde_json::json!([{ "expression": "MIT AND BSD-2-Clause" }])
+        );
     }
 }

@@ -57,7 +57,15 @@ pub struct LspEvidence {
 
 /// Encode one JSON-RPC message with Content-Length framing.
 pub fn encode_message(body: &Value) -> Result<Vec<u8>, String> {
-    let text = serde_json::to_string(body).map_err(|e| format!("cannot encode request: {e}"))?;
+    #[cfg(feature = "semantic-knowledge")]
+    let text = {
+        let mut sorted_body = body.clone();
+        crate::json::sort_value_keys(&mut sorted_body);
+        serde_json::to_string(&sorted_body)
+    };
+    #[cfg(not(feature = "semantic-knowledge"))]
+    let text = serde_json::to_string(body);
+    let text = text.map_err(|e| format!("cannot encode request: {e}"))?;
     let mut out = format!("Content-Length: {}\r\n\r\n", text.len()).into_bytes();
     out.extend_from_slice(text.as_bytes());
     Ok(out)
@@ -1422,6 +1430,20 @@ mod tests {
         assert!(text.contains("\r\n\r\n"));
         let back = read_message(text.as_bytes(), 1024).unwrap();
         assert_eq!(back, body);
+    }
+
+    #[test]
+    fn framing_uses_sorted_object_keys_with_nested_values() {
+        let body = serde_json::json!({"z": {"y": 1, "a": 2}, "a": 0});
+        let expected = r#"{"a":0,"z":{"a":2,"y":1}}"#;
+
+        let bytes = encode_message(&body).unwrap();
+        let actual = String::from_utf8(bytes).unwrap();
+
+        assert_eq!(
+            actual,
+            format!("Content-Length: {}\r\n\r\n{expected}", expected.len())
+        );
     }
 
     #[test]
