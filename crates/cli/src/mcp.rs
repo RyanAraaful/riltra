@@ -15,15 +15,18 @@
 use std::path::{Path, PathBuf};
 
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, Implementation, ServerCapabilities, ServerConfig};
+use rmcp::model::{
+    CacheScope, CallToolResult, Implementation, ListToolsResult, PaginatedRequestParams,
+    ProtocolVersion, ServerCapabilities, ServerConfig, Tool,
+};
 use rmcp::schemars::JsonSchema;
 use rmcp::{serve_server, tool, tool_handler, tool_router, ServerHandler};
 use serde::Deserialize;
 
 use crate::knowledge_store_absent;
 use crate::{
-    context, doctor, git, ignore, index, knowledge, knowledge_binding, knowledge_store, paths,
-    registry, response, store,
+    context, doctor, git, ignore, index, json, knowledge, knowledge_binding, knowledge_store,
+    paths, registry, response, store,
 };
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -509,6 +512,46 @@ impl ServerHandler for RiltraMcp {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new(crate::NAME, env!("CARGO_PKG_VERSION")))
     }
+
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<ListToolsResult, rmcp::ErrorData> {
+        let supports_cache_hints = context
+            .protocol_version()
+            .is_some_and(|version| version >= ProtocolVersion::V_2026_07_28);
+        let mut result = ListToolsResult::with_all_items(sorted_tool_definitions());
+        if supports_cache_hints {
+            result = result.with_ttl_ms(0).with_cache_scope(CacheScope::Public);
+        }
+        Ok(result)
+    }
+}
+
+/// The optional semantic graph enables serde_json's `preserve_order`, while
+/// the core build's default map sorts Schemars properties alphabetically.
+/// Keep the advertised schemas byte-compatible by normalizing both schemas
+/// at the `tools/list` boundary.
+fn sorted_tool_definitions() -> Vec<Tool> {
+    let mut tools = RiltraMcp::tool_router().list_all();
+    for tool in &mut tools {
+        tool.input_schema = std::sync::Arc::new(sorted_schema(tool.input_schema.as_ref()));
+        tool.output_schema = tool
+            .output_schema
+            .as_ref()
+            .map(|schema| std::sync::Arc::new(sorted_schema(schema.as_ref())));
+    }
+    tools
+}
+
+fn sorted_schema(schema: &rmcp::model::JsonObject) -> rmcp::model::JsonObject {
+    let mut value = serde_json::Value::Object(schema.clone());
+    json::sort_value_keys(&mut value);
+    match value {
+        serde_json::Value::Object(schema) => schema,
+        _ => unreachable!("JSON schema root is an object"),
+    }
 }
 
 /// Run synchronous domain work on the blocking pool. Where panics unwind
@@ -525,7 +568,7 @@ async fn blocking(f: impl FnOnce() -> CallToolResult + Send + 'static) -> CallTo
 /// A success result: the shared formatter's bytes, parsed back to JSON.
 fn doc(json_text: &str) -> CallToolResult {
     match serde_json::from_str(json_text) {
-        Ok(value) => CallToolResult::structured(value),
+        Ok(value) => structured_doc(value),
         Err(e) => tool_error(
             "store_error",
             &format!("internal response assembly error: {e}"),
@@ -533,9 +576,16 @@ fn doc(json_text: &str) -> CallToolResult {
     }
 }
 
+fn structured_doc(mut value: serde_json::Value) -> CallToolResult {
+    json::sort_value_keys(&mut value);
+    CallToolResult::structured(value)
+}
+
 /// A classified refusal: `{"kind": ..., "message": ...}` with CLI message text.
 fn tool_error(kind: &str, message: &str) -> CallToolResult {
-    CallToolResult::structured_error(serde_json::json!({"kind": kind, "message": message}))
+    let mut value = serde_json::json!({"kind": kind, "message": message});
+    json::sort_value_keys(&mut value);
+    CallToolResult::structured_error(value)
 }
 
 fn repo_status_doc(input: &RepoStatusInput) -> CallToolResult {
@@ -601,7 +651,7 @@ fn repo_status_doc(input: &RepoStatusInput) -> CallToolResult {
             )
         }
     }
-    CallToolResult::structured(value)
+    structured_doc(value)
 }
 
 /// One migration pointer for outdated schemas: actionable CLI instruction,
@@ -805,6 +855,9 @@ fn search_doc(
 // --- CP4: graph tools --------------------------------------------------------
 
 /// CLI-parity anchor check (`cmd_edge`/`cmd_graph` exit-2 texts).
+// LanceDB's `serde_json/preserve_order` feature enlarges RMCP's upstream
+// `CallToolResult`; keep this allowance limited to helpers that return it.
+#[cfg_attr(feature = "semantic-knowledge", allow(clippy::result_large_err))]
 fn graph_anchor(line: u32, col: u32) -> Result<(), CallToolResult> {
     if line == 0 {
         return Err(tool_error(
@@ -822,6 +875,7 @@ fn graph_anchor(line: u32, col: u32) -> Result<(), CallToolResult> {
 }
 
 /// CLI-parity page-range check (`--limit` default 50/max 1000, `--offset`).
+#[cfg_attr(feature = "semantic-knowledge", allow(clippy::result_large_err))]
 fn graph_page(
     limit: Option<usize>,
     offset: Option<usize>,
@@ -844,6 +898,7 @@ fn graph_page(
 }
 
 /// CLI-parity depth check (`--depth` default 3, 1-6).
+#[cfg_attr(feature = "semantic-knowledge", allow(clippy::result_large_err))]
 fn graph_depth(depth: Option<usize>) -> Result<usize, CallToolResult> {
     let depth = depth.unwrap_or(3);
     if !(1..=crate::edges::TRACE_MAX_DEPTH).contains(&depth) {
@@ -873,6 +928,7 @@ fn bad_destination() -> CallToolResult {
 }
 
 /// The CLI `--to` grammar: `PATH:LINE:COL`, all positive 1-based numbers.
+#[cfg_attr(feature = "semantic-knowledge", allow(clippy::result_large_err))]
 fn parse_destination(to: &str) -> Result<(&str, u32, u32), CallToolResult> {
     let (rest, col) = to.rsplit_once(':').ok_or_else(bad_destination)?;
     let (path, line) = rest.rsplit_once(':').ok_or_else(bad_destination)?;
@@ -892,6 +948,7 @@ fn missing_index() -> CallToolResult {
 
 /// Registry + recorded-root resolution for the graph and knowledge tools: the
 /// same checks and messages as `repo_status` and the CLI's root resolution.
+#[cfg_attr(feature = "semantic-knowledge", allow(clippy::result_large_err))]
 fn repo_root(repo: &str) -> Result<(PathBuf, PathBuf), CallToolResult> {
     let home = paths::config_dir();
     let reg = match registry::load(&paths::registry_path()) {
@@ -1220,6 +1277,7 @@ fn context_query_error(message: String) -> CallToolResult {
 /// The language server executable: the operator's configuration, never the
 /// request's. An absolute path only — no PATH lookup, no auto-install, no
 /// client-supplied executable or argument.
+#[cfg_attr(feature = "semantic-knowledge", allow(clippy::result_large_err))]
 fn provider_exe() -> Result<String, CallToolResult> {
     let exe = std::env::var("RILTRA_LSP_SERVER").unwrap_or_default();
     if exe.is_empty() || !Path::new(&exe).is_absolute() {
@@ -1279,6 +1337,7 @@ fn semantic_doc(input: &SemanticInput) -> CallToolResult {
 /// CLI-parity page-range check for the knowledge tools (`--limit` default 50,
 /// maximum 1000). The CLI has no extra exit-2 offset bound here, so the
 /// store's own range check stays the guard.
+#[cfg_attr(feature = "semantic-knowledge", allow(clippy::result_large_err))]
 fn knowledge_page(
     limit: Option<usize>,
     offset: Option<usize>,
@@ -1616,7 +1675,7 @@ fn health_doc() -> CallToolResult {
         Ok(value) => value,
         Err(e) => return tool_error("store_error", &e),
     };
-    let value = serde_json::json!({
+    let mut value = serde_json::json!({
         "operation": "health",
         "status": status,
         "doctor": doctor,
@@ -1686,6 +1745,7 @@ fn health_doc() -> CallToolResult {
         },
         "repo_count": reg.repos.len(),
     });
+    json::sort_value_keys(&mut value);
     let text = match serde_json::to_string(&value) {
         Ok(text) => text,
         Err(e) => {
@@ -1728,4 +1788,75 @@ pub(crate) fn run() -> i32 {
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{doc, sorted_tool_definitions, structured_doc, tool_error};
+
+    fn assert_schema_keys_are_sorted(value: &serde_json::Value) {
+        match value {
+            serde_json::Value::Object(object) => {
+                let keys: Vec<_> = object.keys().map(String::as_str).collect();
+                assert!(
+                    keys.windows(2).all(|pair| pair[0] <= pair[1]),
+                    "schema keys are not sorted: {keys:?}"
+                );
+                for value in object.values() {
+                    assert_schema_keys_are_sorted(value);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for value in items {
+                    assert_schema_keys_are_sorted(value);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn tool_schemas_keep_core_key_order() {
+        let tools = sorted_tool_definitions();
+        let code_search = tools
+            .iter()
+            .find(|tool| tool.name == "riltra_code_search")
+            .expect("code search tool");
+        let properties = code_search
+            .input_schema
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .expect("code search properties");
+        let keys: Vec<_> = properties.keys().map(String::as_str).collect();
+        assert_eq!(keys, ["limit", "occurrences", "offset", "query", "repo"]);
+
+        for tool in tools {
+            assert_schema_keys_are_sorted(&serde_json::Value::Object(
+                tool.input_schema.as_ref().clone(),
+            ));
+            if let Some(schema) = tool.output_schema {
+                assert_schema_keys_are_sorted(&serde_json::Value::Object(schema.as_ref().clone()));
+            }
+        }
+    }
+
+    #[test]
+    fn mcp_structured_json_is_recursively_sorted_for_core_byte_compatibility() {
+        let input = r#"{"z":{"y":1,"a":2},"items":[{"d":4,"b":3}],"a":0}"#;
+        let expected = r#"{"a":0,"items":[{"b":3,"d":4}],"z":{"a":2,"y":1}}"#;
+        let parsed = serde_json::from_str(input).unwrap();
+
+        for result in [doc(input), structured_doc(parsed)] {
+            let content = result.content[0].as_text().unwrap();
+            assert_eq!(content.text, expected);
+            let structured = result.structured_content.as_ref().unwrap();
+            assert_eq!(serde_json::to_string(structured).unwrap(), expected);
+        }
+
+        let error = tool_error("invalid_input", "bad input");
+        assert_eq!(
+            error.content[0].as_text().unwrap().text,
+            r#"{"kind":"invalid_input","message":"bad input"}"#
+        );
+    }
 }

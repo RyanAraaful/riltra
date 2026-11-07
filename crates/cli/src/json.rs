@@ -22,9 +22,30 @@ pub fn escape(s: &str) -> String {
     out
 }
 
+/// Recursively match serde_json's default BTreeMap key ordering, even when an
+/// optional dependency enables the `preserve_order` feature for the binary.
+pub fn sort_value_keys(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(object) => {
+            let mut entries: Vec<_> = std::mem::take(object).into_iter().collect();
+            for (_, value) in &mut entries {
+                sort_value_keys(value);
+            }
+            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+            object.extend(entries);
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                sort_value_keys(item);
+            }
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::escape;
+    use super::{escape, sort_value_keys};
 
     #[test]
     fn escapes_quote_backslash_and_newline() {
@@ -46,6 +67,20 @@ mod tests {
         assert_eq!(
             escape("C:\\repos\\riltra-1_2.0"),
             "C:\\\\repos\\\\riltra-1_2.0"
+        );
+    }
+
+    #[test]
+    fn sorts_nested_json_objects_without_reordering_arrays() {
+        let mut value = serde_json::json!({
+            "z": { "y": 1, "a": 2 },
+            "items": [{ "d": 4, "b": 3 }],
+            "a": 0,
+        });
+        sort_value_keys(&mut value);
+        assert_eq!(
+            serde_json::to_string(&value).unwrap(),
+            r#"{"a":0,"items":[{"b":3,"d":4}],"z":{"a":2,"y":1}}"#
         );
     }
 }

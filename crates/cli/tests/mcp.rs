@@ -216,6 +216,19 @@ fn mcp_tools_list_advertises_the_fourteen_tools() {
         ],
         "the server advertises exactly the fourteen tools"
     );
+    let code_search_tool = tools
+        .iter()
+        .find(|tool| tool["name"] == "riltra_code_search")
+        .expect("code search tool");
+    let code_search_properties = code_search_tool["inputSchema"]["properties"]
+        .as_object()
+        .expect("code search properties");
+    let property_names: Vec<_> = code_search_properties.keys().map(String::as_str).collect();
+    assert_eq!(
+        property_names,
+        ["limit", "occurrences", "offset", "query", "repo"],
+        "the tools/list schema retains the core build's alphabetical key order"
+    );
     let context_tool = tools
         .iter()
         .find(|tool| tool["name"] == "riltra_context")

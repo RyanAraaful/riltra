@@ -436,7 +436,7 @@ pub(crate) fn context_query_json(result: &crate::context::ContextResult) -> Resu
         }
         reasons.sort();
         reasons.dedup();
-        let value = serde_json::json!({
+        let mut value = serde_json::json!({
             "schema_version": 1,
             "operation": "context",
             "repo": &trace.repo,
@@ -496,6 +496,7 @@ pub(crate) fn context_query_json(result: &crate::context::ContextResult) -> Resu
                 "omitted_edges": omitted_edges,
             },
         });
+        crate::json::sort_value_keys(&mut value);
         let encoded = serde_json::to_string(&value)
             .map_err(|e| format!("context response assembly failed: {e}"))?;
         if encoded.len() <= result.max_bytes {

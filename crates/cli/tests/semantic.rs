@@ -3,35 +3,137 @@
 //! (Tasks 6-8), and evidence-contract tests. Real-provider gates
 //! (Task 9) live behind env flags and never fake a PASS.
 
-#[test]
-fn new_dependencies_are_audited() {
-    // Versions: resolved by cargo (Cargo.lock). Licenses: crate manifests
-    // surfaced by `cargo tree` ({l} reads the manifest license field;
-    // Cargo.lock records no license fields, so it is never cited for them).
+fn cargo_tree(extra_args: &[&str]) -> String {
+    let mut args = vec![
+        "tree",
+        "-p",
+        "riltra",
+        "--no-default-features",
+        "--prefix",
+        "none",
+        "--format",
+        "{p} [{l}]",
+        "--offline",
+    ];
+    args.extend(extra_args);
+    let out = std::process::Command::new("cargo")
+        .args(args)
+        .output()
+        .expect("cargo tree must run");
+    assert!(out.status.success(), "cargo tree failed");
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+fn feature_tree() -> String {
     let out = std::process::Command::new("cargo")
         .args([
             "tree",
             "-p",
             "riltra",
-            "--prefix",
-            "none",
-            "--no-dedupe",
-            "--format",
-            "{p} [{l}]",
+            "--no-default-features",
+            "--features",
+            "semantic-knowledge",
+            "-e",
+            "features",
             "--offline",
         ])
         .output()
-        .expect("cargo tree must run");
-    assert!(out.status.success(), "cargo tree failed");
-    let text = String::from_utf8_lossy(&out.stdout);
+        .expect("cargo feature tree must run");
+    assert!(out.status.success(), "cargo feature tree failed");
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
 
-    // Exact versions pinned here; bump deliberately with the audit table.
-    // (M5 audit 2026-10-16: serde_json 1.0.154 MIT/Apache-2.0,
-    // protobuf 3.7.2 MIT, protobuf-support 3.7.2 MIT. M8 CP1 2026-10-18,
-    // owner decision D1: rmcp 3.5.1 Apache-2.0, tokio 1.53.3 MIT.
-    // M8 CP3 2026-10-18: rmcp `macros` feature enabled — rmcp-macros 3.5.1
-    // Apache-2.0, same rust-sdk origin. R1 2026-11-06: petgraph 0.8.3
-    // MIT OR Apache-2.0, used only for bounded graph context.)
+fn license_is_reviewed(name: &str, version: &str, expression: &str, optional: bool) -> bool {
+    let expression = expression
+        .replace(" (*)", "")
+        .replace(" / ", " OR ")
+        .replace('/', " OR ");
+    let core = matches!(
+        expression.as_str(),
+        "(MIT OR Apache-2.0) AND Unicode-3.0"
+            | "Apache-2.0"
+            | "Apache-2.0 OR MIT"
+            | "MIT"
+            | "MIT OR Apache-2.0"
+            | "Unlicense OR MIT"
+            | "Zlib"
+    );
+    if core {
+        return true;
+    }
+    optional
+        && (matches!(
+            expression.as_str(),
+            "(Apache-2.0 OR MIT) AND BSD-3-Clause"
+                | "(MIT OR Apache-2.0) AND Apache-2.0"
+                | "0BSD OR MIT OR Apache-2.0"
+                | "Apache-2.0 AND ISC"
+                | "Apache-2.0 AND MIT"
+                | "Apache-2.0 OR BSL-1.0"
+                | "Apache-2.0 OR ISC OR MIT"
+                | "Apache-2.0 OR MIT OR Zlib"
+                | "BSD-2-Clause"
+                | "BSD-2-Clause OR Apache-2.0 OR MIT"
+                | "BSD-3-Clause"
+                | "BSL-1.0"
+                | "CC0-1.0"
+                | "CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception"
+                | "CC0-1.0 OR MIT-0 OR Apache-2.0"
+                | "ISC"
+                | "MIT OR Apache-2.0 OR LGPL-2.1-or-later"
+                | "MIT OR Apache-2.0 OR Zlib"
+                | "MIT OR Zlib OR Apache-2.0"
+                | "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT"
+                | "Zlib OR Apache-2.0 OR MIT"
+                | "Unicode-3.0"
+                | "Unlicense OR MIT"
+                | "Zlib"
+        ) || (name == "option-ext" && version == "0.2.0" && expression == "MPL-2.0"))
+}
+
+fn tree_has_package(tree: &str, name: &str) -> bool {
+    tree.lines().any(|line| {
+        line.rsplit_once(" [")
+            .and_then(|(package, _)| package.split_whitespace().next())
+            == Some(name)
+    })
+}
+
+#[test]
+fn package_audit_matches_a_cargo_tree_package_name_exactly() {
+    assert!(tree_has_package("libloading v0.8.9 [MIT]", "libloading"));
+    assert!(!tree_has_package(
+        "libloading-extra v0.8.9 [MIT]",
+        "libloading"
+    ));
+}
+
+#[test]
+fn license_audit_requires_a_reviewed_complete_expression() {
+    assert!(license_is_reviewed(
+        "unicode-ident",
+        "1.0.27",
+        "(MIT OR Apache-2.0) AND Unicode-3.0",
+        false
+    ));
+    assert!(!license_is_reviewed(
+        "new-crate",
+        "1.0.0",
+        "MIT AND MPL-2.0",
+        false
+    ));
+    assert!(!license_is_reviewed(
+        "other-crate",
+        "0.2.0",
+        "MPL-2.0",
+        true
+    ));
+    assert!(license_is_reviewed("option-ext", "0.2.0", "MPL-2.0", true));
+}
+
+#[test]
+fn new_dependencies_are_audited_for_core_and_semantic_feature_graphs() {
+    let core = cargo_tree(&[]);
     for want in [
         "serde_json v1.0.154 [MIT OR Apache-2.0]",
         "protobuf v3.7.2 [MIT]",
@@ -40,59 +142,75 @@ fn new_dependencies_are_audited() {
         "petgraph v0.8.3 [MIT OR Apache-2.0]",
         "rmcp-macros v3.5.1 (proc-macro) [Apache-2.0]",
     ] {
-        assert!(
-            text.contains(want),
-            "missing audited dependency: {want}\n{text}"
-        );
+        assert!(core.contains(want), "missing core dependency: {want}");
     }
-
-    // Every package in the resolve graph must carry an allowlisted license.
-    // Note: memchr "Unlicense OR MIT" predates M5 (M0-M4 tree); it passes
-    // via the MIT alternative, not as a new M5 approval.
-    // Note: memchr/aho-corasick "Unlicense OR MIT" and foldhash "Zlib"
-    // predate M5 (M0-M4 tree); Unlicense (public-domain dedication) and
-    // Zlib pass as permissive alternatives here, not as new M5 approvals.
-    let allow = [
-        "MIT",
-        "Apache-2.0",
-        "BSD-3-Clause",
-        "ISC",
-        "Zlib",
-        "Unlicense",
-        "Unicode-3.0",
-        "Unicode-DFS-2016",
-    ];
-    let mut bad = Vec::new();
-    for line in text.lines() {
-        if let Some(lic) = line.rsplit('[').next().and_then(|s| s.strip_suffix(']')) {
-            let norm = lic.replace(['(', ')'], "").replace('/', " OR ");
-            let ok = norm
-                .split(" OR ")
-                .flat_map(|x| x.split(" AND "))
-                .all(|x| allow.contains(&x.trim()));
-            if !ok {
-                bad.push(line.to_string());
-            }
-        }
-    }
-    bad.sort();
-    bad.dedup();
-    assert!(bad.is_empty(), "non-allowlisted licenses: {bad:?}");
-
-    // Banned: protoc bridges, non-MCP async runtimes, dynamic loading,
-    // network stacks. tokio is allowed only as the M8 MCP stdio runtime
-    // (owner decision D1, design gate Rev 2); no HTTP/TLS features are on.
     for banned in [
         "protoc-bin-vendored",
         "async-std",
         "libloading",
-        " hyper ",
+        "hyper",
         "reqwest",
         "ureq",
+        "fastembed",
+        "lancedb",
+        "ort",
+        "tokenizers",
+        "hf-hub",
     ] {
         assert!(
-            !text.lines().any(|l| l.contains(banned.trim())),
-            "banned crate in tree: {banned}"
+            !tree_has_package(&core, banned),
+            "core dependency tree contains {banned}"
+        );
+    }
+
+    let semantic = cargo_tree(&["--features", "semantic-knowledge"]);
+    for want in [
+        "fastembed v7.6.0 [Apache-2.0]",
+        "lancedb v0.41.0 [Apache-2.0]",
+        "ort v2.0.0-rc.15 [MIT OR Apache-2.0]",
+        "tokenizers v0.23.2 [Apache-2.0]",
+        "reqwest v0.12.28",
+        "option-ext v0.2.0 [MPL-2.0]",
+    ] {
+        assert!(
+            semantic.contains(want),
+            "missing reviewed optional dependency: {want}"
+        );
+    }
+    for (name, tree, optional) in [
+        ("core", core.as_str(), false),
+        ("semantic", semantic.as_str(), true),
+    ] {
+        let mut bad = Vec::new();
+        for line in tree.lines() {
+            let Some((package, expression)) = line.rsplit_once(" [") else {
+                continue;
+            };
+            let Some(expression) = expression.strip_suffix(']') else {
+                continue;
+            };
+            let mut package = package.split_whitespace();
+            let package_name = package.next().unwrap_or("");
+            let version = package.next().unwrap_or("").strip_prefix('v').unwrap_or("");
+            if !license_is_reviewed(package_name, version, expression, optional) {
+                bad.push(line.to_string());
+            }
+        }
+        assert!(bad.is_empty(), "unreviewed {name} licenses: {bad:?}");
+    }
+
+    let features = feature_tree();
+    assert!(features.contains("fastembed feature \"ort-load-dynamic\""));
+    assert!(features.contains("ort feature \"load-dynamic\""));
+    for forbidden in [
+        "fastembed feature \"hf-hub\"",
+        "fastembed feature \"online\"",
+        "ort feature \"download-binaries\"",
+        "ort feature \"copy-dylibs\"",
+    ] {
+        assert!(
+            !features.contains(forbidden),
+            "optional graph enables {forbidden}"
         );
     }
 }

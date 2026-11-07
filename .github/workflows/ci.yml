@@ -58,6 +58,78 @@ jobs:
       - run: cargo run -q -p riltra -- --version
       - run: cargo run -q -p riltra -- status
 
+  # Source-build preflight for the default-off semantic-knowledge graph.
+  # This does not provision or download the model or ONNX Runtime assets;
+  # native local inference with verified assets is a later integration gate.
+  semantic-knowledge:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: windows-latest, runner: windows-latest }
+          - { name: ubuntu-latest, runner: ubuntu-latest }
+          - { name: macos-15, runner: macos-15-intel }
+    name: semantic-knowledge (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install pinned protoc (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'protoc-33.5.zip'
+          $root = Join-Path $env:RUNNER_TEMP 'protoc-33.5'
+          Invoke-WebRequest -Uri 'https://github.com/protocolbuffers/protobuf/releases/download/v33.5/protoc-33.5-win64.zip' -OutFile $archive
+          $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
+          if ($actual -ne '7e3468cd1fbd1ae9361a5304d4ac28fbd593aa1a425b5464bd9d4da5fca224b4') { throw "protoc archive SHA-256 mismatch: $actual" }
+          Expand-Archive -LiteralPath $archive -DestinationPath $root
+          Add-Content -Path $env:GITHUB_PATH -Value (Join-Path $root 'bin')
+          $version = & (Join-Path $root 'bin/protoc.exe') --version
+          if ($version -ne 'libprotoc 33.5') { throw "unexpected protoc version: $version" }
+      - name: Install pinned protoc (Linux and macOS Intel)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$RUNNER_OS" in
+            Linux)
+              asset=protoc-33.5-linux-x86_64.zip
+              expected=24e58fb231d50306ee28491f33a170301e99540f7e29ca461e0e80fd1239f8d1 ;;
+            macOS)
+              asset=protoc-33.5-osx-x86_64.zip
+              expected=7f31625f8bec4929082ae9209e101c1c03692624457cc6332f83736db495ee92 ;;
+            *) echo "unsupported protoc runner: $RUNNER_OS" >&2; exit 1 ;;
+          esac
+          archive="$RUNNER_TEMP/$asset"
+          curl -fsSL --retry 3 "https://github.com/protocolbuffers/protobuf/releases/download/v33.5/$asset" -o "$archive"
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            actual="$(shasum -a 256 "$archive" | awk '{print $1}')"
+          else
+            actual="$(sha256sum "$archive" | awk '{print $1}')"
+          fi
+          [[ "$actual" == "$expected" ]] || { echo "protoc archive SHA-256 mismatch: $actual" >&2; exit 1; }
+          root="$RUNNER_TEMP/protoc-33.5"
+          mkdir -p "$root"
+          unzip -q "$archive" -d "$root"
+          echo "$root/bin" >> "$GITHUB_PATH"
+          [[ "$("$root/bin/protoc" --version)" == 'libprotoc 33.5' ]]
+      - name: Check all optional-feature targets
+        run: cargo check --locked --no-default-features --features semantic-knowledge --all-targets
+      - name: Test local asset validation and embedding contract
+        run: cargo test --locked --no-default-features --features semantic-knowledge --bin riltra inference::tests
+      - name: Test deterministic MCP JSON with optional feature graph
+        run: cargo test --locked --no-default-features --features semantic-knowledge --bin riltra mcp_structured_json_is_recursively_sorted_for_core_byte_compatibility
+      - name: Test deterministic MCP tool schemas with optional feature graph
+        run: cargo test --locked --no-default-features --features semantic-knowledge --bin riltra tool_schemas_keep_core_key_order
+      - name: Test advertised MCP schema order with optional feature graph
+        run: cargo test --locked --no-default-features --features semantic-knowledge --test mcp mcp_tools_list_advertises_the_fourteen_tools
+      - name: Test core and optional dependency audits
+        run: cargo test --locked --no-default-features --test semantic new_dependencies_are_audited_for_core_and_semantic_feature_graphs
+
   # Phase A of M10 Task 5: a native archive from this commit, installed and
   # checked on each native x64 runner. It complements the `check` matrix and
   # does not replace release-candidate.yml or create a release. The job names
@@ -79,6 +151,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Fetch locked sources for complete SBOM and notices
+        run: cargo fetch --locked
       - name: Release build
         run: cargo build --release --locked -p riltra
       - name: Release documents match the locked dependency graph
